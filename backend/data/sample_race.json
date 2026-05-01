@@ -1,0 +1,62 @@
+{
+  "race_id": "sample-tokyo-11",
+  "model_mode": "ensemble",
+  "risk_level": 48,
+  "bankroll": 100000,
+  "min_edge": 0.08,
+  "max_exposure": 0.02,
+  "runners": [
+    {
+      "id": "t11-01",
+      "gate": 1,
+      "number": 1,
+      "name": "サクラグリッド",
+      "market_odds": 5.8,
+      "place_odds": 2.0,
+      "speed": 91,
+      "stamina": 78,
+      "pace": 84,
+      "condition": 88,
+      "base_win": 0.168
+    },
+    {
+      "id": "t11-03",
+      "gate": 3,
+      "number": 3,
+      "name": "ブルーオービット",
+      "market_odds": 3.0,
+      "place_odds": 1.4,
+      "speed": 94,
+      "stamina": 84,
+      "pace": 88,
+      "condition": 91,
+      "base_win": 0.238
+    },
+    {
+      "id": "t11-05",
+      "gate": 5,
+      "number": 5,
+      "name": "ノーブルリーフ",
+      "market_odds": 4.7,
+      "place_odds": 1.8,
+      "speed": 92,
+      "stamina": 86,
+      "pace": 80,
+      "condition": 94,
+      "base_win": 0.206
+    },
+    {
+      "id": "t11-06",
+      "gate": 6,
+      "number": 6,
+      "name": "レッドバイアス",
+      "market_odds": 18.2,
+      "place_odds": 4.8,
+      "speed": 83,
+      "stamina": 80,
+      "pace": 72,
+      "condition": 77,
+      "base_win": 0.08
+    }
+  ]
+}

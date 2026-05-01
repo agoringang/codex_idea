@@ -1,0 +1,23 @@
+[project]
+name = "racequant-backend"
+version = "0.1.0"
+description = "Python ML service for horse-racing probability and value-bet scoring."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "joblib>=1.4.2",
+  "numpy>=1.26.0",
+  "pandas>=2.2.0",
+  "pydantic>=2.7.0",
+  "scikit-learn>=1.5.0",
+  "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+deep = [
+  "torch>=2.3.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
