@@ -15,41 +15,59 @@ def get_backend_status() -> BackendStatus:
     now = datetime.now(timezone.utc)
     metrics = read_json(Path("models/racequant/metrics.json"))
     backtest = read_json(Path("backtests/smoke-risk72.json"))
-    smoke_rows = int(metrics["rows"]) if metrics else 0
-    smoke_races = int(metrics["races"]) if metrics else 0
+
+    trained_rows = int(metrics["rows"]) if metrics else 0
+    trained_races = int(metrics["races"]) if metrics else 0
     win_test = metrics["targets"]["is_win"]["test"] if metrics else {}
     place_test = metrics["targets"]["is_place"]["test"] if metrics else {}
+    feature_presence = metrics.get("feature_presence", {}) if metrics else {}
 
     return BackendStatus(
-        mode="simulation",
-        provider="jravan",
-        data_window=f"実データ未接続 / smoke {smoke_races} races" if metrics else "未接続: 1986-現在を取得予定",
+        mode="local-trained",
+        provider="netkeiba_csv",
+        data_window=(
+            f"netkeiba CSV学習済み / {trained_races} races / {trained_rows} rows"
+            if metrics
+            else "未接続: 学習用CSV未作成"
+        ),
         last_sync_at=(now - timedelta(minutes=7)).isoformat(),
         next_retrain_at=(now + timedelta(hours=18)).isoformat(),
-        active_model="racequant-trained-smoke-v0" if metrics else "racequant-rank-ensemble-v0-sample",
+        active_model="umalab-netkeiba-trained-v0" if metrics else "umalab-sample-v0",
         stages=[
             BackendStage(
                 id="ingest",
-                label="データ同期",
-                status="blocked",
-                detail="JRA-VAN Data Lab. / CSV実データ未接続。1986年以降のraw投入待ち",
-                records=0,
+                label="データ取得",
+                status="ready" if metrics else "idle",
+                detail=(
+                    f"netkeibaの公開範囲からHTMLを取得し、{trained_races}レース分のCSVを作成済み"
+                    if metrics
+                    else "学習用HTML/CSVの取得待ち"
+                ),
+                records=trained_rows,
                 latency_ms=None,
             ),
             BackendStage(
                 id="normalize",
                 label="正規化",
-                status="idle",
-                detail="レース、出走馬、オッズスナップショット、払戻を標準スキーマ化する設計のみ完了",
-                records=0,
+                status="ready" if metrics else "idle",
+                detail=(
+                    "race_id・出走馬・着順・単勝オッズ・人気・騎手・調教師・馬体重・上がり等を標準列に変換済み"
+                    if metrics
+                    else "CSV作成後に標準スキーマへ変換"
+                ),
+                records=trained_rows,
                 latency_ms=None,
             ),
             BackendStage(
                 id="features",
                 label="特徴量生成",
-                status="idle",
-                detail="タイム、騎手、体重、調教師、血統、オッズ変動などの特徴量カタログを定義",
-                records=0,
+                status="ready" if metrics else "idle",
+                detail=(
+                    "現時点ではオッズ、人気、斤量、馬体重、年齢、上がり、騎手、調教師などを使用。一部の発展特徴量は未生成"
+                    if metrics
+                    else "特徴量カタログを定義済み"
+                ),
+                records=trained_rows,
                 latency_ms=None,
             ),
             BackendStage(
@@ -57,26 +75,30 @@ def get_backend_status() -> BackendStatus:
                 label="モデル学習",
                 status="ready" if metrics else "idle",
                 detail=(
-                    "合成スモークデータでwin/placeモデルを学習済み。実データ投入後に再学習が必要"
+                    "netkeiba CSVからwin/placeモデルを学習済み。時系列寄りのレース単位分割で評価"
                     if metrics
-                    else "実データ投入後に時系列分割で確率校正済みモデルを検証"
+                    else "学習用CSV作成後にモデルを学習"
                 ),
-                records=smoke_rows,
+                records=trained_rows,
                 latency_ms=None,
             ),
             BackendStage(
                 id="inference",
                 label="推論",
-                status="running",
-                detail="サンプル入力で単勝確率と順位分布から全券種の期待値を計算",
-                records=9,
-                latency_ms=95,
+                status="running" if metrics else "idle",
+                detail=(
+                    "学習済みwin/placeモデルを読み込み、単勝確率・複勝圏確率・期待値候補を計算"
+                    if metrics
+                    else "モデル未作成のためサンプル推論のみ"
+                ),
+                records=9 if metrics else 0,
+                latency_ms=95 if metrics else None,
             ),
             BackendStage(
                 id="retrain",
                 label="継続学習",
                 status="idle",
-                detail="確定結果を取り込み、ドリフト検知後に再学習をキュー投入",
+                detail="新しいCSVを追加した場合、再学習してlatest.joblibを更新する設計",
                 records=0,
                 latency_ms=None,
             ),
@@ -84,23 +106,23 @@ def get_backend_status() -> BackendStatus:
         artifacts=[
             ModelArtifact(
                 name="win_probability",
-                version="v0.1.0-smoke" if metrics else "v0.1.0-sample",
+                version="v0.1.0-netkeiba" if metrics else "v0.1.0-sample",
                 target="単勝確率",
                 metric=(
-                    f"smoke test AUC {win_test.get('auc', 0):.3f} / LogLoss {win_test.get('log_loss', 0):.3f}"
+                    f"netkeiba test AUC {win_test.get('auc', 0):.3f} / LogLoss {win_test.get('log_loss', 0):.3f}"
                     if metrics
-                    else "未評価: 実データ学習待ち"
+                    else "未評価: 学習用CSV待ち"
                 ),
                 path="models/racequant/latest.joblib",
             ),
             ModelArtifact(
                 name="place_probability",
-                version="v0.1.0-smoke" if metrics else "v0.1.0-sample",
+                version="v0.1.0-netkeiba" if metrics else "v0.1.0-sample",
                 target="複勝圏確率",
                 metric=(
-                    f"smoke test AUC {place_test.get('auc', 0):.3f} / LogLoss {place_test.get('log_loss', 0):.3f}"
+                    f"netkeiba test AUC {place_test.get('auc', 0):.3f} / LogLoss {place_test.get('log_loss', 0):.3f}"
                     if metrics
-                    else "未評価: 実データ学習待ち"
+                    else "未評価: 学習用CSV待ち"
                 ),
                 path="models/racequant/latest.joblib",
             ),
@@ -108,50 +130,77 @@ def get_backend_status() -> BackendStatus:
                 name="ticket_ev",
                 version="v0.1.0-sample",
                 target="全券種EV",
-                metric=f"smoke ROI {backtest['roi'] * 100:.1f}% / DD {backtest['max_drawdown']:,.0f}" if backtest else "未評価: バックテストCSV待ち",
+                metric=(
+                    f"sample ROI {backtest['roi'] * 100:.1f}% / DD {backtest['max_drawdown']:,.0f}"
+                    if backtest
+                    else "未評価: 実データバックテスト待ち"
+                ),
                 path="models/ticket_ev.joblib",
             ),
         ],
         feature_coverage=[
             FeatureCoverage(
                 group="レース条件",
-                status="missing",
-                fields=["開催日", "場", "距離", "芝/ダート", "馬場", "天候", "クラス", "頭数", "枠順"],
-                source="JRA-VAN / CSV",
-                detail="スキーマ定義済み。実データ未投入",
+                status="ready" if metrics else "missing",
+                fields=["開催日", "場", "距離", "芝/ダート", "馬場", "天候"],
+                source="netkeiba CSV",
+                detail=(
+                    f"venue={feature_presence.get('venue', 0):.0%}, surface={feature_presence.get('surface', 0):.0%}, "
+                    f"going={feature_presence.get('going', 0):.0%}, weather={feature_presence.get('weather', 0):.0%}"
+                    if metrics
+                    else "未作成"
+                ),
             ),
             FeatureCoverage(
                 group="出走馬",
-                status="missing",
-                fields=["馬齢", "性別", "斤量", "馬体重", "馬体重増減", "脚質", "近走成績", "走破タイム", "上がり"],
-                source="JRA-VAN / 公式結果",
-                detail="馬体重は発走約60分前の速報値を取得対象",
+                status="ready" if metrics else "missing",
+                fields=["馬齢", "性別", "斤量", "馬体重", "馬体重増減", "走破タイム", "上がり"],
+                source="netkeiba CSV",
+                detail=(
+                    f"age={feature_presence.get('age', 0):.0%}, horse_weight={feature_presence.get('horse_weight', 0):.0%}, "
+                    f"best_time={feature_presence.get('best_time', 0):.0%}, last600m={feature_presence.get('last600m', 0):.0%}"
+                    if metrics
+                    else "未作成"
+                ),
             ),
             FeatureCoverage(
-                group="人・血統",
-                status="missing",
-                fields=["騎手", "調教師", "馬主", "生産者", "父", "母父", "騎手勝率", "調教師勝率"],
-                source="JRA-VAN",
-                detail="血糖ではなく血統データを特徴量化する想定",
+                group="人・厩舎",
+                status="ready" if metrics else "missing",
+                fields=["騎手", "調教師"],
+                source="netkeiba CSV",
+                detail=(
+                    f"jockey={feature_presence.get('jockey', 0):.0%}, trainer={feature_presence.get('trainer', 0):.0%}"
+                    if metrics
+                    else "未作成"
+                ),
             ),
             FeatureCoverage(
                 group="市場",
-                status="missing",
-                fields=["単勝", "複勝", "枠連", "馬連", "ワイド", "馬単", "3連複", "3連単", "時系列オッズ", "票数"],
-                source="JRA-VAN速報オッズ/時系列オッズ",
-                detail="購入締切時点だけでなく、発走前スナップショットを保持",
+                status="ready" if metrics else "missing",
+                fields=["単勝オッズ", "人気"],
+                source="netkeiba CSV",
+                detail=(
+                    f"market_odds={feature_presence.get('market_odds', 0):.0%}, odds_rank={feature_presence.get('odds_rank', 0):.0%}。"
+                    "時系列オッズや票数は未取得"
+                    if metrics
+                    else "未作成"
+                ),
             ),
             FeatureCoverage(
-                group="結果・払戻",
-                status="missing",
-                fields=["着順", "走破タイム", "着差", "払戻", "返還", "取消", "騎手変更"],
-                source="JRA-VAN速報成績/払戻",
-                detail="的中判定と回収率バックテストのラベル",
+                group="結果",
+                status="ready" if metrics else "missing",
+                fields=["着順", "単勝ラベル", "複勝圏ラベル"],
+                source="netkeiba CSV",
+                detail=(
+                    f"{trained_races}レース、{trained_rows}出走馬分の教師ラベルを作成済み"
+                    if metrics
+                    else "未作成"
+                ),
             ),
         ],
         backtest=BacktestSummary(
             status="sample" if backtest else "not_started",
-            window="synthetic smoke" if backtest else "未実行",
+            window="sample smoke" if backtest else "未実行",
             races=int(backtest["races"]) if backtest else 0,
             bets=int(backtest["bets"]) if backtest else 0,
             total_stake=float(backtest["total_stake"]) if backtest else 0,
@@ -160,14 +209,15 @@ def get_backend_status() -> BackendStatus:
             hit_rate=float(backtest["hit_rate"]) if backtest else 0,
             max_drawdown=float(backtest["max_drawdown"]) if backtest else 0,
             note=(
-                "合成データでのスモーク結果。実レースの回収率ではありません。CSV/JRA-VAN投入後に再計算します。"
+                "現在の回収率表示はサンプルバックテスト。netkeiba CSVに基づく実バックテストは次フェーズで実装"
                 if backtest
-                else "実データが未接続のため、実回収率はまだ出せません。CSV/JRA-VAN投入後に算出します。"
+                else "実データバックテストは未実行"
             ),
         ),
         runtime_notes=[
-            "現状は合成データのスモーク学習。実データ学習済みとは扱わない",
-            "JRA-VAN接続後はmodeをliveへ切替",
-            "バックテストでは購入時点で見えていたオッズだけを使う",
+            "netkeiba CSVからwin/placeモデルを学習済み",
+            "現時点の高いAUCは単勝オッズ・人気など市場情報の寄与を含む",
+            "時系列オッズ、払戻、購入時点制約を入れたバックテストは次フェーズ",
+            "利益保証や勝率100%を目的とせず、期待値候補を検証するための研究用ワークベンチ",
         ],
     )

@@ -126,7 +126,7 @@ class RacePrediction(BaseModel):
 
 
 class SyncJobRequest(BaseModel):
-    provider: Literal["jravan", "csv"] = "jravan"
+    provider: Literal["jravan", "csv", "netkeiba_csv"] = "jravan"
     years: int = Field(default=20, ge=1, le=30)
     include_realtime: bool = True
     raw_path: str | None = None
@@ -156,7 +156,7 @@ class TrainingJobResponse(BaseModel):
 class BackendStage(BaseModel):
     id: str
     label: str
-    status: Literal["idle", "running", "ready", "blocked"]
+    status: Literal["idle", "running", "ready", "blocked", "partial"]
     detail: str
     records: int
     latency_ms: int | None = None
@@ -192,8 +192,8 @@ class BacktestSummary(BaseModel):
 
 
 class BackendStatus(BaseModel):
-    mode: Literal["simulation", "live"]
-    provider: Literal["jravan", "csv"]
+    mode: Literal["simulation", "live", "local-trained"]
+    provider: Literal["jravan", "csv", "netkeiba_csv"]
     data_window: str
     last_sync_at: str
     next_retrain_at: str
@@ -230,7 +230,7 @@ class LiveResult(BaseModel):
 
 class LiveSnapshot(BaseModel):
     race_id: str
-    provider: Literal["jravan", "accessd", "simulation"]
+    provider: Literal["jravan", "accessd", "simulation", "netkeiba_csv"]
     racecard_status: Literal["waiting", "available", "parsed"]
     odds_status: Literal["waiting", "monitoring", "closed"]
     result_status: Literal["waiting", "official"]
@@ -243,7 +243,7 @@ class LiveSnapshot(BaseModel):
 
 
 class LivePollingJobRequest(BaseModel):
-    provider: Literal["jravan", "accessd", "simulation"] = "simulation"
+    provider: Literal["jravan", "accessd", "simulation", "netkeiba_csv"] = "simulation"
     interval_seconds: int = Field(default=60, ge=10, le=600)
     race_ids: list[str] = Field(default_factory=list)
 

@@ -24,6 +24,24 @@ from app.feature_catalog import CATEGORICAL_FEATURES, NUMERIC_FEATURES
 
 FEATURES = [*NUMERIC_FEATURES, *CATEGORICAL_FEATURES]
 
+NUMERIC_COLUMNS = [
+    *NUMERIC_FEATURES,
+    "finish_position",
+    "is_win",
+    "is_place",
+    "gate",
+    "number",
+    "age",
+    "carried_weight",
+    "horse_weight",
+    "horse_weight_diff",
+    "market_odds",
+    "odds_rank",
+    "best_time",
+    "last600m",
+    "distance",
+]
+
 
 def build_pipeline(seed: int) -> Pipeline:
     numeric = Pipeline(steps=[("imputer", SimpleImputer(strategy="median"))])
@@ -53,12 +71,21 @@ def build_pipeline(seed: int) -> Pipeline:
 
 def prepare_frame(path: Path) -> pd.DataFrame:
     frame = pd.read_csv(path)
+
     if "race_id" not in frame:
         raise ValueError("missing required column: race_id")
+
+    frame = frame.replace({pd.NA: None, "": None})
+
+    for column in NUMERIC_COLUMNS:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
     if "is_win" not in frame:
         if "finish_position" not in frame:
             raise ValueError("missing required target: is_win or finish_position")
         frame["is_win"] = (frame["finish_position"] == 1).astype(int)
+
     if "is_place" not in frame:
         if "finish_position" not in frame:
             raise ValueError("missing required target: is_place or finish_position")
@@ -66,15 +93,25 @@ def prepare_frame(path: Path) -> pd.DataFrame:
 
     for column in NUMERIC_FEATURES:
         if column not in frame:
-            frame[column] = pd.NA
+            frame[column] = float("nan")
+        else:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
     for column in CATEGORICAL_FEATURES:
         if column not in frame:
             frame[column] = "unknown"
+        else:
+            frame[column] = frame[column].fillna("unknown").astype(str)
+
+    frame["race_id"] = frame["race_id"].astype(str)
 
     if "race_date" in frame:
-        frame = frame.sort_values(["race_date", "race_id", "number" if "number" in frame else "is_win"])
+        frame["race_date"] = frame["race_date"].fillna("")
+        sort_number = "number" if "number" in frame else "is_win"
+        frame = frame.sort_values(["race_date", "race_id", sort_number])
     else:
-        frame = frame.sort_values(["race_id", "number" if "number" in frame else "is_win"])
+        sort_number = "number" if "number" in frame else "is_win"
+        frame = frame.sort_values(["race_id", sort_number])
 
     return frame.reset_index(drop=True)
 
@@ -91,6 +128,7 @@ def race_split(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
 
     train_cut = max(1, int(len(race_ids) * 0.70))
     valid_cut = max(train_cut + 1, int(len(race_ids) * 0.85))
+
     train_ids = set(race_ids[:train_cut])
     valid_ids = set(race_ids[train_cut:valid_cut])
     test_ids = set(race_ids[valid_cut:])
@@ -105,11 +143,13 @@ def race_split(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
 def binary_metrics(model: Pipeline, frame: pd.DataFrame, target: str) -> dict[str, Any]:
     y_true = frame[target].astype(int)
     probabilities = model.predict_proba(frame[FEATURES])[:, 1]
+
     metrics: dict[str, Any] = {
         "rows": int(len(frame)),
         "positive_rate": float(y_true.mean()),
         "brier": float(brier_score_loss(y_true, probabilities)),
     }
+
     labels = set(y_true.tolist())
     if len(labels) == 2:
         metrics["auc"] = float(roc_auc_score(y_true, probabilities))
@@ -117,15 +157,23 @@ def binary_metrics(model: Pipeline, frame: pd.DataFrame, target: str) -> dict[st
     else:
         metrics["auc"] = None
         metrics["log_loss"] = None
+
     return metrics
 
 
-def train_target(train: pd.DataFrame, valid: pd.DataFrame, test: pd.DataFrame, target: str, seed: int) -> tuple[Pipeline, dict[str, Any]]:
+def train_target(
+    train: pd.DataFrame,
+    valid: pd.DataFrame,
+    test: pd.DataFrame,
+    target: str,
+    seed: int,
+) -> tuple[Pipeline, dict[str, Any]]:
     if train[target].nunique() < 2:
         raise ValueError(f"target {target} has only one class in train split")
 
     pipeline = build_pipeline(seed)
     pipeline.fit(train[FEATURES], train[target].astype(int))
+
     return pipeline, {
         "train": binary_metrics(pipeline, train, target),
         "valid": binary_metrics(pipeline, valid, target),
@@ -178,12 +226,15 @@ def main() -> None:
     }
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
     model_path = args.output_dir / "model.joblib"
     latest_path = args.output_dir / "latest.joblib"
     metrics_path = args.output_dir / "metrics.json"
+
     joblib.dump(artifact, model_path)
     shutil.copyfile(model_path, latest_path)
     metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
 

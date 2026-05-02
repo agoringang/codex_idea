@@ -1,28 +1,79 @@
-node_modules
-.next
-out
-dist
+# =========================
+# Node / Next.js
+# =========================
+node_modules/
+.next/
+out/
+dist/
+build/
 
-.env
-.env.local
-.env.*.local
-
+# logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-.DS_Store
+# env（安全対策）
+.env
+.env.local
+.env.*.local
+!.env.example
 
+# Vercel
+.vercel/
+
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# =========================
+# Python / Backend
+# =========================
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# cache
 .ruff_cache/
 .pytest_cache/
+
+# venv
+.venv/
+venv/
+env/
 backend/.venv/
+
+# =========================
+# ML / Data（超重要）
+# =========================
 backend/models/
 backend/runtime/
 backend/raw/
 backend/normalized/
 backend/features/
 backend/backtests/
-backend/data/*.csv
-backend/data/*.parquet
+
+# datasets
+backend/data/
+*.csv
+*.parquet
+
+# model artifacts
+*.joblib
+*.pkl
+
+# =========================
+# logs
+# =========================
+logs/
+*.log
+
+# =========================
+# misc
+# =========================
+coverage/

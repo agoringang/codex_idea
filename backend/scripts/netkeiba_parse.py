@@ -48,6 +48,10 @@ def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value.replace("\xa0", " ")).strip()
 
 
+def normalize_header(value: str) -> str:
+    return re.sub(r"\s+", "", value)
+
+
 class TableHTMLParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -124,7 +128,7 @@ def cell_text(cell: dict[str, Any]) -> str:
 
 
 def header_index(headers: list[str], candidates: list[str]) -> int | None:
-    normalized = [re.sub(r"\s+", "", header) for header in headers]
+    normalized = [normalize_header(header) for header in headers]
     for candidate in candidates:
         for index, header in enumerate(normalized):
             if candidate in header:
@@ -136,9 +140,16 @@ def find_result_table(tables: list[list[list[dict[str, Any]]]]) -> tuple[list[st
     for table in tables:
         if not table:
             continue
+
         headers = [cell_text(cell) for cell in table[0]]
-        if RESULT_MARKERS.issubset(set(headers)) or all(any(marker in header for header in headers) for marker in RESULT_MARKERS):
-            return headers, table[1:]
+        normalized_headers = [normalize_header(header) for header in headers]
+
+        if RESULT_MARKERS.issubset(set(normalized_headers)) or all(
+            any(marker in header for header in normalized_headers)
+            for marker in RESULT_MARKERS
+        ):
+            return normalized_headers, table[1:]
+
     return None
 
 
@@ -240,6 +251,7 @@ def parse_result_file(path: Path) -> list[dict[str, Any]]:
     result = find_result_table(parser.tables)
     if result is None:
         return []
+
     headers, rows = result
     source_url = source_url_for(path)
     race_id = extract_race_id(source_url, path)
@@ -250,24 +262,25 @@ def parse_result_file(path: Path) -> list[dict[str, Any]]:
         "gate": header_index(headers, ["枠番", "枠"]),
         "number": header_index(headers, ["馬番"]),
         "name": header_index(headers, ["馬名"]),
-        "sex_age": header_index(headers, ["性齢", "性令"]),
+        "sex_age": header_index(headers, ["性齢"]),
         "carried_weight": header_index(headers, ["斤量"]),
         "jockey": header_index(headers, ["騎手"]),
         "time": header_index(headers, ["タイム"]),
-        "last600m": header_index(headers, ["上り", "上がり"]),
-        "odds": header_index(headers, ["単勝", "オッズ"]),
+        "last600m": header_index(headers, ["上り"]),
+        "odds": header_index(headers, ["単勝"]),
         "odds_rank": header_index(headers, ["人気"]),
         "horse_weight": header_index(headers, ["馬体重"]),
-        "trainer": header_index(headers, ["調教師", "厩舎"]),
+        "trainer": header_index(headers, ["調教師"]),
     }
-    required = [idx["finish"], idx["number"], idx["name"]]
-    if any(index is None for index in required):
+
+    if any(idx[k] is None for k in ["finish", "number", "name"]):
         return []
 
-    parsed_rows: list[dict[str, Any]] = []
+    parsed_rows = []
     for row in rows:
         if len(row) < len(headers):
             continue
+
         finish_position = parse_finish(cell_text(row[idx["finish"]]))
         number = parse_int(cell_text(row[idx["number"]]))
         if finish_position is None or number is None:
@@ -275,63 +288,53 @@ def parse_result_file(path: Path) -> list[dict[str, Any]]:
 
         name_cell = row[idx["name"]]
         sex, age = parse_sex_age(cell_text(row[idx["sex_age"]])) if idx["sex_age"] is not None else (None, None)
-        horse_weight, horse_weight_diff = (
-            parse_weight(cell_text(row[idx["horse_weight"]])) if idx["horse_weight"] is not None else (None, None)
-        )
-        runner_id = link_id(name_cell, r"/horse/(\d+)") or f"{race_id}-{number:02d}"
+        horse_weight, horse_weight_diff = parse_weight(cell_text(row[idx["horse_weight"]])) if idx["horse_weight"] is not None else (None, None)
 
-        parsed_rows.append(
-            {
-                "race_id": race_id,
-                "race_date": metadata["race_date"],
-                "runner_id": runner_id,
-                "gate": parse_int(cell_text(row[idx["gate"]])) if idx["gate"] is not None else None,
-                "number": number,
-                "name": cell_text(name_cell),
-                "finish_position": finish_position,
-                "is_win": int(finish_position == 1),
-                "is_place": int(finish_position <= 3),
-                "sex": sex,
-                "age": age,
-                "carried_weight": parse_float(cell_text(row[idx["carried_weight"]])) if idx["carried_weight"] is not None else None,
-                "jockey": cell_text(row[idx["jockey"]]) if idx["jockey"] is not None else None,
-                "trainer": cell_text(row[idx["trainer"]]) if idx["trainer"] is not None else None,
-                "horse_weight": horse_weight,
-                "horse_weight_diff": horse_weight_diff,
-                "market_odds": parse_float(cell_text(row[idx["odds"]])) if idx["odds"] is not None else None,
-                "odds_rank": parse_int(cell_text(row[idx["odds_rank"]])) if idx["odds_rank"] is not None else None,
-                "best_time": parse_time(cell_text(row[idx["time"]])) if idx["time"] is not None else None,
-                "last600m": parse_time(cell_text(row[idx["last600m"]])) if idx["last600m"] is not None else None,
-                "venue": metadata["venue"],
-                "surface": metadata["surface"],
-                "distance": metadata["distance"],
-                "going": metadata["going"],
-                "weather": metadata["weather"],
-                "source_url": source_url,
-            }
-        )
+        parsed_rows.append({
+            "race_id": race_id,
+            "race_date": metadata["race_date"],
+            "runner_id": link_id(name_cell, r"/horse/(\d+)"),
+            "gate": parse_int(cell_text(row[idx["gate"]])) if idx["gate"] is not None else None,
+            "number": number,
+            "name": cell_text(name_cell),
+            "finish_position": finish_position,
+            "is_win": int(finish_position == 1),
+            "is_place": int(finish_position <= 3),
+            "sex": sex,
+            "age": age,
+            "carried_weight": parse_float(cell_text(row[idx["carried_weight"]])) if idx["carried_weight"] is not None else None,
+            "jockey": cell_text(row[idx["jockey"]]) if idx["jockey"] is not None else None,
+            "trainer": cell_text(row[idx["trainer"]]) if idx["trainer"] is not None else None,
+            "horse_weight": horse_weight,
+            "horse_weight_diff": horse_weight_diff,
+            "market_odds": parse_float(cell_text(row[idx["odds"]])) if idx["odds"] is not None else None,
+            "odds_rank": parse_int(cell_text(row[idx["odds_rank"]])) if idx["odds_rank"] is not None else None,
+            "best_time": parse_time(cell_text(row[idx["time"]])) if idx["time"] is not None else None,
+            "last600m": parse_time(cell_text(row[idx["last600m"]])) if idx["last600m"] is not None else None,
+            "venue": metadata["venue"],
+            "surface": metadata["surface"],
+            "distance": metadata["distance"],
+            "going": metadata["going"],
+            "weather": metadata["weather"],
+            "source_url": source_url,
+        })
 
     return parsed_rows
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Parse cached netkeiba result HTML into normalized CSV.")
-    parser.add_argument("--html-dir", default=Path("raw/netkeiba/html"), type=Path)
-    parser.add_argument("--output", default=Path("data/netkeiba_race_history.csv"), type=Path)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--html-dir", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    rows: list[dict[str, Any]] = []
-    for path in sorted(args.html_dir.glob("*.html")):
-        rows.extend(parse_result_file(path))
+    rows = []
+    for p in args.html_dir.glob("*.html"):
+        rows.extend(parse_result_file(p))
 
-    frame = pd.DataFrame(rows)
-    for column in OUTPUT_COLUMNS:
-        if column not in frame:
-            frame[column] = pd.NA
-    frame = frame[OUTPUT_COLUMNS]
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(args.output, index=False)
-    print({"output": str(args.output), "rows": len(frame), "races": int(frame["race_id"].nunique()) if len(frame) else 0})
+    df = pd.DataFrame(rows)
+    df.to_csv(args.output, index=False)
+    print(f"rows={len(df)}")
 
 
 if __name__ == "__main__":
