@@ -55,13 +55,30 @@ CSV に `speed`, `stamina`, `pace`, `condition`, `market_odds`, `distance`, `car
 ```bash
 cd backend
 python scripts/train_baseline.py --csv data/race_history.csv --output models/baseline.joblib
+python scripts/train_production.py --csv data/race_history.csv --output-dir models/racequant
 ```
+
+`models/racequant/latest.joblib` が存在する場合、FastAPI の推論はその学習済み `win/place` モデルを使います。未作成の場合はヒューリスティック推論へフォールバックします。
+
+netkeibaの公開ページを個人研究用にCSV化する場合:
+
+```bash
+cd backend
+uv run python scripts/netkeiba_generate_list_urls.py --start-year 2006 --end-year 2026 --output data/netkeiba_list_urls.txt
+uv run python scripts/netkeiba_fetch.py --url-file data/netkeiba_list_urls.txt --output-dir raw/netkeiba/list_html --manifest raw/netkeiba/list_manifest.csv --delay-seconds 10
+uv run python scripts/netkeiba_extract_race_urls.py --html-dir raw/netkeiba/list_html --output data/netkeiba_race_urls.txt
+uv run python scripts/netkeiba_fetch.py --url-file data/netkeiba_race_urls.txt --output-dir raw/netkeiba/html --manifest raw/netkeiba/race_manifest.csv --delay-seconds 10
+uv run python scripts/netkeiba_parse.py --html-dir raw/netkeiba/html --output data/netkeiba_race_history.csv
+```
+
+ログイン後・有料ページ・通信制限回避は対象外です。取得CSVは公開せず、学習用のローカルファイルとして扱います。
 
 ## Data Phase
 
 実データ学習は `backend/docs/data_pipeline.md` の流れで進めます。
 
-- 約20年分の過去データを `raw/` に保存
+- JRA-VAN/CSVから取得可能な最大年数の過去データを `raw/` に保存
+- JRA-VAN公式データは1986年以降が中心。50年分は提供元に存在する範囲までに制限されます
 - レース、出走馬、オッズスナップショット、払戻、結果を正規化
 - 単勝・複勝確率を学習
 - 順位分布から枠連、馬連、ワイド、馬単、3連複、3連単、WIN5へ展開

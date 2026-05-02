@@ -21,6 +21,10 @@ def value(row: pd.Series, column: str, default: Any = None) -> Any:
     return row[column]
 
 
+def bounded_float(row: pd.Series, column: str, default: float, lower: float, upper: float) -> float:
+    return min(max(float(value(row, column, default)), lower), upper)
+
+
 def runner_input(row: pd.Series) -> RunnerInput:
     payload: dict[str, Any] = {
         "id": str(value(row, "runner_id", f"{row['race_id']}-{row['number']}")),
@@ -29,11 +33,11 @@ def runner_input(row: pd.Series) -> RunnerInput:
         "name": str(value(row, "name", row["number"])),
         "market_odds": float(value(row, "market_odds", 10.0)),
         "place_odds": float(value(row, "place_odds", 2.0)),
-        "speed": float(value(row, "speed", 72.0)),
-        "stamina": float(value(row, "stamina", 72.0)),
-        "pace": float(value(row, "pace", 72.0)),
-        "condition": float(value(row, "condition", 72.0)),
-        "base_win": float(value(row, "base_win", 0.06)),
+        "speed": bounded_float(row, "speed", 72.0, 0, 100),
+        "stamina": bounded_float(row, "stamina", 72.0, 0, 100),
+        "pace": bounded_float(row, "pace", 72.0, 0, 100),
+        "condition": bounded_float(row, "condition", 72.0, 0, 100),
+        "base_win": bounded_float(row, "base_win", 0.06, 0.0001, 0.999),
     }
 
     for column in NUMERIC_FEATURES:

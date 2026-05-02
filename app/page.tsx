@@ -376,16 +376,16 @@ const liveSnapshots: Record<string, LiveSnapshot> = {
 };
 
 const backtestSummary = {
-  status: "実データ未接続",
-  window: "2006-2026 取得予定",
-  races: 0,
-  bets: 0,
-  totalStake: 0,
-  totalPayout: 0,
-  roi: 0,
-  hitRate: 0,
-  maxDrawdown: 0,
-  note: "まだ20年分の実データでは再学習・バックテストしていません。",
+  status: "スモーク完了",
+  window: "synthetic 1,200R",
+  races: 1200,
+  bets: 14243,
+  totalStake: 14268700,
+  totalPayout: 18451016,
+  roi: 1.2931,
+  hitRate: 0.04,
+  maxDrawdown: 2329887,
+  note: "合成データでの動作確認。実レースの回収率ではなく、実データ投入後に再計算します。",
 };
 
 const dataCoverage = [
@@ -1238,6 +1238,22 @@ export default function Home() {
               <article>
                 <span>的中率</span>
                 <strong>{formatPercent(backtestSummary.hitRate)}</strong>
+              </article>
+              <article>
+                <span>賭け金</span>
+                <strong>{formatYen(backtestSummary.totalStake)}</strong>
+              </article>
+              <article>
+                <span>払戻</span>
+                <strong>{formatYen(backtestSummary.totalPayout)}</strong>
+              </article>
+              <article>
+                <span>最大DD</span>
+                <strong>{formatYen(backtestSummary.maxDrawdown)}</strong>
+              </article>
+              <article>
+                <span>買い目</span>
+                <strong>{backtestSummary.bets.toLocaleString("ja-JP")}</strong>
               </article>
             </div>
             <p>{backtestSummary.note}</p>

@@ -3,6 +3,7 @@ from itertools import combinations, permutations
 
 from .features import clamp, raw_probability_score
 from .schemas import BetRecommendation, BetType, RacePrediction, RaceRequest, RunnerPrediction
+from .trained_model import predict_probabilities
 
 
 PAYOUT_RATES: dict[BetType, float] = {
@@ -293,14 +294,23 @@ def diversify_recommendations(
 
 
 def predict_race(request: RaceRequest) -> RacePrediction:
-    raw_scores = [raw_probability_score(runner, request.model_mode) for runner in request.runners]
+    trained_probabilities = predict_probabilities(request.runners)
+    if trained_probabilities is None:
+        raw_scores = [raw_probability_score(runner, request.model_mode) for runner in request.runners]
+        trained_place_probabilities: list[float] | None = None
+    else:
+        raw_scores, trained_place_probabilities = trained_probabilities
+
     total = sum(raw_scores)
 
     runner_predictions: list[RunnerPrediction] = []
 
-    for runner, raw_score in zip(request.runners, raw_scores, strict=True):
+    for index, (runner, raw_score) in enumerate(zip(request.runners, raw_scores, strict=True)):
         win_probability = raw_score / total
-        place_probability = clamp(win_probability * 2.35 + runner.condition / 520, 0.16, 0.82)
+        if trained_place_probabilities is None:
+            place_probability = clamp(win_probability * 2.35 + runner.condition / 520, 0.16, 0.82)
+        else:
+            place_probability = clamp(trained_place_probabilities[index], 0.08, 0.86)
         fair_odds = 1 / win_probability
         edge = win_probability * runner.market_odds - 1
         score = win_probability * 56 + edge * 24 + runner.condition / 8 + runner.speed / 12

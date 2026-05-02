@@ -24,3 +24,5 @@ backend/raw/
 backend/normalized/
 backend/features/
 backend/backtests/
+backend/data/*.csv
+backend/data/*.parquet

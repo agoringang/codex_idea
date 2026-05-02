@@ -1,24 +1,38 @@
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from .schemas import BackendStage, BackendStatus, BacktestSummary, FeatureCoverage, ModelArtifact
 
 
+def read_json(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def get_backend_status() -> BackendStatus:
     now = datetime.now(timezone.utc)
+    metrics = read_json(Path("models/racequant/metrics.json"))
+    backtest = read_json(Path("backtests/smoke-risk72.json"))
+    smoke_rows = int(metrics["rows"]) if metrics else 0
+    smoke_races = int(metrics["races"]) if metrics else 0
+    win_test = metrics["targets"]["is_win"]["test"] if metrics else {}
+    place_test = metrics["targets"]["is_place"]["test"] if metrics else {}
 
     return BackendStatus(
         mode="simulation",
         provider="jravan",
-        data_window="未接続: 2006-2026を取得予定",
+        data_window=f"実データ未接続 / smoke {smoke_races} races" if metrics else "未接続: 1986-現在を取得予定",
         last_sync_at=(now - timedelta(minutes=7)).isoformat(),
         next_retrain_at=(now + timedelta(hours=18)).isoformat(),
-        active_model="racequant-rank-ensemble-v0-sample",
+        active_model="racequant-trained-smoke-v0" if metrics else "racequant-rank-ensemble-v0-sample",
         stages=[
             BackendStage(
                 id="ingest",
                 label="データ同期",
                 status="blocked",
-                detail="JRA-VAN Data Lab. / CSV実データ未接続。20年分のraw投入待ち",
+                detail="JRA-VAN Data Lab. / CSV実データ未接続。1986年以降のraw投入待ち",
                 records=0,
                 latency_ms=None,
             ),
@@ -41,9 +55,13 @@ def get_backend_status() -> BackendStatus:
             BackendStage(
                 id="training",
                 label="モデル学習",
-                status="idle",
-                detail="実データ投入後に時系列分割で確率校正済みモデルを検証",
-                records=0,
+                status="ready" if metrics else "idle",
+                detail=(
+                    "合成スモークデータでwin/placeモデルを学習済み。実データ投入後に再学習が必要"
+                    if metrics
+                    else "実データ投入後に時系列分割で確率校正済みモデルを検証"
+                ),
+                records=smoke_rows,
                 latency_ms=None,
             ),
             BackendStage(
@@ -66,23 +84,31 @@ def get_backend_status() -> BackendStatus:
         artifacts=[
             ModelArtifact(
                 name="win_probability",
-                version="v0.1.0-sample",
+                version="v0.1.0-smoke" if metrics else "v0.1.0-sample",
                 target="単勝確率",
-                metric="未評価: 実データ学習待ち",
-                path="models/win_probability.joblib",
+                metric=(
+                    f"smoke test AUC {win_test.get('auc', 0):.3f} / LogLoss {win_test.get('log_loss', 0):.3f}"
+                    if metrics
+                    else "未評価: 実データ学習待ち"
+                ),
+                path="models/racequant/latest.joblib",
             ),
             ModelArtifact(
-                name="rank_distribution",
-                version="v0.1.0-sample",
-                target="順位分布",
-                metric="未評価: 実データ学習待ち",
-                path="models/rank_distribution.joblib",
+                name="place_probability",
+                version="v0.1.0-smoke" if metrics else "v0.1.0-sample",
+                target="複勝圏確率",
+                metric=(
+                    f"smoke test AUC {place_test.get('auc', 0):.3f} / LogLoss {place_test.get('log_loss', 0):.3f}"
+                    if metrics
+                    else "未評価: 実データ学習待ち"
+                ),
+                path="models/racequant/latest.joblib",
             ),
             ModelArtifact(
                 name="ticket_ev",
                 version="v0.1.0-sample",
                 target="全券種EV",
-                metric="未評価: バックテストCSV待ち",
+                metric=f"smoke ROI {backtest['roi'] * 100:.1f}% / DD {backtest['max_drawdown']:,.0f}" if backtest else "未評価: バックテストCSV待ち",
                 path="models/ticket_ev.joblib",
             ),
         ],
@@ -124,19 +150,23 @@ def get_backend_status() -> BackendStatus:
             ),
         ],
         backtest=BacktestSummary(
-            status="not_started",
-            window="未実行",
-            races=0,
-            bets=0,
-            total_stake=0,
-            total_payout=0,
-            roi=0,
-            hit_rate=0,
-            max_drawdown=0,
-            note="20年分の実データが未接続のため、実回収率はまだ出せません。CSV/JRA-VAN投入後に算出します。",
+            status="sample" if backtest else "not_started",
+            window="synthetic smoke" if backtest else "未実行",
+            races=int(backtest["races"]) if backtest else 0,
+            bets=int(backtest["bets"]) if backtest else 0,
+            total_stake=float(backtest["total_stake"]) if backtest else 0,
+            total_payout=float(backtest["total_payout"]) if backtest else 0,
+            roi=float(backtest["roi"]) if backtest else 0,
+            hit_rate=float(backtest["hit_rate"]) if backtest else 0,
+            max_drawdown=float(backtest["max_drawdown"]) if backtest else 0,
+            note=(
+                "合成データでのスモーク結果。実レースの回収率ではありません。CSV/JRA-VAN投入後に再計算します。"
+                if backtest
+                else "実データが未接続のため、実回収率はまだ出せません。CSV/JRA-VAN投入後に算出します。"
+            ),
         ),
         runtime_notes=[
-            "現状はサンプル推論。実データ学習済みとは扱わない",
+            "現状は合成データのスモーク学習。実データ学習済みとは扱わない",
             "JRA-VAN接続後はmodeをliveへ切替",
             "バックテストでは購入時点で見えていたオッズだけを使う",
         ],
