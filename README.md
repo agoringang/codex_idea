@@ -1,4 +1,4 @@
-# RaceQuant Lab
+# UmaLab
 
 Python ML で競馬の勝率・期待値・賭け金を計算し、Next.js で確認する予想ワークベンチです。
 
