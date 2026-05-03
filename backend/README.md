@@ -83,6 +83,12 @@ Parse cached HTML to normalized CSV:
 uv run python scripts/netkeiba_parse.py --html-dir raw/netkeiba/html --output data/netkeiba_race_history.csv
 ```
 
+Convert local `data/keiba_data/*.CSV` (cp932/Shift_JIS, fixed 52 columns) to a normalized training CSV:
+
+```bash
+uv run python scripts/convert_keiba_data.py --input-dir data/keiba_data --output data/keiba_history_normalized.csv
+```
+
 Then train:
 
 ```bash

@@ -59,7 +59,9 @@ backend/features/
 backend/backtests/
 
 # datasets
-backend/data/
+backend/data/**
+!backend/data/
+!backend/data/README.md
 *.csv
 *.parquet
 

@@ -313,7 +313,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             place_probability = clamp(trained_place_probabilities[index], 0.08, 0.86)
         fair_odds = 1 / win_probability
         edge = win_probability * runner.market_odds - 1
-        score = win_probability * 56 + edge * 24 + runner.condition / 8 + runner.speed / 12
+        score = win_probability * 70 + place_probability * 18 + edge * 14 + runner.condition / 10 + runner.speed / 16
 
         runner_predictions.append(
             RunnerPrediction(
@@ -332,6 +332,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
 
     runner_predictions.sort(key=lambda item: item.score, reverse=True)
     recommendations: list[BetRecommendation] = []
+    top_candidates = runner_predictions[:6]
 
     for runner in runner_predictions:
         add_candidate(
@@ -363,7 +364,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             odds=(runner.market_odds + place_odds) / 2,
         )
 
-    for pair in combinations(runner_predictions, 2):
+    for pair in combinations(top_candidates, 2):
         quinella_probability = clamp(2.18 * pair[0].win_probability * pair[1].win_probability, 0.004, 0.36)
         wide_probability = clamp(pair[0].place_probability * pair[1].place_probability * 0.92, 0.02, 0.62)
         bracket_probability = clamp(quinella_probability * 1.08, 0.004, 0.42)
@@ -396,7 +397,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             odds=synthetic_odds("bracket_quinella", bracket_probability, pair, 0.04),
         )
 
-    for pair in permutations(runner_predictions[:8], 2):
+    for pair in permutations(top_candidates, 2):
         probability = clamp(pair[0].win_probability * pair[1].win_probability * 1.34, 0.002, 0.24)
         add_candidate(
             recommendations,
@@ -408,7 +409,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             odds=synthetic_odds("exacta", probability, pair, 0.16),
         )
 
-    for trio in combinations(runner_predictions[:8], 3):
+    for trio in combinations(top_candidates, 3):
         probability = clamp(
             trio[0].win_probability * trio[1].win_probability * trio[2].win_probability * 7.4,
             0.001,
@@ -424,7 +425,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             odds=synthetic_odds("trio", probability, trio, 0.20),
         )
 
-    for trio in permutations(runner_predictions[:7], 3):
+    for trio in permutations(top_candidates[:5], 3):
         probability = trifecta_order_probability(trio)
         add_candidate(
             recommendations,
@@ -436,8 +437,8 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             odds=synthetic_odds("trifecta", probability, trio, 0.24),
         )
 
-    if len(runner_predictions) >= 5:
-        top = runner_predictions[:6]
+    if len(top_candidates) >= 5:
+        top = top_candidates
         add_trifecta_strategy(
             recommendations,
             request=request,

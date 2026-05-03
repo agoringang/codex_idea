@@ -3,6 +3,35 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+# Frontend-compatible types
+class Runner(BaseModel):
+    number: int
+    gate: int
+    name: str
+    jockey: str
+    weight: str | None = None # Added to match frontend
+    rating: int
+    odds: float
+    tags: list[str]
+
+
+class Race(BaseModel):
+    id: str
+    date: str
+    day: str
+    venue: str
+    meeting: str
+    raceNo: str
+    start: str
+    title: str
+    grade: str | None = None
+    course: str
+    status: str
+    officialNote: str
+    source: str | None = None # Added to match frontend
+    runners: list[Runner]
+
+
 ModelMode = Literal["ensemble", "deep", "value"]
 BetType = Literal[
     "win",
@@ -172,14 +201,14 @@ class ModelArtifact(BaseModel):
 
 class FeatureCoverage(BaseModel):
     group: str
-    status: Literal["ready", "partial", "missing"]
+    status: str # Literal["ready", "partial", "missing"]
     fields: list[str]
     source: str
     detail: str
 
 
 class BacktestSummary(BaseModel):
-    status: Literal["not_started", "sample", "ready"]
+    status: str # Literal["not_started", "sample", "ready"]
     window: str
     races: int
     bets: int
@@ -192,11 +221,9 @@ class BacktestSummary(BaseModel):
 
 
 class BackendStatus(BaseModel):
-    mode: Literal["simulation", "live", "local-trained"]
-    provider: Literal["jravan", "csv", "netkeiba_csv"]
+    mode: str # Literal["simulation", "live", "local-trained"]
+    provider: str # Literal["jravan", "csv", "netkeiba_csv"]
     data_window: str
-    last_sync_at: str
-    next_retrain_at: str
     active_model: str
     stages: list[BackendStage]
     artifacts: list[ModelArtifact]
@@ -222,15 +249,14 @@ class LiveScratch(BaseModel):
 
 
 class LiveResult(BaseModel):
-    status: Literal["pending", "hit", "miss", "refund"]
+    status: Literal["pending", "hit", "miss", "refund", "official"]
     payout: float = 0
     message: str
     winning_selection: str | None = None
+    order: list[int] | None = None
 
 
 class LiveSnapshot(BaseModel):
-    race_id: str
-    provider: Literal["jravan", "accessd", "simulation", "netkeiba_csv"]
     racecard_status: Literal["waiting", "available", "parsed"]
     odds_status: Literal["waiting", "monitoring", "closed"]
     result_status: Literal["waiting", "official"]

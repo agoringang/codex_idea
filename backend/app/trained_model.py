@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import os
-from functools import lru_cache
 from pathlib import Path
-from typing import Any
-
-import joblib
 import pandas as pd
 
 from .feature_catalog import CATEGORICAL_FEATURES, NUMERIC_FEATURES
+from .ml_pipeline import load_artifact
 from .schemas import RunnerInput
 
 
@@ -17,14 +14,6 @@ DEFAULT_MODEL_PATH = Path("models/racequant/latest.joblib")
 
 def configured_model_path() -> Path:
     return Path(os.environ.get("RACEQUANT_MODEL_PATH", DEFAULT_MODEL_PATH))
-
-
-@lru_cache(maxsize=4)
-def load_artifact(path_text: str) -> dict[str, Any] | None:
-    path = Path(path_text)
-    if not path.exists():
-        return None
-    return joblib.load(path)
 
 
 def runner_frame(runners: list[RunnerInput]) -> pd.DataFrame:
