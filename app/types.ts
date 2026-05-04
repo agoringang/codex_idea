@@ -212,3 +212,71 @@ export type BackendStatus = {
   runtime_notes: string[];
 
 };
+
+export type ApiRunnerPrediction = {
+  id: string;
+  gate: number;
+  number: number;
+  name: string;
+  win_probability: number;
+  place_probability: number;
+  fair_odds: number;
+  market_odds: number;
+  edge: number;
+  score: number;
+};
+
+export type ApiBetRecommendation = {
+  selection: string;
+  note: string;
+  bet_type:
+    | "win"
+    | "place"
+    | "support"
+    | "bracket_quinella"
+    | "quinella"
+    | "wide"
+    | "exacta"
+    | "trio"
+    | "trifecta"
+    | "win5";
+  strategy?: string;
+  tickets?: number;
+  unit_stake?: number;
+  covered_selections?: string[];
+  probability: number;
+  odds: number;
+  edge: number;
+  kelly_fraction: number;
+  stake: number;
+};
+
+export type ApiRacePrediction = {
+  race_id: string;
+  model_mode: "ensemble" | "deep" | "value";
+  runners: ApiRunnerPrediction[];
+  recommendations: ApiBetRecommendation[];
+  total_stake: number;
+  expected_return: number;
+  expected_roi: number;
+  warning: string;
+};
+
+export type PredictionProofEntry = {
+  raceId: string;
+  title: string;
+  date: string;
+  venue: string;
+  predictedTop: number;
+  actualTop: number;
+  topHit: boolean;
+  predictedTop3: number[];
+  actualTop3: number[];
+  top3HitCount: number;
+};
+
+export type PredictionProofSummary = {
+  checkedRaces: number;
+  topHitRate: number;
+  avgTop3HitCount: number;
+};

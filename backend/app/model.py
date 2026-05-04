@@ -1,3 +1,4 @@
+import math
 from collections.abc import Iterable, Sequence
 from itertools import combinations, permutations
 
@@ -301,7 +302,12 @@ def predict_race(request: RaceRequest) -> RacePrediction:
     else:
         raw_scores, trained_place_probabilities = trained_probabilities
 
+    raw_scores = [max(float(score), 1e-6) if math.isfinite(float(score)) else 1e-6 for score in raw_scores]
     total = sum(raw_scores)
+    if not math.isfinite(total) or total <= 0:
+        # Guard against pathological all-zero scores in heuristic mode.
+        raw_scores = [max(float(runner.base_win), 1e-6) for runner in request.runners]
+        total = sum(raw_scores)
 
     runner_predictions: list[RunnerPrediction] = []
 

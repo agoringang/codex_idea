@@ -26,13 +26,16 @@ def bounded_float(row: pd.Series, column: str, default: float, lower: float, upp
 
 
 def runner_input(row: pd.Series) -> RunnerInput:
+    market_odds = max(float(value(row, "market_odds", 10.0)), 1.1)
+    place_odds = max(float(value(row, "place_odds", 2.0)), 1.1)
+
     payload: dict[str, Any] = {
         "id": str(value(row, "runner_id", f"{row['race_id']}-{row['number']}")),
-        "gate": int(value(row, "gate", 1)),
+        "gate": min(max(int(value(row, "gate", 1)), 1), 8),
         "number": int(row["number"]),
         "name": str(value(row, "name", row["number"])),
-        "market_odds": float(value(row, "market_odds", 10.0)),
-        "place_odds": float(value(row, "place_odds", 2.0)),
+        "market_odds": market_odds,
+        "place_odds": place_odds,
         "speed": bounded_float(row, "speed", 72.0, 0, 100),
         "stamina": bounded_float(row, "stamina", 72.0, 0, 100),
         "pace": bounded_float(row, "pace", 72.0, 0, 100),
@@ -40,9 +43,23 @@ def runner_input(row: pd.Series) -> RunnerInput:
         "base_win": bounded_float(row, "base_win", 0.06, 0.0001, 0.999),
     }
 
+    odds_rank = value(row, "odds_rank")
+    if odds_rank is not None and not pd.isna(odds_rank):
+        payload["odds_rank"] = max(int(float(odds_rank)), 1)
+
     for column in NUMERIC_FEATURES:
         if column not in payload and column in row and not pd.isna(row[column]):
-            payload[column] = float(row[column])
+            numeric_value = float(row[column])
+            if column in {"jockey_win_rate", "trainer_win_rate", "horse_recent_win_rate", "horse_recent_place_rate", "ticket_pool_share"}:
+                payload[column] = min(max(numeric_value, 0.0), 1.0)
+            elif column in {"training_score", "bloodline_score"}:
+                payload[column] = min(max(numeric_value, 0.0), 100.0)
+            elif column in {"distance", "age", "days_since_last_run"}:
+                payload[column] = max(int(numeric_value), 0)
+            elif column == "odds_rank":
+                payload[column] = max(int(numeric_value), 1)
+            else:
+                payload[column] = numeric_value
     for column in CATEGORICAL_FEATURES:
         if column in row and not pd.isna(row[column]):
             payload[column] = str(row[column])

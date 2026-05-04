@@ -22,7 +22,18 @@ import {
   WalletCards,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { Race, PricedRunner, Bet, LiveSnapshot, BackendStatus, RaceStatus } from "./types";
+import type {
+  Race,
+  PricedRunner,
+  Bet,
+  LiveSnapshot,
+  BackendStatus,
+  RaceStatus,
+  ApiRacePrediction,
+  ApiBetRecommendation,
+  PredictionProofEntry,
+  PredictionProofSummary,
+} from "./types";
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -288,6 +299,178 @@ function defaultLiveSnapshot(race: Race): LiveSnapshot {
   };
 }
 
+function normalizeSnapshot(raw: any): LiveSnapshot {
+  return {
+    racecardStatus: raw?.racecardStatus ?? raw?.racecard_status ?? "waiting",
+    oddsStatus: raw?.oddsStatus ?? raw?.odds_status ?? "waiting",
+    resultStatus: raw?.resultStatus ?? raw?.result_status ?? "waiting",
+    nextPollSeconds: raw?.nextPollSeconds ?? raw?.next_poll_seconds ?? 120,
+    updatedAt: raw?.updatedAt ?? raw?.updated_at ?? "未更新",
+    oddsMoves: (raw?.oddsMoves ?? raw?.odds_moves ?? []).map((move: any) => ({
+      number: move.number,
+      name: move.name,
+      previousOdds: move.previousOdds ?? move.previous_odds,
+      currentOdds: move.currentOdds ?? move.current_odds,
+      direction: move.direction,
+      reason: move.reason,
+    })),
+    scratches: (raw?.scratches ?? []).map((scratch: any) => ({
+      number: scratch.number,
+      name: scratch.name,
+      reason: scratch.reason,
+      announcedAt: scratch.announcedAt ?? scratch.announced_at,
+    })),
+    result: {
+      status: raw?.result?.status ?? "pending",
+      message: raw?.result?.message ?? "結果確定待ち",
+      payout: raw?.result?.payout,
+      winningSelection: raw?.result?.winningSelection ?? raw?.result?.winning_selection,
+      order: raw?.result?.order,
+    },
+    alerts: raw?.alerts ?? [],
+  };
+}
+
+const BET_LABELS: Record<ApiBetRecommendation["bet_type"], Bet["type"]> = {
+  win: "単勝",
+  place: "複勝",
+  support: "複勝",
+  bracket_quinella: "枠連",
+  quinella: "馬連",
+  wide: "ワイド",
+  exacta: "馬単",
+  trio: "3連複",
+  trifecta: "3連単",
+  win5: "3連単",
+};
+
+function buildPredictPayload(race: Race, bankroll: number, risk: number) {
+  const baseWin = 1 / Math.max(race.runners.length, 2);
+  return {
+    race_id: race.id,
+    model_mode: "ensemble",
+    risk_level: risk,
+    bankroll,
+    min_edge: 0,
+    max_exposure: 0.04,
+    runners: race.runners.map((runner) => ({
+      id: `${race.id}-${runner.number}`,
+      gate: clamp(runner.gate, 1, 8),
+      number: Math.max(runner.number, 1),
+      name: runner.name,
+      market_odds: Math.max(runner.odds || 10, 1.1),
+      place_odds: Math.max((runner.odds || 10) / 3, 1.1),
+      speed: clamp(runner.rating || 72, 0, 100),
+      stamina: clamp((runner.rating || 72) - 1, 0, 100),
+      pace: clamp((runner.rating || 72) - 2, 0, 100),
+      condition: clamp((runner.rating || 72) + 1, 0, 100),
+      base_win: clamp(baseWin, 0.0001, 0.99),
+      odds_rank: Math.max(runner.number, 1),
+      jockey: runner.jockey,
+      running_style: runner.tags?.join("/") || undefined,
+    })),
+  };
+}
+
+function normalizeSelectionText(selection: string, unordered = false) {
+  const parts = selection
+    .split("-")
+    .map((part) => part.trim())
+    .filter((part) => /^\d+$/.test(part));
+  if (unordered) return parts.sort((a, b) => Number(a) - Number(b)).join("-");
+  return parts.join("-");
+}
+
+function isApiRecommendationHit(recommendation: ApiBetRecommendation, order?: number[]) {
+  if (!order || order.length < 3) return false;
+  const [first, second, third] = order;
+  const top3 = [first, second, third];
+  const covered = (recommendation.covered_selections && recommendation.covered_selections.length > 0
+    ? recommendation.covered_selections
+    : [recommendation.selection]
+  ).map((item) => item.trim());
+
+  if (recommendation.bet_type === "win") {
+    return covered.some((item) => Number(item) === first);
+  }
+  if (recommendation.bet_type === "place" || recommendation.bet_type === "support") {
+    return covered.some((item) => top3.includes(Number(item)));
+  }
+  if (recommendation.bet_type === "wide") {
+    const winningPairs = new Set([
+      normalizeSelectionText(`${first}-${second}`, true),
+      normalizeSelectionText(`${first}-${third}`, true),
+      normalizeSelectionText(`${second}-${third}`, true),
+    ]);
+    return covered.some((item) => winningPairs.has(normalizeSelectionText(item, true)));
+  }
+  if (recommendation.bet_type === "quinella" || recommendation.bet_type === "bracket_quinella") {
+    const target = normalizeSelectionText(`${first}-${second}`, true);
+    return covered.some((item) => normalizeSelectionText(item, true) === target);
+  }
+  if (recommendation.bet_type === "exacta") {
+    const target = normalizeSelectionText(`${first}-${second}`, false);
+    return covered.some((item) => normalizeSelectionText(item, false) === target);
+  }
+  if (recommendation.bet_type === "trio") {
+    const target = normalizeSelectionText(`${first}-${second}-${third}`, true);
+    return covered.some((item) => normalizeSelectionText(item, true) === target);
+  }
+  if (recommendation.bet_type === "trifecta" || recommendation.bet_type === "win5") {
+    const target = normalizeSelectionText(`${first}-${second}-${third}`, false);
+    return covered.some((item) => normalizeSelectionText(item, false) === target);
+  }
+  return false;
+}
+
+function apiBetsToUiBets(prediction: ApiRacePrediction, order?: number[]): Bet[] {
+  return prediction.recommendations.map((recommendation) => ({
+    type: BET_LABELS[recommendation.bet_type],
+    strategy: recommendation.strategy,
+    selection: recommendation.selection,
+    probability: recommendation.probability,
+    odds: recommendation.odds,
+    edge: recommendation.edge,
+    stake: recommendation.stake,
+    tickets: recommendation.tickets,
+    unitStake: recommendation.unit_stake,
+    note: recommendation.note,
+    isHit: isApiRecommendationHit(recommendation, order),
+  }));
+}
+
+function verifyRaceConsistency(race: Race, snapshot: LiveSnapshot | null): string[] {
+  const issues: string[] = [];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(race.date)) {
+    issues.push("開催日の形式が不正です");
+  }
+  if (!/^\d{2}:\d{2}$/.test(race.start)) {
+    issues.push("発走時刻の形式が不正です");
+  }
+
+  const invalidOdds = race.runners.filter((runner) => !(runner.odds > 1));
+  if (invalidOdds.length > 0) {
+    issues.push(`オッズ異常: ${invalidOdds.length}頭`);
+  }
+
+  const numbers = race.runners.map((runner) => runner.number);
+  const duplicated = numbers.filter((number, index) => numbers.indexOf(number) !== index);
+  if (duplicated.length > 0) {
+    issues.push("馬番の重複があります");
+  }
+
+  if (snapshot) {
+    if ((snapshot.racecardStatus === "available" || snapshot.racecardStatus === "parsed") && race.runners.length === 0) {
+      issues.push("スナップショットは出馬表ありだが、出走馬データが空です");
+    }
+    if (race.status === "finished" && snapshot.result.status === "pending") {
+      issues.push("レース終了ステータスと結果ステータスが不一致です");
+    }
+  }
+
+  return issues;
+}
+
 function stageClass(status: BackendStatus["stages"][number]["status"]) {
   if (status === "ready") return "done";
   if (status === "running") return "running";
@@ -302,6 +485,7 @@ function stageIcon(status: BackendStatus["stages"][number]["status"]) {
 
 export default function Home() {
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
   const [racesData, setRacesData] = useState<Race[]>([]); // モックデータを初期値としてセット
   const [snapshotsData, setSnapshotsData] = useState<Record<string, LiveSnapshot>>({});
   const [selectedRaceId, setSelectedRaceId] = useState("kyoto-20260503-11");
@@ -310,6 +494,11 @@ export default function Home() {
   const [risk, setRisk] = useState(42);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [scheduleView, setScheduleView] = useState("upcoming");
+  const [predictionData, setPredictionData] = useState<ApiRacePrediction | null>(null);
+  const [predictionSource, setPredictionSource] = useState<"api" | "fallback">("fallback");
+  const [proofEntries, setProofEntries] = useState<PredictionProofEntry[]>([]);
+  const [proofSummary, setProofSummary] = useState<PredictionProofSummary | null>(null);
+  const [historyData, setHistoryData] = useState<Record<string, any>>({});
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -321,26 +510,40 @@ export default function Home() {
 
     const fetchData = async () => {
       try {
-        const [statusRes, racesRes] = await Promise.all([
+        const [statusRes, racesRes, snapshotsRes, historyRes] = await Promise.all([
           fetch(`${baseUrl}/status`).catch(() => null),
           fetch(`${baseUrl}/races`).catch(() => null),
+          fetch(`${baseUrl}/snapshots`).catch(() => null),
+          fetch(`${baseUrl}/history`).catch(() => null),
         ]);
 
-        if (statusRes?.ok) setBackendStatus(await statusRes.json());
-        
+        if (statusRes?.ok) {
+          setBackendStatus(await statusRes.json());
+          setApiError(null);
+        }
+        if (snapshotsRes?.ok) {
+          const allSnapshots = await snapshotsRes.json();
+          if (allSnapshots && typeof allSnapshots === "object") {
+            const normalized = Object.fromEntries(
+              Object.entries(allSnapshots).map(([raceId, snapshot]) => [raceId, normalizeSnapshot(snapshot)])
+            ) as Record<string, LiveSnapshot>;
+            setSnapshotsData(normalized);
+          }
+        }
+        if (historyRes?.ok) {
+          const history = await historyRes.json();
+          setHistoryData(history && typeof history === "object" ? history : {});
+        }
         if (racesRes?.ok) {
           const apiRaces = await racesRes.json();
           if (Array.isArray(apiRaces) && apiRaces.length > 0) {
             setRacesData(apiRaces);
-            // If the selected race is not in the new list, default to the first one
-            if (!apiRaces.some((race: Race) => race.id === selectedRaceId)) {
-              setSelectedRaceId(apiRaces[0].id);
-            }
+            setSelectedRaceId((current) => (apiRaces.some((race: Race) => race.id === current) ? current : apiRaces[0].id));
           }
         }
-        
       } catch (err) {
         console.error("データの取得に失敗しました", err);
+        setApiError("バックエンドへ接続できません。サーバーが起動しているか、環境変数 NEXT_PUBLIC_API_BASE_URL を確認してください。");
       }
     };
 
@@ -363,7 +566,7 @@ export default function Home() {
 
         const apiSnapshot = await snapshotRes.json();
         if (!cancelled && apiSnapshot && typeof apiSnapshot === "object") {
-          setSnapshotsData({ [selectedRaceId]: apiSnapshot });
+          setSnapshotsData((prev) => ({ ...prev, [selectedRaceId]: normalizeSnapshot(apiSnapshot) }));
         }
       } catch (err) {
         console.error("スナップショットの取得に失敗しました", err);
@@ -379,14 +582,155 @@ export default function Home() {
     };
   }, [selectedRaceId]);
 
+  useEffect(() => {
+    if (racesData.length === 0) {
+      setProofEntries([]);
+      setProofSummary(null);
+      return;
+    }
+
+    const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+    const controller = new AbortController();
+
+    const verify2026Predictions = async () => {
+      const targetRaces = racesData.filter((race) => {
+        const snapshot = snapshotsData[race.id];
+        return (
+          race.date.startsWith("2026") &&
+          race.runners.length >= 2 &&
+          snapshot?.result?.status === "official" &&
+          Array.isArray(snapshot.result.order) &&
+          snapshot.result.order.length >= 2
+        );
+      });
+
+      if (targetRaces.length === 0) {
+        setProofEntries([]);
+        setProofSummary({ checkedRaces: 0, topHitRate: 0, avgTop3HitCount: 0 });
+        return;
+      }
+
+      const entries: PredictionProofEntry[] = [];
+      for (const race of targetRaces) {
+        try {
+          const response = await fetch(`${baseUrl}/predict`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(buildPredictPayload(race, 100000, 50)),
+            signal: controller.signal,
+          });
+          if (!response.ok) continue;
+          const prediction = (await response.json()) as ApiRacePrediction;
+          if (!prediction.runners || prediction.runners.length === 0) continue;
+
+          const predictedTop3 = prediction.runners
+            .slice()
+            .sort((a, b) => b.win_probability - a.win_probability)
+            .slice(0, 3)
+            .map((runner) => runner.number);
+
+          const actualTop3 = (snapshotsData[race.id]?.result.order ?? []).slice(0, 3);
+          if (actualTop3.length < 2) continue;
+
+          const top3HitCount = predictedTop3.filter((number) => actualTop3.includes(number)).length;
+          entries.push({
+            raceId: race.id,
+            title: race.title,
+            date: race.date,
+            venue: race.venue,
+            predictedTop: predictedTop3[0],
+            actualTop: actualTop3[0],
+            topHit: predictedTop3[0] === actualTop3[0],
+            predictedTop3,
+            actualTop3,
+            top3HitCount,
+          });
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          console.error("2026照合の取得に失敗", error);
+        }
+      }
+
+      const checkedRaces = entries.length;
+      const topHitRate = checkedRaces > 0 ? entries.filter((entry) => entry.topHit).length / checkedRaces : 0;
+      const avgTop3HitCount = checkedRaces > 0 ? entries.reduce((sum, entry) => sum + entry.top3HitCount, 0) / checkedRaces : 0;
+
+      setProofEntries(entries);
+      setProofSummary({ checkedRaces, topHitRate, avgTop3HitCount });
+    };
+
+    verify2026Predictions();
+    return () => controller.abort();
+  }, [racesData, snapshotsData]);
+
+  useEffect(() => {
+    const selectedRace = racesData.find((race) => race.id === selectedRaceId);
+    if (!selectedRace || selectedRace.runners.length < 2) {
+      setPredictionData(null);
+      setPredictionSource("fallback");
+      return;
+    }
+
+    const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+    const controller = new AbortController();
+
+    const fetchPrediction = async () => {
+      try {
+        const payload = buildPredictPayload(selectedRace, bankroll, risk);
+        const response = await fetch(`${baseUrl}/predict`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`predict failed: ${response.status}`);
+        const prediction = (await response.json()) as ApiRacePrediction;
+        setPredictionData(prediction);
+        setPredictionSource("api");
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error("predict API の取得に失敗しました", error);
+          setPredictionData(null);
+          setPredictionSource("fallback");
+        }
+      }
+    };
+
+    fetchPrediction();
+    return () => controller.abort();
+  }, [selectedRaceId, racesData, bankroll, risk]);
+
   const venueTabs = useMemo(() => ["すべて", ...Array.from(new Set(racesData.map((race) => race.venue)))], [racesData]);
   const filteredRaces = useMemo(() => (selectedVenue === "すべて" ? racesData : racesData.filter((race) => race.venue === selectedVenue)), [selectedVenue, racesData]);
   const selectedRace = racesData.find((race) => race.id === selectedRaceId) ?? racesData[0];
 
   const pricedRunners = useMemo(() => {
     if (!selectedRace) return [];
+    if (predictionData?.runners?.length) {
+      return predictionData.runners
+        .map((runner) => {
+          const original =
+            selectedRace.runners.find((item) => item.number === runner.number || item.name === runner.name) ??
+            selectedRace.runners.find((item) => item.number === runner.number);
+          return {
+            number: runner.number,
+            gate: runner.gate,
+            name: runner.name,
+            jockey: original?.jockey ?? "-",
+            weight: original?.weight ?? "-",
+            rating: original?.rating ?? Math.round(runner.score),
+            odds: runner.market_odds,
+            tags: original?.tags ?? [],
+            winProbability: runner.win_probability,
+            placeProbability: runner.place_probability,
+            fairOdds: runner.fair_odds,
+            edge: runner.edge,
+          } satisfies PricedRunner;
+        })
+        .sort((a, b) => b.winProbability - a.winProbability);
+    }
     return estimate(selectedRace);
-  }, [selectedRace]);
+  }, [selectedRace, predictionData]);
 
   const liveSnapshot = useMemo(() => {
     if (!selectedRace) return null;
@@ -395,11 +739,26 @@ export default function Home() {
 
   const bets = useMemo(() => {
     if (!pricedRunners || !liveSnapshot) return [];
+    if (predictionData?.recommendations?.length) {
+      return apiBetsToUiBets(predictionData, liveSnapshot.result.order);
+    }
     return buildBets(pricedRunners, bankroll, risk, liveSnapshot.result.order);
-  }, [pricedRunners, bankroll, risk, liveSnapshot]);
+  }, [pricedRunners, bankroll, risk, liveSnapshot, predictionData]);
+
+  const verificationIssues = useMemo(() => {
+    if (!selectedRace) return [];
+    return verifyRaceConsistency(selectedRace, liveSnapshot);
+  }, [selectedRace, liveSnapshot]);
 
   if (!selectedRace || !liveSnapshot) {
-    return <main className="app-shell" style={{ padding: "3rem", display: "flex", justifyContent: "center", color: "var(--muted)" }}><Activity className="animate-spin" style={{ marginRight: "8px" }} />データを読み込んでいます...</main>;
+    return (
+      <main className="app-shell" style={{ padding: "3rem", display: "flex", justifyContent: "center", color: "var(--muted)" }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+          {apiError ? <div style={{ background: "#fff4f4", color: "#c84d56", padding: "8px 12px", borderRadius: 8, border: "1px solid rgba(200,77,86,0.12)" }}>{apiError}</div> : null}
+          <div style={{ display: "flex", alignItems: "center" }}><Activity className="animate-spin" style={{ marginRight: "8px" }} />データを読み込んでいます...</div>
+        </div>
+      </main>
+    );
   }
   
   const top = pricedRunners[0];
@@ -479,7 +838,7 @@ export default function Home() {
         </aside>
 
         <section className="prediction-panel">
-          <div className="race-hero"><div><p>表示中</p><h2>{selectedRace.date} {selectedRace.venue}{selectedRace.raceNo} {selectedRace.title}</h2><span>{selectedRace.meeting} / {selectedRace.start}発走 / {selectedRace.grade} / {selectedRace.course}</span></div><div className="hero-badge">{statusText(selectedRace.status)}</div></div>
+          <div className="race-hero"><div><p>表示中</p><h2>{selectedRace.date} {selectedRace.venue}{selectedRace.raceNo} {selectedRace.title}</h2><span>{selectedRace.meeting} / {selectedRace.start}発走 / {selectedRace.grade} / {selectedRace.course}</span><span style={{ display: "block", opacity: 0.75, marginTop: 6 }}>予測ソース: {predictionSource === "api" ? "Backend /predict" : "Fallback 簡易推定"}</span></div><div className="hero-badge">{statusText(selectedRace.status)}</div></div>
           {pricedRunners.length > 0 ? <>
             <div className="summary-grid">
               <article><Target size={19} /><span>本命</span><strong>{top?.number} {top?.name}</strong><small>勝率 {formatPercent(top?.winProbability ?? 0)} / 妥当 {top?.fairOdds.toFixed(1)}倍</small></article>
@@ -509,7 +868,58 @@ export default function Home() {
             </div>
           </section>
 
-          <section className="source-card"><div className="section-heading"><div><p>Source</p><h3>今のデータ</h3></div><Database size={20} /></div><p>{selectedRace.officialNote}</p><dl><div><dt>予定</dt><dd>JRA公式 今週の開催・注目レース</dd></div><div><dt>出馬表</dt><dd>{selectedRace.runners.length > 0 ? "馬名データを反映済み" : "JRA accessD出馬表を解析待ち"}</dd></div><div><dt>モデル</dt><dd>{backendStatus ? backendStatus.data_window : "FastAPI接続待ち"}</dd></div></dl></section>
+          <section className="source-card proof-card">
+            <div className="section-heading"><div><p>Proof</p><h3>実レース照合</h3></div><Trophy size={20} /></div>
+            <p style={{ marginTop: 4, marginBottom: 8, color: "var(--muted)" }}>履歴CSVから生成した実データとモデル予測を照合した指標です。</p>
+            <div className="metric-grid">
+              <article><span>照合レース</span><strong>{proofSummary?.checkedRaces ?? 0}</strong></article>
+              <article><span>1着一致率</span><strong>{formatPercent(proofSummary?.topHitRate ?? 0)}</strong></article>
+              <article><span>上位3平均一致</span><strong>{(proofSummary?.avgTop3HitCount ?? 0).toFixed(2)}頭</strong></article>
+              <article><span>予測元</span><strong>Backend /predict</strong></article>
+            </div>
+            <div className="coverage-list">
+              {proofEntries.length > 0 ? proofEntries.map((entry) => (
+                <article key={entry.raceId}>
+                  <div>
+                    <strong>{entry.date} {entry.venue} {entry.title}</strong>
+                    <small>
+                      予想1着 {entry.predictedTop} / 実着順先頭 {entry.actualTop} /
+                      予想TOP3 {entry.predictedTop3.join("-")} / 実TOP3 {entry.actualTop3.join("-")}
+                    </small>
+                  </div>
+                  <span>{entry.topHit ? "一致" : "差異"}</span>
+                </article>
+              )) : <article><div><strong>照合対象を取得中</strong><small>2026年で公式結果付きレースを待機中</small></div><span>待機</span></article>}
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>履歴</div>
+              {Object.keys(historyData || {}).length === 0 ? (
+                <div style={{ color: "var(--muted)" }}>履歴はまだありません</div>
+              ) : (
+                Object.entries(historyData).sort(([a], [b]) => b.localeCompare(a)).map(([date, entries]) => (
+                  <details key={date} style={{ marginBottom: 8 }}>
+                    <summary style={{ cursor: "pointer", fontWeight: 600 }}>{date} — {entries.length} 件</summary>
+                    <div style={{ marginTop: 6 }}>
+                      {entries.map((e: any, idx: number) => {
+                        const pred = e.prediction?.prediction?.runners ?? [];
+                        const topNums = pred.slice().sort((a: any, b: any) => b.win_probability - a.win_probability).slice(0,3).map((r: any) => r.number).join("-");
+                        const resultOrder = e.result?.order ?? null;
+                        const hit = resultOrder && pred.length ? (Number(pred.sort((a: any,b:any)=>b.win_probability-a.win_probability)[0]?.number) === resultOrder[0]) : undefined;
+                        return (
+                          <div key={idx} style={{ padding: "6px 0", borderBottom: "1px solid var(--line)" }}>
+                            <div style={{ fontWeight: 600 }}>{e.race_id} <small style={{ color: "var(--muted)", fontWeight: 500 }}>({e.prediction?.request?.race_id ?? date})</small></div>
+                            <div style={{ color: "var(--muted)", fontSize: 13 }}>予想TOP3: {topNums} / 的中: {hit === undefined ? "-" : hit ? "1着一致" : "不一致"}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </details>
+                ))
+              )}
+            </div>
+          </section>
+
+          <section className="source-card"><div className="section-heading"><div><p>Source</p><h3>今のデータ</h3></div><Database size={20} /></div><p>{selectedRace.officialNote}</p><dl><div><dt>予定</dt><dd>{selectedRace.source || "提供元未設定"}</dd></div><div><dt>出馬表</dt><dd>{selectedRace.runners.length > 0 ? `馬名データ ${selectedRace.runners.length}頭` : "出馬表待ち"}</dd></div><div><dt>予測</dt><dd>{predictionSource === "api" ? "Backend /predict を使用" : "API障害時のフォールバック"}</dd></div><div><dt>モデル</dt><dd>{backendStatus ? backendStatus.data_window : "FastAPI接続待ち"}</dd></div></dl>{verificationIssues.length > 0 ? <div className="live-alerts" style={{ marginTop: 10 }}>{verificationIssues.map((issue) => <span key={issue}><AlertTriangle size={13} style={{ marginRight: 4 }} />{issue}</span>)}</div> : <p style={{ marginTop: 10, color: "var(--muted)" }}>整合チェック: 明確な不整合は未検出</p>}</section>
 
           <section className="source-card">
             <div className="section-heading"><div><p>Simulation</p><h3>回収率バックテスト</h3></div><Trophy size={20} /></div>

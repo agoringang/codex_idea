@@ -1,16 +1,16 @@
 :root {
-  --bg: #f2f8ff;
-  --panel: rgba(255, 255, 255, 0.9);
-  --panel-soft: #f7fbff;
-  --ink: #17233a;
-  --muted: #657485;
-  --line: rgba(73, 111, 145, 0.18);
-  --green: #227a63;
-  --blue: #3579dc;
-  --red: #c84d56;
-  --amber: #b97828;
-  --violet: #7660d6;
-  --shadow: 0 24px 64px rgba(46, 85, 118, 0.14);
+  --bg: #f6f7fb;
+  --panel: rgba(255,255,255,0.85);
+  --panel-soft: #fbfbfd;
+  --ink: #0b1220;
+  --muted: #6b7078;
+  --line: rgba(11,18,32,0.06);
+  --green: #0a84ff;
+  --blue: #007aff;
+  --red: #ff375f;
+  --amber: #ff9f0a;
+  --violet: #5e5ce6;
+  --shadow: 0 12px 32px rgba(11,18,32,0.06);
 }
 
 * {
@@ -25,13 +25,8 @@ html {
 body {
   margin: 0;
   color: var(--ink);
-  background: linear-gradient(180deg, #f8fbff 0%, #eef7ff 48%, #f7faf1 100%);
-  font-family:
-    Arial,
-    "Hiragino Kaku Gothic ProN",
-    "Yu Gothic",
-    Meiryo,
-    sans-serif;
+  background: linear-gradient(180deg, #fbfcfe 0%, #f6f7fb 48%, #f6f7fb 100%);
+  font-family: -apple-system, BlinkMacSystemFont, "San Francisco", "Helvetica Neue", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
 }
 
 button,
@@ -97,7 +92,7 @@ p {
   border-radius: 16px;
   color: #fff;
   background: #fff;
-  box-shadow: var(--shadow);
+  box-shadow: 0 6px 18px rgba(11,18,32,0.06), inset 0 1px 0 rgba(255,255,255,0.6);
 }
 
 .brand-mark img {
@@ -148,10 +143,10 @@ h3 {
   gap: 9px;
   padding: 0 12px 0 7px;
   border: 1px solid rgba(53, 121, 220, 0.18);
-  border-radius: 999px;
+  border-radius: 12px;
   color: var(--ink);
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 14px 32px rgba(46, 85, 118, 0.1);
+  background: rgba(255,255,255,0.92);
+  box-shadow: 0 8px 20px rgba(11,18,32,0.06);
   font-size: 0.86rem;
   font-weight: 950;
   text-decoration: none;
@@ -177,9 +172,9 @@ h3 {
   gap: 8px;
   padding: 0 12px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 12px;
   color: var(--ink);
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(255,255,255,0.8);
   font-size: 0.85rem;
   font-weight: 950;
   white-space: nowrap;
@@ -204,10 +199,10 @@ h3 {
 .prediction-panel,
 .side-panel section {
   border: 1px solid var(--line);
-  border-radius: 24px;
+  border-radius: 16px;
   background: var(--panel);
   box-shadow: var(--shadow);
-  backdrop-filter: blur(18px);
+  backdrop-filter: blur(8px);
 }
 
 .schedule-panel,
@@ -930,6 +925,17 @@ h3 {
   background-color: rgba(16, 185, 129, 0.1);
   padding: 4px 6px;
   border-radius: 4px;
+}
+
+/* Proof card styling: highlight verification/credibility metrics */
+.proof-card {
+  border-left: 4px solid var(--violet);
+}
+.proof-card .section-heading p {
+  color: var(--violet);
+}
+.proof-card .metric-grid article strong {
+  color: var(--violet);
 }
 
 
