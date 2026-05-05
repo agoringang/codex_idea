@@ -6,6 +6,7 @@ node_modules/
 out/
 dist/
 build/
+.vercel/
 
 # logs
 npm-debug.log*
@@ -13,14 +14,13 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# env（安全対策）
+# =========================
+# Env files
+# =========================
 .env
 .env.local
 .env.*.local
 !.env.example
-
-# Vercel
-.vercel/
 
 # =========================
 # OS / Editor
@@ -37,45 +37,54 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-
-# cache
+*$py.class
 .ruff_cache/
 .pytest_cache/
-
-# venv
+.mypy_cache/
+.pyre/
+.coverage
+htmlcov/
 .venv/
 venv/
 env/
 backend/.venv/
 
 # =========================
-# ML / Data（超重要）
+# Data / generated datasets
 # =========================
-backend/models/
-backend/runtime/
-backend/raw/
-backend/normalized/
-backend/features/
-backend/backtests/
-
-# datasets
+# Keep dataset files out of Git, but allow docs/placeholders.
 backend/data/**
 !backend/data/
 !backend/data/README.md
-*.csv
-*.parquet
+!backend/data/**/
+!backend/data/**/.gitkeep
 
-# model artifacts
+# =========================
+# ML artifacts
+# =========================
+backend/models/**
+backend/runtime/**
+backend/backtests/**
 *.joblib
 *.pkl
 
-# =========================
-# logs
-# =========================
-logs/
-*.log
+!backend/models/.gitkeep
+!backend/runtime/.gitkeep
+!backend/backtests/.gitkeep
 
 # =========================
-# misc
+# DB / Cache
 # =========================
-coverage/
+*.sqlite
+*.sqlite3
+*.db
+*.duckdb
+*.parquet
+*.feather
+
+# =========================
+# その他
+# =========================
+*.log
+*.tmp
+*.swp
