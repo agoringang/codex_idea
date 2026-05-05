@@ -3,6 +3,8 @@
 import { useMemo, useState } from "react";
 
 type Market = "JRA" | "NAR";
+type ViewTab = "predict" | "calendar" | "results";
+type AppIconId = "waliwali" | "keisya" | "hikaku" | "portfolio";
 
 type Runner = {
   number: number;
@@ -43,6 +45,19 @@ type RunnerProjection = Runner & {
   fairOdds: number;
   edge: number;
   score: number;
+};
+
+type TicketProjection = Omit<TicketTemplate, "selection"> & {
+  selection: string;
+  edge: number;
+  stake: number;
+  expectedReturn: number;
+};
+
+type CalendarDay = {
+  date: string;
+  label: string;
+  day: string;
 };
 
 const races: Race[] = [
@@ -103,66 +118,47 @@ const races: Race[] = [
   },
 ];
 
+const calendarDays: CalendarDay[] = [
+  { date: "2026-05-05", label: "5/5", day: "火" },
+  { date: "2026-05-06", label: "5/6", day: "水" },
+  { date: "2026-05-07", label: "5/7", day: "木" },
+  { date: "2026-05-08", label: "5/8", day: "金" },
+  { date: "2026-05-09", label: "5/9", day: "土" },
+  { date: "2026-05-10", label: "5/10", day: "日" },
+  { date: "2026-05-11", label: "5/11", day: "月" },
+];
+
 const ticketTemplates: TicketTemplate[] = [
-  {
-    type: "複勝",
-    selection: (top) => `${top[0].number}`,
-    risk: 16,
-    probability: 0.62,
-    odds: 1.9,
-    model: "place-calibrated",
-  },
-  {
-    type: "ワイド",
-    selection: (top) => `${top[0].number}-${top[1].number}`,
-    risk: 32,
-    probability: 0.31,
-    odds: 5.4,
-    model: "rank-pair",
-  },
-  {
-    type: "単勝",
-    selection: (top) => `${top[0].number}`,
-    risk: 46,
-    probability: 0.19,
-    odds: 5.6,
-    model: "win-ensemble",
-  },
-  {
-    type: "馬連",
-    selection: (top) => `${top[0].number}-${top[2].number}`,
-    risk: 58,
-    probability: 0.13,
-    odds: 12.8,
-    model: "rank-pair",
-  },
-  {
-    type: "3連複",
-    selection: (top) => `${top[0].number}-${top[1].number}-${top[2].number}`,
-    risk: 74,
-    probability: 0.055,
-    odds: 31.2,
-    model: "ticket-ev",
-  },
-  {
-    type: "3連単",
-    selection: (top) => `${top[0].number}-${top[2].number}-${top[1].number}`,
-    risk: 91,
-    probability: 0.018,
-    odds: 128.4,
-    model: "ticket-ev",
-  },
+  { type: "複勝", selection: (top) => `${top[0].number}`, risk: 16, probability: 0.62, odds: 1.9, model: "Place" },
+  { type: "ワイド", selection: (top) => `${top[0].number}-${top[1].number}`, risk: 32, probability: 0.31, odds: 5.4, model: "Pair" },
+  { type: "単勝", selection: (top) => `${top[0].number}`, risk: 46, probability: 0.19, odds: 5.6, model: "Win" },
+  { type: "馬連", selection: (top) => `${top[0].number}-${top[2].number}`, risk: 58, probability: 0.13, odds: 12.8, model: "Pair" },
+  { type: "3連複", selection: (top) => `${top[0].number}-${top[1].number}-${top[2].number}`, risk: 74, probability: 0.055, odds: 31.2, model: "EV" },
+  { type: "3連単", selection: (top) => `${top[0].number}-${top[2].number}-${top[1].number}`, risk: 91, probability: 0.018, odds: 128.4, model: "EV" },
+];
+
+const tabs: { id: ViewTab; label: string; icon: string }[] = [
+  { id: "predict", label: "予想", icon: "◎" },
+  { id: "calendar", label: "日程", icon: "□" },
+  { id: "results", label: "実績", icon: "◇" },
 ];
 
 const modelStack = [
-  ["Win/Place", "単勝・複勝の確率校正"],
-  ["RankDist", "着順分布から組合せ確率へ展開"],
-  ["TicketEV", "券種別の期待値と購入点数"],
-  ["OddsWatch", "パドック中のオッズ変動検知"],
+  ["Win", "単勝"],
+  ["Place", "複勝"],
+  ["Pair", "馬連/ワイド"],
+  ["EV", "3連系"],
+  ["Odds", "直前"],
+];
+
+const appLinks = [
+  { name: "WaliWali", label: "割り勘", href: "https://waliwali-app.vercel.app/", icon: "waliwali" as const },
+  { name: "Keisya", label: "傾斜会計", href: "https://keisya-app.vercel.app/", icon: "keisya" as const },
+  { name: "HikakU", label: "比較", href: "https://agoringang.com/#detail-misekurabe", icon: "hikaku" as const },
+  { name: "アプリ一覧", label: "agoringang", href: "https://agoringang.com/#apps", icon: "portfolio" as const },
 ];
 
 const backtest = {
-  window: "local backtest pending",
   races: 0,
   bets: 0,
   roi: 0,
@@ -191,11 +187,14 @@ function roundStake(value: number) {
 }
 
 export default function Home() {
+  const [activeTab, setActiveTab] = useState<ViewTab>("predict");
   const [selectedRaceId, setSelectedRaceId] = useState(races[0].id);
+  const [selectedDate, setSelectedDate] = useState(races[0].date);
   const [riskLevel, setRiskLevel] = useState(48);
   const [bankroll, setBankroll] = useState(100000);
 
   const race = races.find((item) => item.id === selectedRaceId) ?? races[0];
+  const selectedDateRaces = races.filter((item) => item.date === selectedDate);
   const activeBankroll = Number.isFinite(bankroll) ? Math.max(bankroll, 1000) : 100000;
   const riskRatio = riskLevel / 100;
 
@@ -207,6 +206,7 @@ export default function Home() {
       return { runner, score };
     });
     const total = raw.reduce((sum, item) => sum + item.score, 0);
+
     return raw
       .map(({ runner, score }) => {
         const winProbability = score / total;
@@ -225,234 +225,466 @@ export default function Home() {
       .sort((a, b) => b.score - a.score);
   }, [race, riskRatio]);
 
-  const tickets = ticketTemplates
-    .filter((ticket) => Math.abs(ticket.risk - riskLevel) <= 40 || ticket.risk <= riskLevel + 12)
-    .map((ticket) => {
-      const top = projections.slice(0, 3);
-      const edge = ticket.probability * ticket.odds - 1 + (riskRatio - 0.45) * 0.08;
-      const exposure = 0.006 + riskRatio * 0.027;
-      const stake = roundStake(activeBankroll * exposure * Math.max(0.35, 1 + edge) * (ticket.risk / 100));
-      return {
-        ...ticket,
-        selection: ticket.selection(top),
-        edge,
-        stake,
-        expectedReturn: stake * ticket.odds * ticket.probability,
-      };
-    })
-    .sort((a, b) => b.edge + b.risk / 150 - (a.edge + a.risk / 150))
-    .slice(0, 5);
+  const tickets = useMemo<TicketProjection[]>(() => {
+    return ticketTemplates
+      .filter((ticket) => Math.abs(ticket.risk - riskLevel) <= 40 || ticket.risk <= riskLevel + 12)
+      .map((ticket) => {
+        const top = projections.slice(0, 3);
+        const edge = ticket.probability * ticket.odds - 1 + (riskRatio - 0.45) * 0.08;
+        const exposure = 0.006 + riskRatio * 0.027;
+        const stake = roundStake(activeBankroll * exposure * Math.max(0.35, 1 + edge) * (ticket.risk / 100));
+        return {
+          ...ticket,
+          selection: ticket.selection(top),
+          edge,
+          stake,
+          expectedReturn: stake * ticket.odds * ticket.probability,
+        };
+      })
+      .sort((a, b) => b.edge + b.risk / 150 - (a.edge + a.risk / 150))
+      .slice(0, 5);
+  }, [activeBankroll, projections, riskLevel, riskRatio]);
 
   const totalStake = tickets.reduce((sum, ticket) => sum + ticket.stake, 0);
   const expectedReturn = tickets.reduce((sum, ticket) => sum + ticket.expectedReturn, 0);
   const expectedRoi = totalStake > 0 ? expectedReturn / totalStake : 0;
-  const riskLabel = riskLevel < 34 ? "ローリスク" : riskLevel < 67 ? "バランス" : "ハイリスク";
+  const riskLabel = riskLevel < 34 ? "堅実" : riskLevel < 67 ? "標準" : "攻め";
+
+  function selectRace(raceId: string, nextTab: ViewTab = activeTab) {
+    const nextRace = races.find((item) => item.id === raceId);
+    setSelectedRaceId(raceId);
+    if (nextRace) {
+      setSelectedDate(nextRace.date);
+    }
+    setActiveTab(nextTab);
+  }
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <img src="/racequant-icon.svg" alt="" />
-          <div>
-            <p>UmaLab</p>
-            <h1>AI予想オペレーション</h1>
-          </div>
-        </div>
-        <div className="topbar-metrics" aria-label="system status">
-          <span>JRA/NAR</span>
-          <span>UV backend</span>
-          <span>Local CSV ready</span>
-        </div>
-      </header>
-
-      <div className="workspace-grid">
-        <aside className="panel schedule-panel">
-          <div className="panel-title">
-            <p>Calendar</p>
-            <h2>開催カレンダー</h2>
-          </div>
-
-          <div className="race-list">
-            {races.map((item) => (
-              <button
-                className={`race-button ${item.id === race.id ? "active" : ""}`}
-                key={item.id}
-                onClick={() => setSelectedRaceId(item.id)}
-                type="button"
-              >
-                <span>{item.date} ({item.day}) {item.start}</span>
-                <strong>{item.venue} {item.title}</strong>
-                <em>{item.course}</em>
-                <b>{item.market}</b>
-              </button>
-            ))}
-          </div>
-
-          <div className="control-stack">
-            <label className="field">
-              <span>軍資金</span>
-              <input
-                min={1000}
-                onChange={(event) => setBankroll(Number(event.target.value))}
-                step={1000}
-                type="number"
-                value={bankroll}
-              />
-            </label>
-
-            <label className="field">
-              <span>リスク許容度: {riskLabel} / {riskLevel}</span>
-              <input
-                max={100}
-                min={0}
-                onChange={(event) => setRiskLevel(Number(event.target.value))}
-                type="range"
-                value={riskLevel}
-              />
-            </label>
-
-            <div className="risk-scale" aria-hidden="true">
-              <span>堅実</span>
-              <span>標準</span>
-              <span>攻め</span>
-            </div>
-          </div>
-        </aside>
-
-        <section className="panel prediction-panel">
-          <div className="race-heading">
+    <main className="umalab-shell">
+      <div className="app-frame">
+        <header className="top-bar">
+          <div className="brand-row">
+            <img src="/racequant-icon.svg" alt="" />
             <div>
-              <p>{race.grade} / {race.status.toUpperCase()}</p>
-              <h2>{race.title}</h2>
-              <span>{race.date} {race.start} / {race.venue} / {race.course}</span>
+              <strong>UMALAB</strong>
+              <span>競馬AI予想</span>
             </div>
-            <strong>{riskLabel}</strong>
           </div>
+          <a className="portfolio-link" href="https://agoringang.com/#apps">
+            <span className="portfolio-grid" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+              <i />
+            </span>
+            他のアプリを見る
+          </a>
+        </header>
 
-          <div className="summary-grid">
-            <Metric label="購入候補" value={`${tickets.length}件`} />
-            <Metric label="想定投資" value={formatYen(totalStake)} />
-            <Metric label="期待回収率" value={formatPercent(expectedRoi, 1)} />
-            <Metric label="最大露出" value={formatPercent(totalStake / activeBankroll, 2)} />
+        <section className="race-status-card">
+          <div className="race-status-main">
+            <span>{race.date} {race.start}</span>
+            <h1>{race.venue} {race.title}</h1>
+            <p>{race.course}</p>
           </div>
-
-          <div className="section-title">
-            <p>Recommendations</p>
-            <h3>券種別AI出力</h3>
+          <div className="race-pills">
+            <span>{race.market}</span>
+            <span>{race.status}</span>
           </div>
+        </section>
 
-          <div className="ticket-table">
-            {tickets.map((ticket) => (
-              <article key={`${ticket.type}-${ticket.selection}`}>
-                <div>
-                  <span>{ticket.type}</span>
-                  <strong>{ticket.selection}</strong>
-                  <small>{ticket.model}</small>
-                </div>
-                <dl>
-                  <div>
-                    <dt>的中率</dt>
-                    <dd>{formatPercent(ticket.probability)}</dd>
-                  </div>
-                  <div>
-                    <dt>想定オッズ</dt>
-                    <dd>{ticket.odds.toFixed(1)}</dd>
-                  </div>
-                  <div>
-                    <dt>Edge</dt>
-                    <dd className={ticket.edge >= 0 ? "positive" : "negative"}>{formatPercent(ticket.edge)}</dd>
-                  </div>
-                  <div>
-                    <dt>金額</dt>
-                    <dd>{formatYen(ticket.stake)}</dd>
-                  </div>
-                </dl>
-              </article>
-            ))}
+        <div className="desktop-tabs" role="tablist" aria-label="UMALAB tabs">
+          {tabs.map((tab) => (
+            <button
+              aria-selected={activeTab === tab.id}
+              className={activeTab === tab.id ? "active" : ""}
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              role="tab"
+              type="button"
+            >
+              <span aria-hidden="true">{tab.icon}</span>
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === "predict" && (
+          <PredictPanel
+            activeBankroll={activeBankroll}
+            bankroll={bankroll}
+            expectedRoi={expectedRoi}
+            onBankrollChange={setBankroll}
+            onRaceSelect={(raceId) => selectRace(raceId)}
+            onRiskChange={setRiskLevel}
+            projections={projections}
+            race={race}
+            races={races}
+            riskLabel={riskLabel}
+            riskLevel={riskLevel}
+            tickets={tickets}
+            totalStake={totalStake}
+          />
+        )}
+
+        {activeTab === "calendar" && (
+          <CalendarPanel
+            calendarDays={calendarDays}
+            onDateSelect={setSelectedDate}
+            onRaceSelect={(raceId) => selectRace(raceId, "predict")}
+            races={races}
+            selectedDate={selectedDate}
+            selectedDateRaces={selectedDateRaces}
+            selectedRaceId={selectedRaceId}
+          />
+        )}
+
+        {activeTab === "results" && (
+          <ResultsPanel projections={projections} race={race} />
+        )}
+
+        <OtherAppsPanel />
+      </div>
+
+      <nav className="bottom-tabs" aria-label="UMALAB navigation">
+        {tabs.map((tab) => (
+          <button
+            className={activeTab === tab.id ? "active" : ""}
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            type="button"
+          >
+            <span aria-hidden="true">{tab.icon}</span>
+            {tab.label}
+          </button>
+        ))}
+      </nav>
+    </main>
+  );
+}
+
+function PredictPanel({
+  activeBankroll,
+  bankroll,
+  expectedRoi,
+  onBankrollChange,
+  onRaceSelect,
+  onRiskChange,
+  projections,
+  race,
+  races,
+  riskLabel,
+  riskLevel,
+  tickets,
+  totalStake,
+}: {
+  activeBankroll: number;
+  bankroll: number;
+  expectedRoi: number;
+  onBankrollChange: (value: number) => void;
+  onRaceSelect: (raceId: string) => void;
+  onRiskChange: (value: number) => void;
+  projections: RunnerProjection[];
+  race: Race;
+  races: Race[];
+  riskLabel: string;
+  riskLevel: number;
+  tickets: TicketProjection[];
+  totalStake: number;
+}) {
+  return (
+    <section className="tab-panel">
+      <div className="control-strip">
+        <div className="race-selector" aria-label="Race selector">
+          {races.map((item) => (
+            <button
+              className={item.id === race.id ? "active" : ""}
+              key={item.id}
+              onClick={() => onRaceSelect(item.id)}
+              type="button"
+            >
+              <span>{item.start}</span>
+              <strong>{item.venue} {item.title}</strong>
+              <em>{item.market}</em>
+            </button>
+          ))}
+        </div>
+
+        <div className="settings-grid">
+          <label className="field-card">
+            <span>軍資金</span>
+            <input
+              min={1000}
+              onChange={(event) => onBankrollChange(Number(event.target.value))}
+              step={1000}
+              type="number"
+              value={bankroll}
+            />
+          </label>
+          <label className="field-card">
+            <span>リスク {riskLabel} / {riskLevel}</span>
+            <input
+              max={100}
+              min={0}
+              onChange={(event) => onRiskChange(Number(event.target.value))}
+              type="range"
+              value={riskLevel}
+            />
+          </label>
+        </div>
+      </div>
+
+      <div className="summary-strip">
+        <Metric label="候補" value={`${tickets.length}件`} />
+        <Metric label="投資" value={formatYen(totalStake)} />
+        <Metric label="期待ROI" value={formatPercent(expectedRoi, 1)} />
+        <Metric label="露出" value={formatPercent(totalStake / activeBankroll, 2)} />
+      </div>
+
+      <div className="section-heading">
+        <h2>買い目</h2>
+        <span>{race.grade}</span>
+      </div>
+      <div className="ticket-list">
+        {tickets.map((ticket) => (
+          <article key={`${ticket.type}-${ticket.selection}`}>
+            <div className="ticket-name">
+              <span>{ticket.type}</span>
+              <strong>{ticket.selection}</strong>
+              <small>{ticket.model}</small>
+            </div>
+            <div className="ticket-data">
+              <Value label="的中" value={formatPercent(ticket.probability)} />
+              <Value label="オッズ" value={ticket.odds.toFixed(1)} />
+              <Value label="Edge" value={formatPercent(ticket.edge)} tone={ticket.edge >= 0 ? "positive" : "negative"} />
+              <Value label="金額" value={formatYen(ticket.stake)} />
+            </div>
+          </article>
+        ))}
+      </div>
+
+      <div className="two-column">
+        <section className="mini-card">
+          <div className="section-heading compact">
+            <h2>直前オッズ</h2>
+            <span>watch</span>
           </div>
-
-          <div className="section-title">
-            <p>Runner ranking</p>
-            <h3>出走馬スコア</h3>
-          </div>
-
-          <div className="runner-table">
-            {projections.map((runner, index) => (
-              <div key={runner.number} className="runner-row">
-                <span>{index + 1}</span>
+          <div className="alert-list">
+            {projections.slice(0, 3).map((runner) => (
+              <article key={runner.number}>
                 <strong>{runner.number}. {runner.name}</strong>
-                <em>{runner.jockey}</em>
-                <b>{formatPercent(runner.winProbability)}</b>
-                <small className={runner.drift < 0 ? "positive" : "negative"}>
-                  {runner.drift > 0 ? "+" : ""}{runner.drift.toFixed(1)}%
-                </small>
-              </div>
+                <span className={runner.drift < 0 ? "positive" : "negative"}>
+                  {runner.drift < 0 ? "妙味" : "過熱"} {Math.abs(runner.drift).toFixed(1)}%
+                </span>
+              </article>
             ))}
           </div>
         </section>
 
-        <aside className="side-column">
-          <section className="panel">
-            <div className="panel-title">
-              <p>Proof</p>
-              <h2>シミュレーション実績</h2>
-            </div>
-            <div className="proof-grid">
-              <Metric label="回収率" value={formatPercent(backtest.roi)} />
-              <Metric label="的中率" value={formatPercent(backtest.hitRate)} />
-              <Metric label="対象R" value={numberFormatter.format(backtest.races)} />
-              <Metric label="最大DD" value={formatYen(backtest.maxDrawdown)} />
-            </div>
-            <p className="note">{backtest.window}</p>
-          </section>
-
-          <section className="panel">
-            <div className="panel-title">
-              <p>Live</p>
-              <h2>直前オッズ監視</h2>
-            </div>
-            <div className="alert-list">
-              {projections.slice(0, 3).map((runner) => (
-                <article key={runner.number}>
-                  <strong>{runner.number}. {runner.name}</strong>
-                  <span className={runner.drift < 0 ? "positive" : "negative"}>
-                    {runner.drift < 0 ? "買い方向" : "過熱"} {Math.abs(runner.drift).toFixed(1)}%
-                  </span>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-title">
-              <p>Model stack</p>
-              <h2>複数AIモデル</h2>
-            </div>
-            <div className="model-list">
-              {modelStack.map(([name, detail]) => (
-                <article key={name}>
-                  <strong>{name}</strong>
-                  <span>{detail}</span>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-title">
-              <p>Data</p>
-              <h2>自動取得基盤</h2>
-            </div>
-            <ol className="pipeline-list">
-              <li>中央CSV: backend/data/keiba_data</li>
-              <li>地方競馬: NARアダプタ追加枠</li>
-              <li>出馬表・オッズ: 開催日ポーリング</li>
-              <li>結果・払戻: 確定後に回収率へ反映</li>
-            </ol>
-          </section>
-        </aside>
+        <section className="mini-card">
+          <div className="section-heading compact">
+            <h2>出走馬</h2>
+            <span>{race.course}</span>
+          </div>
+          <RunnerList projections={projections} />
+        </section>
       </div>
-    </main>
+    </section>
+  );
+}
+
+function CalendarPanel({
+  calendarDays,
+  onDateSelect,
+  onRaceSelect,
+  races,
+  selectedDate,
+  selectedDateRaces,
+  selectedRaceId,
+}: {
+  calendarDays: CalendarDay[];
+  onDateSelect: (date: string) => void;
+  onRaceSelect: (raceId: string) => void;
+  races: Race[];
+  selectedDate: string;
+  selectedDateRaces: Race[];
+  selectedRaceId: string;
+}) {
+  return (
+    <section className="tab-panel">
+      <div className="section-heading">
+        <h2>カレンダー</h2>
+        <span>{races.length}R</span>
+      </div>
+
+      <div className="date-rail">
+        {calendarDays.map((day) => {
+          const dayRaces = races.filter((race) => race.date === day.date);
+          return (
+            <button
+              className={selectedDate === day.date ? "active" : ""}
+              key={day.date}
+              onClick={() => onDateSelect(day.date)}
+              type="button"
+            >
+              <span>{day.day}</span>
+              <strong>{day.label}</strong>
+              <em>{dayRaces.length}R</em>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="calendar-list">
+        {selectedDateRaces.length > 0 ? (
+          selectedDateRaces.map((item) => (
+            <article className={item.id === selectedRaceId ? "active" : ""} key={item.id}>
+              <div>
+                <span>{item.start} / {item.market}</span>
+                <strong>{item.venue} {item.title}</strong>
+                <em>{item.course}</em>
+              </div>
+              <button onClick={() => onRaceSelect(item.id)} type="button">予想へ</button>
+            </article>
+          ))
+        ) : (
+          <div className="empty-state">対象レースなし</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ResultsPanel({ projections, race }: { projections: RunnerProjection[]; race: Race }) {
+  return (
+    <section className="tab-panel">
+      <div className="section-heading">
+        <h2>実績</h2>
+        <span>未連携</span>
+      </div>
+      <div className="summary-strip">
+        <Metric label="回収率" value={formatPercent(backtest.roi)} />
+        <Metric label="的中率" value={formatPercent(backtest.hitRate)} />
+        <Metric label="対象R" value={numberFormatter.format(backtest.races)} />
+        <Metric label="最大DD" value={formatYen(backtest.maxDrawdown)} />
+      </div>
+
+      <div className="two-column">
+        <section className="mini-card">
+          <div className="section-heading compact">
+            <h2>モデル</h2>
+            <span>{modelStack.length}</span>
+          </div>
+          <div className="model-list">
+            {modelStack.map(([name, detail]) => (
+              <article key={name}>
+                <strong>{name}</strong>
+                <span>{detail}</span>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="mini-card">
+          <div className="section-heading compact">
+            <h2>現在の順位</h2>
+            <span>{race.venue}</span>
+          </div>
+          <RunnerList projections={projections.slice(0, 4)} />
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function OtherAppsPanel() {
+  return (
+    <section className="tab-panel other-apps-panel">
+      <div className="section-heading">
+        <h2>他のアプリを見る</h2>
+        <a href="https://agoringang.com/#apps">一覧</a>
+      </div>
+      <div className="app-links">
+        {appLinks.map((app) => (
+          <a className="app-link" href={app.href} key={app.name}>
+            <AppIcon icon={app.icon} />
+            <div>
+              <strong>{app.name}</strong>
+              <small>{app.label}</small>
+            </div>
+          </a>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AppIcon({ icon }: { icon: AppIconId }) {
+  if (icon === "portfolio") {
+    return (
+      <span className="app-icon portfolio" aria-hidden="true">
+        <span className="portfolio-grid-large">
+          <i />
+          <i />
+          <i />
+          <i />
+        </span>
+      </span>
+    );
+  }
+
+  return (
+    <span className={`app-icon ${icon}`} aria-hidden="true">
+      <span className="icon-gloss" />
+      <span className="icon-light" />
+      {icon === "waliwali" && (
+        <span className="waliwali-shape">
+          <span className="wali-card first" />
+          <span className="wali-card second" />
+          <span className="wali-yen">¥</span>
+        </span>
+      )}
+      {icon === "keisya" && (
+        <span className="keisya-shape">
+          <span className="bar low" />
+          <span className="bar mid" />
+          <span className="bar high" />
+          <span className="ring" />
+        </span>
+      )}
+      {icon === "hikaku" && (
+        <span className="hikaku-shape">
+          <span className="panel large" />
+          <span className="panel side" />
+          <span className="panel bottom" />
+          <span className="line line-1" />
+          <span className="line line-2" />
+          <span className="line line-3" />
+          <span className="line line-4" />
+          <span className="line line-5" />
+          <span className="line line-6" />
+          <span className="line line-7" />
+        </span>
+      )}
+    </span>
+  );
+}
+
+function RunnerList({ projections }: { projections: RunnerProjection[] }) {
+  return (
+    <div className="runner-list">
+      {projections.map((runner, index) => (
+        <article key={runner.number}>
+          <span>{index + 1}</span>
+          <strong>{runner.number}. {runner.name}</strong>
+          <em>{runner.jockey}</em>
+          <b>{formatPercent(runner.winProbability)}</b>
+          <small className={runner.drift < 0 ? "positive" : "negative"}>
+            {runner.drift > 0 ? "+" : ""}{runner.drift.toFixed(1)}%
+          </small>
+        </article>
+      ))}
+    </div>
   );
 }
 
@@ -462,5 +694,14 @@ function Metric({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </article>
+  );
+}
+
+function Value({ label, value, tone }: { label: string; value: string; tone?: "positive" | "negative" }) {
+  return (
+    <div>
+      <span>{label}</span>
+      <strong className={tone}>{value}</strong>
+    </div>
   );
 }
