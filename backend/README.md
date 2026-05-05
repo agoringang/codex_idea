@@ -23,11 +23,23 @@ Train the current win/place production baseline:
 uv run python scripts/train_production.py --csv data/keiba_history_normalized.csv --output-dir models/racequant
 ```
 
+Smoke-train before spending time on the full archive:
+
+```bash
+uv run python scripts/train_production.py --csv data/keiba_history_normalized.csv --output-dir models/racequant-smoke --race-limit 500
+```
+
+Use a model for the public UI only when `quality_gate.publishable` is `true`. The production pipeline excludes direct `place_odds`, final time, and final sectional values from training, adds shifted historical features, and reports constant/market-odds baselines.
+
 Run a risk-specific simulation:
 
 ```bash
 uv run python scripts/backtest_simulator.py --csv data/keiba_history_normalized.csv --risk 72 --bankroll 100000 --output backtests/local-risk72.json
 ```
+
+The simulator now defaults to conservative filters: `min_edge=0.12`, `min_probability=0.20`, `max_odds=40`, `max_edge=0.8`, and `limit=3`. Use `--skip-races` to evaluate a later holdout window instead of the same early races used for smoke training.
+
+By default this simulates win/place only when the CSV has no official exotic payout columns. Use `--synthetic-exotics` only for exploratory, non-publishable exotic-bet estimates.
 
 Render a README/shareable SVG card:
 

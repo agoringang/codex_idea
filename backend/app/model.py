@@ -103,7 +103,7 @@ def bet_type_matches_risk(bet_type: BetType, risk_level: float) -> bool:
         return bet_risk <= 0.55
     if normalized < 0.67:
         return bet_risk <= 0.78
-    return bet_risk >= 0.44 or bet_type in {"wide", "quinella"}
+    return bet_risk >= 0.44 or bet_type in {"place", "wide", "quinella"}
 
 
 def add_candidate(
@@ -126,6 +126,13 @@ def add_candidate(
         return
 
     edge = probability * odds - 1
+    if probability < request.min_probability:
+        return
+    if odds > request.max_candidate_odds:
+        return
+    if request.max_edge is not None and edge > request.max_edge:
+        return
+
     kelly = kelly_fraction(probability, odds)
     stake_budget = stake_size(request.bankroll, request.risk_level, request.max_exposure, kelly)
     unit_stake = max(100, round(stake_budget / tickets / 100) * 100)

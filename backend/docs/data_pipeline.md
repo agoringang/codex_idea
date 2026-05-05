@@ -47,6 +47,18 @@ Use every field that is legally and practically available before the simulated p
 
 Do not train on data that was not available at the simulated purchase time. For example, final odds or final race result fields are labels/evaluation inputs, not pre-race features for an earlier cutoff.
 
+Current training exclusions:
+
+- `place_odds`: the local normalized export is not reliable enough to use as a pre-race feature.
+- `best_time`, `last600m`: final race-result values, usable only after shifting into historical aggregates.
+
+Current derived features:
+
+- canonical `runner_number`, `bracket`, and `field_size`
+- race-normalized `market_win_probability` and estimated `market_place_probability`
+- shifted horse recent win/place rate, last-three speed, days since last run
+- shifted jockey/trainer win rate, distance/surface aptitude, and draw bias
+
 ## Bet Type Coverage
 
 Single-race tickets:
@@ -97,6 +109,7 @@ Retraining:
 - Never train on future odds or final odds when simulating earlier purchase cutoffs.
 - Calibrate probabilities before using them for expected-value betting.
 - Promote a model only if it improves ROI, drawdown, and calibration on recent holdout races.
+- Check `quality_gate.publishable` before using a model in the public UI.
 
 ## Backtest
 
@@ -107,6 +120,16 @@ cd backend
 uv run python scripts/backtest_simulator.py --csv data/race_history.csv --risk 72 --bankroll 100000
 ```
 
-The normalized CSV needs at least `race_id`, `number`, and `finish_position`. More columns from the feature catalog improve model quality. The output includes races, bets, total stake, total payout, ROI, hit rate, and max drawdown.
+The normalized CSV needs at least `race_id`, `finish_position`, and one runner-number source such as `number`, `gate`, `runner_number`, or `horse_number`. More columns from the feature catalog improve model quality. The output includes races, bets, total stake, total payout, ROI, hit rate, max drawdown, bet types, payout mode, and diagnostics.
 
-Current repo status: real 20-year data has not been ingested yet. Until a JRA-VAN export or compatible CSV is placed under `backend/data/`, all ROI numbers must be treated as sample/simulation only.
+Current default betting filters are deliberately conservative:
+
+- `--min-edge 0.12`
+- `--min-probability 0.20`
+- `--max-odds 40`
+- `--max-edge 0.8`
+- `--limit 3`
+
+The summary also reports skipped races, bet race rate, bet-type breakdowns, edge-band breakdowns, and a market-favorite win baseline. Use `--skip-races` for holdout checks; an in-sample ROI spike is not publishable evidence.
+
+Current repo status: the local normalized keiba data has no official exotic payout columns. Default simulations therefore use win/place only. Exotic-bet ROI is publishable only after official payout columns are ingested; `--synthetic-exotics` is for exploratory estimates.

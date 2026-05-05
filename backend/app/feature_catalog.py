@@ -3,7 +3,12 @@ NUMERIC_FEATURES = [
     "stamina",
     "pace",
     "condition",
+    "runner_number",
+    "bracket",
+    "field_size",
     "market_odds",
+    "market_win_probability",
+    "market_place_probability",
     "place_odds",
     "carried_weight",
     "horse_weight",
@@ -18,6 +23,8 @@ NUMERIC_FEATURES = [
     "trainer_win_rate",
     "horse_recent_win_rate",
     "horse_recent_place_rate",
+    "horse_distance_place_rate",
+    "horse_surface_place_rate",
     "training_score",
     "bloodline_score",
     "odds_rank",
@@ -52,4 +59,18 @@ TARGET_COLUMNS = [
     "payout_exacta",
     "payout_trio",
     "payout_trifecta",
+]
+
+UNSAFE_TRAINING_FEATURES = {
+    # The current local converter maps this source column to a value that is
+    # often larger than win odds, so it is not reliable as a pre-race feature.
+    "place_odds",
+    # These are race-result values in the local keiba_data export. They can be
+    # used only after shifting into historical aggregates.
+    "best_time",
+    "last600m",
+}
+
+TRAINING_NUMERIC_FEATURES = [
+    column for column in NUMERIC_FEATURES if column not in UNSAFE_TRAINING_FEATURES
 ]

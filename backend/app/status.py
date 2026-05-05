@@ -23,25 +23,34 @@ def get_backend_status() -> BackendStatus:
     win_test = metrics["targets"]["is_win"]["test"] if metrics else {}
     place_test = metrics["targets"]["is_place"]["test"] if metrics else {}
     feature_presence = metrics.get("feature_presence", {}) if metrics else {}
+    quality_gate = metrics.get("quality_gate", {}) if metrics else {}
+    publishable = bool(quality_gate.get("publishable"))
+    model_status = "ready" if publishable else "partial"
+    model_version = "v0.2.0-gated" if publishable else "v0.2.0-research"
 
     return BackendStatus(
-        mode="local-trained" if metrics else "setup",
+        mode="local-trained" if publishable else ("research" if metrics else "setup"),
         provider="local_csv",
         data_window=(
-            f"local CSV学習済み / {trained_races} races / {trained_rows} rows"
+            f"local CSV評価済み / {trained_races} races / {trained_rows} rows"
             if metrics
             else "未接続: 学習用CSV未作成"
         ),
         last_sync_at=(now - timedelta(minutes=7)).isoformat(),
         next_retrain_at=(now + timedelta(hours=18)).isoformat(),
-        active_model="umalab-local-trained-v0" if metrics else "umalab-sample-v0",
+        active_model=(
+            ("umalab-local-gated-v0" if publishable else "umalab-local-research-v0")
+            if metrics
+            else "umalab-sample-v0"
+        ),
         stages=[
             BackendStage(
                 id="ingest",
                 label="データ取得",
                 status="ready" if metrics else "idle",
                 detail=(
-                    f"ローカルCSVから{trained_races}レース分の学習用CSVを作成済み"
+                    f"ローカルCSVから{trained_races}レース分の"
+                    "学習用CSVを作成済み"
                     if metrics
                     else "backend/data/keiba_data から学習用CSVへの変換待ち"
                 ),
@@ -53,7 +62,8 @@ def get_backend_status() -> BackendStatus:
                 label="正規化",
                 status="ready" if metrics else "idle",
                 detail=(
-                    "race_id・出走馬・着順・単勝オッズ・人気・騎手・調教師・馬体重・上がり等を標準列に変換済み"
+                    "race_id・出走馬・着順・単勝オッズ・人気・"
+                    "騎手・調教師・馬体重などを標準列に変換済み"
                     if metrics
                     else "CSV作成後に標準スキーマへ変換"
                 ),
@@ -65,7 +75,9 @@ def get_backend_status() -> BackendStatus:
                 label="特徴量生成",
                 status="ready" if metrics else "idle",
                 detail=(
-                    "現時点ではオッズ、人気、斤量、馬体重、年齢、上がり、騎手、調教師などを使用。一部の発展特徴量は未生成"
+                    "馬番、枠番、市場確率、斤量、馬体重、年齢、直近成績、"
+                    "騎手/調教師率、枠傾向を使用。"
+                    "結果由来の走破タイムと上がりは直接除外"
                     if metrics
                     else "特徴量カタログを定義済み"
                 ),
@@ -75,9 +87,10 @@ def get_backend_status() -> BackendStatus:
             BackendStage(
                 id="training",
                 label="モデル学習",
-                status="ready" if metrics else "idle",
+                status=model_status if metrics else "idle",
                 detail=(
-                    "ローカルCSVからwin/placeモデルを学習済み。時系列寄りのレース単位分割で評価"
+                    "win/placeモデルを時系列寄りのレース単位分割で評価。"
+                    "品質ゲート通過時のみ公開用として扱う"
                     if metrics
                     else "学習用CSV作成後にモデルを学習"
                 ),
@@ -87,9 +100,11 @@ def get_backend_status() -> BackendStatus:
             BackendStage(
                 id="inference",
                 label="推論",
-                status="running" if metrics else "idle",
+                status="running" if publishable else ("partial" if metrics else "idle"),
                 detail=(
-                    "学習済みwin/placeモデルを読み込み、単勝確率・複勝圏確率・期待値候補を計算"
+                    "市場確率と学習モデルのアンサンブルで"
+                    "単勝確率・複勝圏確率を計算。"
+                    "券種EVは公式払戻とオッズ時系列の追加待ち"
                     if metrics
                     else "モデル未作成のためサンプル推論のみ"
                 ),
@@ -100,7 +115,10 @@ def get_backend_status() -> BackendStatus:
                 id="retrain",
                 label="継続学習",
                 status="idle",
-                detail="新しいCSVを追加した場合、再学習してlatest.joblibを更新する設計",
+                detail=(
+                    "新しいCSVを追加した場合、"
+                    "再学習してlatest.joblibを更新する設計"
+                ),
                 records=0,
                 latency_ms=None,
             ),
@@ -108,10 +126,12 @@ def get_backend_status() -> BackendStatus:
         artifacts=[
             ModelArtifact(
                 name="win_probability",
-                version="v0.1.0-local" if metrics else "v0.1.0-sample",
+                version=model_version if metrics else "v0.1.0-sample",
                 target="単勝確率",
                 metric=(
-                    f"local test AUC {win_test.get('auc', 0):.3f} / LogLoss {win_test.get('log_loss', 0):.3f}"
+                    f"test AUC {win_test.get('auc', 0):.3f} / "
+                    f"Brier {win_test.get('brier', 0):.3f} / "
+                    f"market差 {win_test.get('brier_vs_market', 0):+.3f}"
                     if metrics
                     else "未評価: 学習用CSV待ち"
                 ),
@@ -119,10 +139,12 @@ def get_backend_status() -> BackendStatus:
             ),
             ModelArtifact(
                 name="place_probability",
-                version="v0.1.0-local" if metrics else "v0.1.0-sample",
+                version=model_version if metrics else "v0.1.0-sample",
                 target="複勝圏確率",
                 metric=(
-                    f"local test AUC {place_test.get('auc', 0):.3f} / LogLoss {place_test.get('log_loss', 0):.3f}"
+                    f"test AUC {place_test.get('auc', 0):.3f} / "
+                    f"Brier {place_test.get('brier', 0):.3f} / "
+                    f"market差 {place_test.get('brier_vs_market', 0):+.3f}"
                     if metrics
                     else "未評価: 学習用CSV待ち"
                 ),
@@ -130,14 +152,15 @@ def get_backend_status() -> BackendStatus:
             ),
             ModelArtifact(
                 name="ticket_ev",
-                version="v0.1.0-sample",
+                version="blocked",
                 target="全券種EV",
                 metric=(
-                    f"sample ROI {backtest['roi'] * 100:.1f}% / DD {backtest['max_drawdown']:,.0f}"
+                    "公式払戻列とオッズスナップショットが揃うまで"
+                    "公開用EVモデルは未学習"
                     if backtest
                     else "未評価: 実データバックテスト待ち"
                 ),
-                path="models/ticket_ev.joblib",
+                path="models/ticket_ev.joblib (not generated)",
             ),
         ],
         feature_coverage=[
@@ -147,8 +170,10 @@ def get_backend_status() -> BackendStatus:
                 fields=["開催日", "場", "距離", "芝/ダート", "馬場", "天候"],
                 source="local CSV",
                 detail=(
-                    f"venue={feature_presence.get('venue', 0):.0%}, surface={feature_presence.get('surface', 0):.0%}, "
-                    f"going={feature_presence.get('going', 0):.0%}, weather={feature_presence.get('weather', 0):.0%}"
+                    f"venue={feature_presence.get('venue', 0):.0%}, "
+                    f"surface={feature_presence.get('surface', 0):.0%}, "
+                    f"going={feature_presence.get('going', 0):.0%}, "
+                    f"weather={feature_presence.get('weather', 0):.0%}"
                     if metrics
                     else "未作成"
                 ),
@@ -156,11 +181,21 @@ def get_backend_status() -> BackendStatus:
             FeatureCoverage(
                 group="出走馬",
                 status="ready" if metrics else "missing",
-                fields=["馬齢", "性別", "斤量", "馬体重", "馬体重増減", "走破タイム", "上がり"],
+                fields=[
+                    "馬齢",
+                    "性別",
+                    "斤量",
+                    "馬体重",
+                    "馬体重増減",
+                    "直近成績",
+                    "距離/馬場適性",
+                ],
                 source="local CSV",
                 detail=(
-                    f"age={feature_presence.get('age', 0):.0%}, horse_weight={feature_presence.get('horse_weight', 0):.0%}, "
-                    f"best_time={feature_presence.get('best_time', 0):.0%}, last600m={feature_presence.get('last600m', 0):.0%}"
+                    f"age={feature_presence.get('age', 0):.0%}, "
+                    f"horse_weight={feature_presence.get('horse_weight', 0):.0%}, "
+                    f"recent_place={feature_presence.get('horse_recent_place_rate', 0):.0%}, "
+                    f"avg_last3_speed={feature_presence.get('avg_last3_speed', 0):.0%}"
                     if metrics
                     else "未作成"
                 ),
@@ -171,7 +206,8 @@ def get_backend_status() -> BackendStatus:
                 fields=["騎手", "調教師"],
                 source="local CSV",
                 detail=(
-                    f"jockey={feature_presence.get('jockey', 0):.0%}, trainer={feature_presence.get('trainer', 0):.0%}"
+                    f"jockey={feature_presence.get('jockey', 0):.0%}, "
+                    f"trainer={feature_presence.get('trainer', 0):.0%}"
                     if metrics
                     else "未作成"
                 ),
@@ -179,10 +215,11 @@ def get_backend_status() -> BackendStatus:
             FeatureCoverage(
                 group="市場",
                 status="ready" if metrics else "missing",
-                fields=["単勝オッズ", "人気"],
+                fields=["単勝オッズ", "人気", "市場勝率", "市場複勝圏率"],
                 source="local CSV",
                 detail=(
-                    f"market_odds={feature_presence.get('market_odds', 0):.0%}, odds_rank={feature_presence.get('odds_rank', 0):.0%}。"
+                    f"market_odds={feature_presence.get('market_odds', 0):.0%}, "
+                    f"odds_rank={feature_presence.get('odds_rank', 0):.0%}。"
                     "時系列オッズや票数は未取得"
                     if metrics
                     else "未作成"
@@ -194,7 +231,8 @@ def get_backend_status() -> BackendStatus:
                 fields=["着順", "単勝ラベル", "複勝圏ラベル"],
                 source="local CSV",
                 detail=(
-                    f"{trained_races}レース、{trained_rows}出走馬分の教師ラベルを作成済み"
+                    f"{trained_races}レース、"
+                    f"{trained_rows}出走馬分の教師ラベルを作成済み"
                     if metrics
                     else "未作成"
                 ),
@@ -211,7 +249,8 @@ def get_backend_status() -> BackendStatus:
             hit_rate=float(backtest["hit_rate"]) if backtest else 0,
             max_drawdown=float(backtest["max_drawdown"]) if backtest else 0,
             note=(
-                "現在の回収率表示はサンプルバックテスト。ローカルCSVに基づく実バックテストは次フェーズで実装"
+                "単勝・複勝のみの検証。"
+                "3連系などは公式払戻列の取り込み後に公開用ROIとして扱う"
                 if backtest
                 else "実データバックテストは未実行"
             ),
@@ -219,16 +258,23 @@ def get_backend_status() -> BackendStatus:
         runtime_notes=(
             [
                 "ローカルCSVからwin/placeモデルを学習済み",
-                "AUCは単勝オッズ・人気など市場情報の寄与を含むため、購入時点制約込みで評価する",
-                "時系列オッズ、払戻、購入時点制約を入れたバックテストは次フェーズ",
-                "利益保証や勝率100%を目的とせず、期待値候補を検証するための研究用ワークベンチ",
+                f"quality_gate.publishable={publishable}",
+                "place_odds、走破タイム、上がりは直接学習から除外し、"
+                "履歴化できる値だけ特徴量化する",
+                "全券種EV、着順分布、オッズドリフトは公式払戻と"
+                "時系列オッズの保存後に別モデルとして昇格する",
+                "利益保証や勝率100%を目的とせず、"
+                "期待値候補を検証するための研究用ワークベンチ",
             ]
             if metrics
             else [
-                "backend/data/keiba_data はローカルに存在するが、学習用CSVとモデルは未作成",
+                "backend/data/keiba_data はローカルに存在するが、"
+                "学習用CSVとモデルは未作成",
                 "uv run python scripts/convert_keiba_data.py で正規化CSVを作成する",
-                "uv run python scripts/train_production.py と backtest_simulator.py の後に実績表示を更新する",
-                "利益保証や勝率100%を目的とせず、期待値候補を検証するための研究用ワークベンチ",
+                "uv run python scripts/train_production.py と "
+                "backtest_simulator.py の後に実績表示を更新する",
+                "利益保証や勝率100%を目的とせず、"
+                "期待値候補を検証するための研究用ワークベンチ",
             ]
         ),
     )

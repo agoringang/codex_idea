@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 from datetime import date
+from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,12 @@ def _race_id_from_runner_id(race_runner_id: str) -> str:
     return ""
 
 
+def _bracket_from_horse_number(horse_number: int | None) -> int | None:
+    if horse_number is None or horse_number <= 0:
+        return None
+    return min(max(ceil(horse_number / 2), 1), 8)
+
+
 def parse_file(path: Path, encoding: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open("r", encoding=encoding, errors="replace", newline="") as handle:
@@ -108,12 +115,19 @@ def parse_file(path: Path, encoding: str) -> list[dict[str, Any]]:
             trainer_name = _value(row, "trainer")
             trainer_area = _value(row, "trainer_area")
             trainer = f"{trainer_name}({trainer_area})" if trainer_area else trainer_name
+            race_no = _to_int(_value(row, "number"))
+            horse_number = _to_int(_value(row, "gate"))
+            bracket = _bracket_from_horse_number(horse_number)
 
             record: dict[str, Any] = {
                 "race_id": race_id,
                 "race_date": race_date,
-                "number": _to_int(_value(row, "number")),
-                "gate": _to_int(_value(row, "gate")),
+                "race_no": race_no,
+                "horse_number": horse_number,
+                "runner_number": horse_number,
+                "number": horse_number,
+                "bracket": bracket,
+                "gate": bracket,
                 "horse_name": _value(row, "horse_name"),
                 "venue": _value(row, "venue"),
                 "distance": _to_int(_value(row, "distance")),
@@ -147,7 +161,9 @@ def parse_file(path: Path, encoding: str) -> list[dict[str, Any]]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Convert keiba_data CSV files to normalized training CSV")
+    parser = argparse.ArgumentParser(
+        description="Convert keiba_data CSV files to normalized training CSV"
+    )
     parser.add_argument("--input-dir", type=Path, default=Path("data/keiba_data"))
     parser.add_argument("--output", type=Path, default=Path("data/keiba_history_normalized.csv"))
     parser.add_argument("--encoding", default="cp932")
@@ -182,7 +198,7 @@ def main() -> None:
         key=lambda row: (
             row.get("race_date") or "",
             row.get("race_id") or "",
-            row.get("gate") if row.get("gate") is not None else 999,
+            row.get("horse_number") if row.get("horse_number") is not None else 999,
         ),
     )
 

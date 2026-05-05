@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from .feature_catalog import CATEGORICAL_FEATURES, NUMERIC_FEATURES
@@ -23,8 +24,23 @@ def runner_frame(runners: list[RunnerInput]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for runner in runners:
         payload = runner.model_dump()
-        rows.append({column: payload.get(column) for column in [*NUMERIC_FEATURES, *CATEGORICAL_FEATURES]})
-    return pd.DataFrame(rows)
+        payload["runner_number"] = runner.number
+        payload["bracket"] = runner.gate
+        payload["field_size"] = len(runners)
+        rows.append(
+            {column: payload.get(column) for column in [*NUMERIC_FEATURES, *CATEGORICAL_FEATURES]}
+        )
+    frame = pd.DataFrame(rows)
+    if not frame.empty and "market_odds" in frame:
+        odds = pd.to_numeric(frame["market_odds"], errors="coerce").replace(0, np.nan)
+        implied = (1 / odds).replace([np.inf, -np.inf], np.nan)
+        total = float(implied.sum(skipna=True))
+        win_probability = (implied / total).fillna(0) if total else pd.Series(0, index=frame.index)
+        frame["market_win_probability"] = win_probability.astype("float32")
+        frame["market_place_probability"] = (
+            win_probability * min(len(frame), 3)
+        ).clip(lower=1e-6, upper=0.95).astype("float32")
+    return frame
 
 
 def predict_probabilities(runners: list[RunnerInput]) -> tuple[list[float], list[float]] | None:
@@ -41,7 +57,9 @@ def predict_probabilities(runners: list[RunnerInput]) -> tuple[list[float], list
     frame = runner_frame(runners)
     win_probabilities = win_model.predict_proba(frame)[:, 1].tolist()
     if place_model is None:
-        place_probabilities = [min(max(probability * 2.4, 0.08), 0.82) for probability in win_probabilities]
+        place_probabilities = [
+            min(max(probability * 2.4, 0.08), 0.82) for probability in win_probabilities
+        ]
     else:
         place_probabilities = place_model.predict_proba(frame)[:, 1].tolist()
 

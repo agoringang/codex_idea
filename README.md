@@ -73,6 +73,17 @@ uv run python scripts/train_production.py \
   --output-dir models/racequant
 ```
 
+慎重に進める場合は、先に小規模ゲートを通します:
+
+```bash
+uv run python scripts/train_production.py \
+  --csv data/keiba_history_normalized.csv \
+  --output-dir models/racequant-smoke \
+  --race-limit 500
+```
+
+出力の `quality_gate.publishable` が `true` になってからフル学習結果をWeb表示に使います。現在の学習は `place_odds`、走破タイム、上がりを直接特徴量に使わず、市場確率と履歴特徴量を使う構成です。
+
 バックテスト:
 
 ```bash
@@ -82,6 +93,10 @@ uv run python scripts/backtest_simulator.py \
   --bankroll 100000 \
   --output backtests/local-risk72.json
 ```
+
+バックテストはデフォルトで `min_edge=0.12`、`min_probability=0.20`、`max_odds=40`、`max_edge=0.8` の保守的な購入フィルタを使います。`--skip-races` で学習期間の後ろだけを検証できます。
+
+現在の `keiba_history_normalized.csv` には馬連・3連単などの公式払い戻し列がないため、デフォルトでは単勝・複勝のみを市場オッズベースで検証します。3連系まで仮オッズで試す場合だけ `--synthetic-exotics` を付けてください。
 
 READMEや共有用のSVGカード出力:
 
