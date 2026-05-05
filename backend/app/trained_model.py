@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
+
 import pandas as pd
 
 from .feature_catalog import CATEGORICAL_FEATURES, NUMERIC_FEATURES
@@ -9,7 +11,8 @@ from .ml_pipeline import load_artifact
 from .schemas import RunnerInput
 
 
-DEFAULT_MODEL_PATH = Path("models/racequant/latest.joblib")
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MODEL_PATH = BACKEND_ROOT / "models/racequant/latest.joblib"
 
 
 def configured_model_path() -> Path:

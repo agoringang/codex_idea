@@ -9,7 +9,7 @@ settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="UmaLab: cached racing data, ML training, and expected-value prediction API.",
+    description="UmaLab: race calendar, live odds monitoring, ML training, backtests, and ticket EV API.",
 )
 
 app.add_middleware(

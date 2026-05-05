@@ -1,96 +1,79 @@
-# RaceQuant Backend
+# UmaLab Backend
 
-FastAPI service for horse-racing probability, expected value, and stake sizing.
+FastAPI service for race ingestion, model training, multi-bet prediction, live odds monitoring, and backtest reporting.
 
-The baseline model code is intentionally conservative:
-
-- Normalize each runner into a win probability.
-- Compare model probability with market odds.
-- Expand recommendations across win, place, support, bracket quinella, quinella, wide, exacta, trio, and trifecta.
-- Use `risk_level` as a risk-return preference: low values rank hit-rate bets higher, high values rank higher-payout bets higher.
-- Cap stake size with fractional Kelly and per-bet exposure limits.
-- Treat WIN5 as a multi-race portfolio model.
-
-No betting model can guarantee profit.
+Use uv only for the Python environment:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-uvicorn app.main:app --reload --port 8000
+uv sync --extra dev
+uv run uvicorn app.main:app --reload --port 8000
 ```
 
-```bash
-curl http://localhost:8000/status
-curl http://localhost:8000/live/kyoto-20260503-11
-```
+## Main Commands
 
-See `docs/data_pipeline.md` for the 20-year historical data and continuous retraining plan.
-
-## Production Training
-
-Real training needs a normalized historical CSV from JRA-VAN Data Lab. or a compatible licensed export. JRA-VAN's official product pages describe data from 1986 onward, so ask for the maximum provider window rather than assuming a full 50 years exists.
-
-```bash
-uv run python scripts/train_production.py --csv data/race_history.csv --output-dir models/racequant
-uv run python scripts/backtest_simulator.py --csv data/race_history.csv --risk 72 --bankroll 100000
-```
-
-Pipeline smoke test with synthetic data:
-
-```bash
-uv run python scripts/generate_synthetic_history.py --races 1200 --output data/smoke_history.csv
-uv run python scripts/train_production.py --csv data/smoke_history.csv --output-dir models/racequant
-uv run python scripts/backtest_simulator.py --csv data/smoke_history.csv --risk 72 --bankroll 100000
-```
-
-The API automatically uses `models/racequant/latest.joblib` when present. Override with `RACEQUANT_MODEL_PATH=/path/to/model.joblib`.
-
-## netkeiba Import
-
-Use this only for private research, public pages, and low-rate access. Do not use login-only or paid pages, do not bypass rate limits, and keep cached data private.
-
-Generate daily race-list URLs:
-
-```bash
-uv run python scripts/netkeiba_generate_list_urls.py --start-year 2006 --end-year 2026 --output data/netkeiba_list_urls.txt
-```
-
-Fetch daily list HTML slowly, then extract concrete race URLs:
-
-```bash
-uv run python scripts/netkeiba_fetch.py --url-file data/netkeiba_list_urls.txt --output-dir raw/netkeiba/list_html --manifest raw/netkeiba/list_manifest.csv --delay-seconds 10
-uv run python scripts/netkeiba_extract_race_urls.py --html-dir raw/netkeiba/list_html --output data/netkeiba_race_urls.txt
-```
-
-Fetch cached race-result HTML slowly:
-
-```bash
-uv run python scripts/netkeiba_fetch.py --url-file data/netkeiba_race_urls.txt --output-dir raw/netkeiba/html --manifest raw/netkeiba/race_manifest.csv --delay-seconds 10
-```
-
-Or start the full staged collector in the background:
-
-```bash
-uv run python scripts/netkeiba_start_collect.py --start-year 2006 --end-year 2026 --end-date 2026-05-02 --delay-seconds 10 --train-after
-uv run python scripts/netkeiba_status.py
-tail -f runtime/netkeiba_collect.log
-```
-
-Parse cached HTML to normalized CSV:
-
-```bash
-uv run python scripts/netkeiba_parse.py --html-dir raw/netkeiba/html --output data/netkeiba_race_history.csv
-```
-
-Convert local `data/keiba_data/*.CSV` (cp932/Shift_JIS, fixed 52 columns) to a normalized training CSV:
+Convert the local central-racing CSV archive:
 
 ```bash
 uv run python scripts/convert_keiba_data.py --input-dir data/keiba_data --output data/keiba_history_normalized.csv
 ```
 
-Then train:
+Train the current win/place production baseline:
 
 ```bash
-uv run python scripts/train_production.py --csv data/netkeiba_race_history.csv --output-dir models/racequant
+uv run python scripts/train_production.py --csv data/keiba_history_normalized.csv --output-dir models/racequant
 ```
+
+Run a risk-specific simulation:
+
+```bash
+uv run python scripts/backtest_simulator.py --csv data/keiba_history_normalized.csv --risk 72 --bankroll 100000 --output backtests/local-risk72.json
+```
+
+Render a README/shareable SVG card:
+
+```bash
+uv run python scripts/render_prediction_card.py --metrics models/racequant/metrics.json --backtest backtests/local-risk72.json --output ../public/model-output.svg
+```
+
+## API
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/status
+curl http://localhost:8000/status/product
+curl http://localhost:8000/races
+curl http://localhost:8000/live/tokyo-20260506-11
+```
+
+Plan sync/train/live jobs:
+
+```bash
+curl -X POST http://localhost:8000/jobs/sync \
+  -H 'content-type: application/json' \
+  -d '{"provider":"csv","years":20,"include_realtime":true,"raw_path":"data/keiba_data"}'
+
+curl -X POST http://localhost:8000/jobs/train \
+  -H 'content-type: application/json' \
+  -d '{"start_year":2000,"end_year":2025,"target":"rank","include_odds_snapshots":true}'
+
+curl -X POST http://localhost:8000/jobs/live-polling \
+  -H 'content-type: application/json' \
+  -d '{"provider":"simulation","interval_seconds":60,"race_ids":["tokyo-20260506-11"]}'
+```
+
+## Source Layout
+
+- `app/api/`: FastAPI route layer
+- `app/core/`: settings and lightweight pipeline schemas
+- `app/ml/`: parquet feature generation and simple training endpoints
+- `app/model.py`: strategy-level multi-bet prediction
+- `app/ml_pipeline.py`: production win/place training pipeline
+- `app/data_sources.py`: local race calendar projection from normalized CSV
+- `scripts/`: conversion, training, backtesting, live loop, SVG rendering
+
+Generated local files stay outside Git:
+
+- `data/**`
+- `models/**`
+- `backtests/**`
+- `runtime/**`

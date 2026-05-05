@@ -3,16 +3,18 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings
 
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
 
 class Settings(BaseSettings):
     app_name: str = "UmaLab API"
     app_version: str = "0.2.0"
-    data_dir: Path = Path("data")
-    raw_dir: Path = Path("data/raw")
-    normalized_dir: Path = Path("data/normalized")
-    feature_dir: Path = Path("data/features")
-    model_dir: Path = Path("models")
-    backtest_dir: Path = Path("backtests")
+    data_dir: Path = BACKEND_ROOT / "data"
+    raw_dir: Path = BACKEND_ROOT / "data/raw"
+    normalized_dir: Path = BACKEND_ROOT / "data/normalized"
+    feature_dir: Path = BACKEND_ROOT / "data/features"
+    model_dir: Path = BACKEND_ROOT / "models"
+    backtest_dir: Path = BACKEND_ROOT / "backtests"
 
     class Config:
         env_prefix = "UMALAB_"
