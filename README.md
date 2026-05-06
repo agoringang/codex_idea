@@ -139,7 +139,7 @@ npm run upload:model -- backend/models/racequant_holdout_2026/holdout_artifact.j
 - `GET /health`
 - `GET /status`
 - `GET /status/product`
-- `GET /races`
+- `GET /races?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`
 - `GET /live/{race_id}`
 - `GET /history`
 - `POST /predict`
@@ -154,3 +154,5 @@ npm run upload:model -- backend/models/racequant_holdout_2026/holdout_artifact.j
 ## Data Policy
 
 `backend/data/**`, `backend/models/**`, `backend/backtests/**` はGit管理外です。`backend/data/keiba_data` の実データはローカル学習に使い、リポジトリへは載せません。
+
+本番UIでデモレースを本物として表示しないため、`/races` は検証済みCSVまたは同梱スナップショットから作ったレースだけを返します。過去予想を永続化する場合は `backend/docs/supabase_prediction_history.sql` をSupabaseで実行し、`SUPABASE_URL` と `SUPABASE_SERVICE_ROLE_KEY` をVercelに設定してください。

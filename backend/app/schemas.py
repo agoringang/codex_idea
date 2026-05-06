@@ -9,7 +9,17 @@ class Runner(BaseModel):
     gate: int
     name: str
     jockey: str
-    weight: str | None = None # Added to match frontend
+    weight: str | None = None
+    carriedWeight: float | None = None
+    horseWeight: int | None = None
+    horseWeightDiff: int | None = None
+    age: int | None = None
+    sex: str | None = None
+    trainer: str | None = None
+    runningStyle: str | None = None
+    recentRecord: str | None = None
+    sire: str | None = None
+    damSire: str | None = None
     rating: int
     odds: float
     tags: list[str]
@@ -25,10 +35,14 @@ class Race(BaseModel):
     start: str
     title: str
     grade: str | None = None
+    market: Literal["JRA", "NAR"] | None = None
     course: str
     status: str
     officialNote: str
-    source: str | None = None # Added to match frontend
+    source: str | None = None
+    sourceUrl: str | None = None
+    sourceCheckedAt: str | None = None
+    verificationStatus: Literal["verified", "stale", "unverified"] = "unverified"
     runners: list[Runner]
 
 

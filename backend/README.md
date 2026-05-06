@@ -115,9 +115,13 @@ uv run python scripts/render_prediction_card.py --metrics models/racequant/metri
 curl http://localhost:8000/health
 curl http://localhost:8000/status
 curl http://localhost:8000/status/product
-curl http://localhost:8000/races
+curl 'http://localhost:8000/races?start_date=2026-04-20&end_date=2026-05-20'
 curl http://localhost:8000/live/tokyo-20260506-11
 ```
+
+Prediction history can use Supabase in production. Run `docs/supabase_prediction_history.sql`
+in Supabase SQL Editor, then set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
+Without those variables the backend falls back to local JSON storage.
 
 Plan sync/train/live jobs:
 

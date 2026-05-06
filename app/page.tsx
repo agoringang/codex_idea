@@ -8,12 +8,24 @@ type AppIconId = "waliwali" | "keisya" | "hikaku" | "portfolio";
 
 type Runner = {
   number: number;
+  gate?: number;
   name: string;
   jockey: string;
   odds: number;
   baseWin: number;
   drift: number;
   form: number;
+  carriedWeight?: number;
+  horseWeight?: number;
+  horseWeightDiff?: number;
+  age?: number;
+  sex?: string;
+  trainer?: string;
+  runningStyle?: string;
+  recentRecord?: string;
+  sire?: string;
+  damSire?: string;
+  tags?: string[];
 };
 
 type Race = {
@@ -27,6 +39,11 @@ type Race = {
   grade: string;
   market: Market;
   status: "card" | "odds" | "watch" | "finished";
+  officialNote?: string;
+  source?: string;
+  sourceUrl?: string;
+  sourceCheckedAt?: string;
+  verificationStatus?: "verified" | "stale" | "unverified";
   runners: Runner[];
 };
 
@@ -91,7 +108,7 @@ type HistoricalPrediction = {
   payout: number;
 };
 
-type ApiState = "loading" | "ready" | "fallback";
+type ApiState = "loading" | "ready" | "empty" | "fallback";
 
 type ApiRunnerPrediction = {
   id: string;
@@ -438,22 +455,49 @@ function safeNumber(value: unknown, fallback: number) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function optionalNumber(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function optionalText(value: unknown) {
+  const text = String(value ?? "").trim();
+  return text.length > 0 ? text : undefined;
+}
+
+const jraVenues = new Set(["札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉"]);
+
 function normalizeApiRace(item: any): Race {
   const runners = Array.isArray(item.runners) ? item.runners : [];
   const normalizedRunners = runners.map((runner: any, index: number) => {
     const odds = Math.max(safeNumber(runner.odds ?? runner.market_odds, 1.1), 1.1);
     const rating = safeNumber(runner.rating, 64);
+    const number = safeNumber(runner.number, index + 1);
     return {
-      number: safeNumber(runner.number, index + 1),
+      number,
+      gate: optionalNumber(runner.gate),
       name: String(runner.name ?? `${index + 1}番`),
       jockey: String(runner.jockey ?? "-"),
       odds,
       baseWin: Math.min(0.65, Math.max(0.004, 1 / odds)),
       drift: 0,
       form: Math.max(1, Math.min(100, rating)),
+      carriedWeight: optionalNumber(runner.carriedWeight ?? runner.carried_weight),
+      horseWeight: optionalNumber(runner.horseWeight ?? runner.horse_weight),
+      horseWeightDiff: optionalNumber(runner.horseWeightDiff ?? runner.horse_weight_diff),
+      age: optionalNumber(runner.age),
+      sex: optionalText(runner.sex),
+      trainer: optionalText(runner.trainer),
+      runningStyle: optionalText(runner.runningStyle ?? runner.running_style),
+      recentRecord: optionalText(runner.recentRecord ?? runner.recent_record),
+      sire: optionalText(runner.sire),
+      damSire: optionalText(runner.damSire ?? runner.dam_sire),
+      tags: Array.isArray(runner.tags) ? runner.tags.map(String) : undefined,
     };
   });
-  const market = item.market === "NAR" || item.grade === "NAR" ? "NAR" : "JRA";
+  const venue = String(item.venue ?? "未設定");
+  const market =
+    item.market === "NAR" || item.grade === "NAR" || !jraVenues.has(venue) ? "NAR" : "JRA";
   const status = ["card", "odds", "watch", "finished"].includes(item.status)
     ? item.status
     : "card";
@@ -463,12 +507,19 @@ function normalizeApiRace(item: any): Race {
     date: String(item.date ?? "2026-05-06"),
     day: String(item.day ?? ""),
     start: String(item.start ?? "未取得"),
-    venue: String(item.venue ?? "未設定"),
+    venue,
     title: String(item.title ?? item.raceNo ?? item.id),
     course: String(item.course ?? "条件未取得"),
     grade: String(item.grade ?? market),
     market,
     status,
+    officialNote: optionalText(item.officialNote ?? item.official_note),
+    source: optionalText(item.source),
+    sourceUrl: optionalText(item.sourceUrl ?? item.source_url),
+    sourceCheckedAt: optionalText(item.sourceCheckedAt ?? item.source_checked_at),
+    verificationStatus: ["verified", "stale", "unverified"].includes(item.verificationStatus)
+      ? item.verificationStatus
+      : "unverified",
     runners: normalizedRunners,
   };
 }
@@ -540,7 +591,7 @@ function buildRaceRequest(race: Race, riskLevel: number, bankroll: number) {
       const form = Math.max(1, Math.min(100, runner.form));
       return {
         id: `${race.id}-${runner.number}`,
-        gate: Math.max(1, Math.min(8, Math.ceil(runner.number / 2))),
+        gate: Math.max(1, Math.min(8, Math.round(runner.gate ?? Math.ceil(runner.number / 2)))),
         number: runner.number,
         name: runner.name,
         market_odds: odds,
@@ -551,10 +602,19 @@ function buildRaceRequest(race: Race, riskLevel: number, bankroll: number) {
         condition: Math.max(1, Math.min(100, form + (runner.drift < 0 ? 3 : 0))),
         base_win: Math.min(0.8, Math.max(0.001, runner.baseWin)),
         distance: Number.isFinite(distance) ? distance : undefined,
+        carried_weight: runner.carriedWeight,
+        horse_weight: runner.horseWeight,
+        horse_weight_diff: runner.horseWeightDiff,
+        age: runner.age,
+        sex: runner.sex,
         venue: race.venue,
         surface,
         going,
         jockey: runner.jockey,
+        trainer: runner.trainer,
+        running_style: runner.runningStyle,
+        sire: runner.sire,
+        dam_sire: runner.damSire,
         odds_rank: oddsRank.get(runner.number),
         odds_delta: runner.drift / 100,
       };
@@ -613,6 +673,7 @@ function mergeApiProjections(prediction: ApiRacePrediction | null, race: Race) {
     .map((runner) => {
       const source = sourceByNumber.get(runner.number);
       return {
+        ...source,
         number: runner.number,
         name: runner.name,
         jockey: source?.jockey ?? "-",
@@ -642,13 +703,59 @@ function dateAtJst(date: string) {
   return new Date(`${date}T00:00:00+09:00`);
 }
 
+function todayAtJst() {
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+function addDays(date: string, days: number) {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+}
+
+function dateOrdinal(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+  return Date.UTC(year, month - 1, day) / 86_400_000;
+}
+
+function sortRaceCards(a: Race, b: Race) {
+  return (
+    a.date.localeCompare(b.date) ||
+    a.venue.localeCompare(b.venue, "ja") ||
+    raceNumberValue(a) - raceNumberValue(b) ||
+    a.id.localeCompare(b.id)
+  );
+}
+
+function raceNumberValue(race: Race) {
+  return Number(race.title.match(/(\d+)R/)?.[1] ?? race.id.slice(-2)) || 999;
+}
+
+function pickDefaultRace(items: Race[], centerDate: string) {
+  const center = dateOrdinal(centerDate);
+  return [...items].sort((a, b) => {
+    const aDistance = Math.abs(dateOrdinal(a.date) - center);
+    const bDistance = Math.abs(dateOrdinal(b.date) - center);
+    return aDistance - bDistance || b.date.localeCompare(a.date) || sortRaceCards(a, b);
+  })[0];
+}
+
 function calendarLabel(date: string) {
   const [, month, day] = date.split("-");
   return `${Number(month)}/${Number(day)}`;
 }
 
-function buildCalendarDays(items: { date: string }[]): CalendarDay[] {
-  return Array.from(new Set(items.map((item) => item.date)))
+function buildCalendarDays(items: { date: string }[], centerDate: string): CalendarDay[] {
+  const dates = new Set(items.map((item) => item.date));
+  for (let offset = -15; offset <= 16; offset += 1) {
+    dates.add(addDays(centerDate, offset));
+  }
+
+  return Array.from(dates)
     .sort()
     .map((date) => ({
       date,
@@ -657,10 +764,23 @@ function buildCalendarDays(items: { date: string }[]): CalendarDay[] {
     }));
 }
 
+function verificationLabel(race: Race | null) {
+  if (!race) return "未取得";
+  if (race.verificationStatus === "verified") return "検証済み";
+  if (race.verificationStatus === "stale") return "要更新";
+  return "未検証";
+}
+
+function sourceLabel(race: Race | null) {
+  if (!race) return "公式情報未接続";
+  if (race.source) return race.source;
+  return race.verificationStatus === "verified" ? "確認済みデータ" : "情報源未設定";
+}
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<ViewTab>("predict");
-  const [selectedRaceId, setSelectedRaceId] = useState(races[0].id);
-  const [selectedDate, setSelectedDate] = useState(races[0].date);
+  const [selectedRaceId, setSelectedRaceId] = useState("");
+  const [selectedDate, setSelectedDate] = useState(todayAtJst());
   const [riskLevel, setRiskLevel] = useState(48);
   const [bankroll, setBankroll] = useState(100000);
   const [apiRaces, setApiRaces] = useState<Race[]>([]);
@@ -668,14 +788,23 @@ export default function Home() {
   const [apiState, setApiState] = useState<ApiState>("loading");
   const [apiPrediction, setApiPrediction] = useState<ApiRacePrediction | null>(null);
 
-  const availableRaces = apiRaces.length > 0 ? apiRaces : races;
-  const availableHistory = apiHistory.length > 0 ? apiHistory : predictionHistory;
-  const race = availableRaces.find((item) => item.id === selectedRaceId) ?? availableRaces[0];
+  const demoRacesEnabled = process.env.NEXT_PUBLIC_ENABLE_DEMO_RACES === "1";
+  const availableRaces = apiRaces.length > 0 ? apiRaces : demoRacesEnabled ? races : [];
+  const availableHistory = apiHistory.length > 0 ? apiHistory : demoRacesEnabled ? predictionHistory : [];
+  const race = availableRaces.find((item) => item.id === selectedRaceId) ?? availableRaces[0] ?? null;
   const selectedDateRaces = availableRaces.filter((item) => item.date === selectedDate);
   const selectedDateHistory = availableHistory.filter((item) => item.date === selectedDate);
+  const raceSelectorRaces = useMemo(() => {
+    const sameDate = selectedDateRaces.length > 0 ? selectedDateRaces : availableRaces;
+    const visible = sameDate.slice(0, 36);
+    if (race && !visible.some((item) => item.id === race.id)) {
+      return [race, ...visible].slice(0, 36);
+    }
+    return visible;
+  }, [availableRaces, race, selectedDateRaces]);
   const calendarDays = useMemo(
-    () => buildCalendarDays([...availableHistory, ...availableRaces]),
-    [availableHistory, availableRaces],
+    () => buildCalendarDays([...availableHistory, ...availableRaces], selectedDate),
+    [availableHistory, availableRaces, selectedDate],
   );
   const activeBankroll = Number.isFinite(bankroll) ? Math.max(bankroll, 1000) : 100000;
   const riskRatio = riskLevel / 100;
@@ -683,9 +812,12 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     async function loadInitialData() {
+      const centerDate = todayAtJst();
+      const startDate = addDays(centerDate, -15);
+      const endDate = addDays(centerDate, 16);
       try {
         const [raceResponse, historyResponse] = await Promise.all([
-          fetch(`${apiBaseUrl()}/races`),
+          fetch(`${apiBaseUrl()}/races?start_date=${startDate}&end_date=${endDate}`),
           fetch(`${apiBaseUrl()}/history`),
         ]);
         if (!raceResponse.ok) {
@@ -694,22 +826,26 @@ export default function Home() {
         const racePayload = await raceResponse.json();
         const historyPayload = historyResponse.ok ? await historyResponse.json() : {};
         const nextRaces = Array.isArray(racePayload)
-          ? racePayload.map(normalizeApiRace).filter((item) => item.runners.length > 0)
+          ? racePayload.map(normalizeApiRace).filter((item) => item.runners.length > 0).sort(sortRaceCards)
           : [];
         if (cancelled) {
           return;
         }
+        setApiHistory(normalizeApiHistory(historyPayload));
         if (nextRaces.length === 0) {
-          setApiState("fallback");
+          setApiRaces([]);
+          setSelectedRaceId("");
+          setSelectedDate(centerDate);
+          setApiState("empty");
           return;
         }
         setApiRaces(nextRaces);
-        setApiHistory(normalizeApiHistory(historyPayload));
+        const defaultRace = pickDefaultRace(nextRaces, centerDate) ?? nextRaces[0];
         setSelectedRaceId((current) =>
-          nextRaces.some((item) => item.id === current) ? current : nextRaces[0].id,
+          nextRaces.some((item) => item.id === current) ? current : defaultRace.id,
         );
         setSelectedDate((current) =>
-          nextRaces.some((item) => item.date === current) ? current : nextRaces[0].date,
+          nextRaces.some((item) => item.date === current) ? current : defaultRace.date,
         );
         setApiState("ready");
       } catch {
@@ -727,6 +863,10 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     async function loadPrediction() {
+      if (!race || race.runners.length < 2) {
+        setApiPrediction(null);
+        return;
+      }
       try {
         const response = await fetch(`${apiBaseUrl()}/predict`, {
           method: "POST",
@@ -755,6 +895,9 @@ export default function Home() {
   }, [activeBankroll, race, riskLevel]);
 
   const fallbackProjections = useMemo<RunnerProjection[]>(() => {
+    if (!race) {
+      return [];
+    }
     const raw = race.runners.map((runner) => {
       const valueLift = runner.odds >= 8 ? riskRatio * 0.032 : 0;
       const oddsMoveLift = runner.drift < 0 ? Math.abs(runner.drift) * 0.0012 : -runner.drift * 0.0008;
@@ -782,12 +925,15 @@ export default function Home() {
   }, [race, riskRatio]);
 
   const apiProjections = useMemo(
-    () => mergeApiProjections(apiPrediction, race),
+    () => (race ? mergeApiProjections(apiPrediction, race) : null),
     [apiPrediction, race],
   );
   const projections = apiProjections ?? fallbackProjections;
 
   const fallbackTickets = useMemo<TicketProjection[]>(() => {
+    if (projections.length === 0) {
+      return [];
+    }
     const projected = ticketTemplates
       .filter((ticket) => Math.abs(ticket.risk - riskLevel) <= 40 || ticket.risk <= riskLevel + 12)
       .map((ticket) => {
@@ -827,11 +973,11 @@ export default function Home() {
   }, [activeBankroll, projections, riskLevel, riskRatio]);
 
   const apiTickets = useMemo(() => {
-    if (!apiPrediction || apiPrediction.race_id !== race.id) {
+    if (!race || !apiPrediction || apiPrediction.race_id !== race.id) {
       return [];
     }
     return apiPrediction.recommendations.map(apiRecommendationToTicket);
-  }, [apiPrediction, race.id]);
+  }, [apiPrediction, race]);
   const tickets = apiTickets.length > 0 ? apiTickets : fallbackTickets;
 
   const totalStake = tickets.reduce((sum, ticket) => sum + ticket.stake, 0);
@@ -872,14 +1018,16 @@ export default function Home() {
 
         <section className="race-status-card">
           <div className="race-status-main">
-            <span>{race.date} {race.start}</span>
-            <h1>{race.venue} {race.title}</h1>
-            <p>{race.course}</p>
+            <span>{race ? `${race.date} ${race.start}` : selectedDate}</span>
+            <h1>{race ? `${race.venue} ${race.title}` : "検証済みレース未取得"}</h1>
+            <p>{race ? race.course : "CSV、DB、または取得元で照合できたレースだけ表示します"}</p>
+            {race?.officialNote && <small className="source-note">{race.officialNote}</small>}
           </div>
           <div className="race-pills">
-            <span>{race.market}</span>
-            <span>{race.status}</span>
-            <span>{apiPrediction?.race_id === race.id ? "実モデル" : apiState === "loading" ? "接続中" : "試算"}</span>
+            <span>{race?.market ?? "DATA"}</span>
+            <span className={race?.verificationStatus === "verified" ? "verified" : ""}>{verificationLabel(race)}</span>
+            <span>{sourceLabel(race)}</span>
+            <span>{race && apiPrediction?.race_id === race.id ? "実モデル" : apiState === "loading" ? "接続中" : "待機"}</span>
           </div>
         </section>
 
@@ -899,7 +1047,7 @@ export default function Home() {
           ))}
         </div>
 
-        {activeTab === "predict" && (
+        {activeTab === "predict" && race && (
           <PredictPanel
             activeBankroll={activeBankroll}
             bankroll={bankroll}
@@ -910,12 +1058,15 @@ export default function Home() {
             apiState={apiPrediction?.race_id === race.id ? "ready" : apiState}
             projections={projections}
             race={race}
-            races={availableRaces}
+            races={raceSelectorRaces}
             riskLabel={riskLabel}
             riskLevel={riskLevel}
             tickets={tickets}
             totalStake={totalStake}
           />
+        )}
+        {activeTab === "predict" && !race && (
+          <VerifiedDataEmptyState apiState={apiState} selectedDate={selectedDate} />
         )}
 
         {activeTab === "calendar" && (
@@ -932,8 +1083,11 @@ export default function Home() {
           />
         )}
 
-        {activeTab === "results" && (
+        {activeTab === "results" && race && (
           <ResultsPanel projections={projections} race={race} />
+        )}
+        {activeTab === "results" && !race && (
+          <VerifiedDataEmptyState apiState={apiState} selectedDate={selectedDate} />
         )}
 
         <OtherAppsPanel />
@@ -953,6 +1107,24 @@ export default function Home() {
         ))}
       </nav>
     </main>
+  );
+}
+
+function VerifiedDataEmptyState({ apiState, selectedDate }: { apiState: ApiState; selectedDate: string }) {
+  const label =
+    apiState === "loading"
+      ? "レース情報を確認中"
+      : apiState === "fallback"
+        ? "レース情報の取得に失敗"
+        : "検証済みレースなし";
+
+  return (
+    <section className="tab-panel">
+      <div className="empty-state verified-empty">
+        <strong>{label}</strong>
+        <span>{selectedDate} 周辺の出馬表、結果、オッズを確認できるデータがまだありません。</span>
+      </div>
+    </section>
   );
 }
 
@@ -1331,21 +1503,49 @@ function TicketLegs({ legs }: { legs: TicketLeg[] }) {
 function RunnerList({ projections }: { projections: RunnerProjection[] }) {
   return (
     <div className="runner-list">
-      {projections.map((runner, index) => (
-        <article key={runner.number}>
-          <span>{index + 1}</span>
-          <strong>{runner.number}. {runner.name}</strong>
-          <em>{runner.jockey}</em>
-          <div className="runner-probs">
-            <b>勝 {formatPercent(runner.winProbability)}</b>
-            <b>2内 {formatPercent(runner.top2Probability ?? runner.winProbability)}</b>
-            <b>3内 {formatPercent(runner.placeProbability)}</b>
-          </div>
-          <small className={runner.drift < 0 ? "positive" : "negative"}>
-            {runner.drift > 0 ? "+" : ""}{runner.drift.toFixed(1)}%
-          </small>
-        </article>
-      ))}
+      {projections.map((runner, index) => {
+        const horseWeight =
+          runner.horseWeight !== undefined
+            ? `馬体 ${runner.horseWeight}kg${
+                runner.horseWeightDiff !== undefined
+                  ? ` ${runner.horseWeightDiff >= 0 ? "+" : ""}${runner.horseWeightDiff}`
+                  : ""
+              }`
+            : undefined;
+        const profile = [
+          runner.sex || runner.age ? `${runner.sex ?? ""}${runner.age ? `${runner.age}歳` : ""}` : undefined,
+          runner.carriedWeight !== undefined ? `斤量 ${runner.carriedWeight.toFixed(1)}` : undefined,
+          horseWeight,
+          runner.runningStyle ? `脚質 ${runner.runningStyle}` : undefined,
+        ].filter(Boolean);
+        const staff = [runner.jockey ? `騎 ${runner.jockey}` : undefined, runner.trainer ? `厩 ${runner.trainer}` : undefined]
+          .filter(Boolean)
+          .join(" / ");
+        const bloodline = [runner.sire ? `父 ${runner.sire}` : undefined, runner.damSire ? `母父 ${runner.damSire}` : undefined]
+          .filter(Boolean)
+          .join(" / ");
+
+        return (
+          <article key={runner.number}>
+            <span>{index + 1}</span>
+            <div className="runner-main">
+              <strong>{runner.number}. {runner.name}</strong>
+              <em>{staff || runner.jockey}</em>
+              {profile.length > 0 && <small>{profile.join(" / ")}</small>}
+              {runner.recentRecord && <small>{runner.recentRecord}</small>}
+              {bloodline && <small>{bloodline}</small>}
+            </div>
+            <div className="runner-probs">
+              <b>勝 {formatPercent(runner.winProbability)}</b>
+              <b>2内 {formatPercent(runner.top2Probability ?? runner.winProbability)}</b>
+              <b>3内 {formatPercent(runner.placeProbability)}</b>
+            </div>
+            <small className={runner.drift < 0 ? "positive odds-move" : "negative odds-move"}>
+              {runner.drift > 0 ? "+" : ""}{runner.drift.toFixed(1)}%
+            </small>
+          </article>
+        );
+      })}
     </div>
   );
 }

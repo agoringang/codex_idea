@@ -37,8 +37,11 @@ def product_status() -> strategy_schemas.BackendStatus:
 
 
 @router.get("/races", response_model=list[strategy_schemas.Race])
-def races() -> list[strategy_schemas.Race]:
-    return get_races()
+def races(
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> list[strategy_schemas.Race]:
+    return get_races(start_date=start_date, end_date=end_date)
 
 
 @router.get("/live/{race_id}", response_model=strategy_schemas.LiveSnapshot)
