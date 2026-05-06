@@ -15,7 +15,7 @@ from app.core.schemas import (
 )
 from app.data_sources import get_races, get_snapshots
 from app.history import get_all_history, get_history_for_date, record_prediction
-from app.ingestion import ingest_netkeiba_window
+from app.ingestion import import_netkeiba_race_cards, ingest_netkeiba_window
 from app.jobs import plan_sync_job, plan_training_job
 from app.live import default_live_snapshot
 from app.settlement import settle_history
@@ -190,6 +190,30 @@ def netkeiba_ingest_job(
     return strategy_schemas.NetkeibaIngestResponse(
         status=summary.get("status", "error"),
         source=summary.get("source", "netkeiba"),
+        start_date=summary.get("start_date", ""),
+        end_date=summary.get("end_date", ""),
+        rows_found=summary.get("rows_found", 0),
+        races_found=summary.get("races_found", 0),
+        races_stored=summary.get("races_stored", 0),
+        auto_predictions=summary.get("auto_predictions", 0),
+        message=summary.get("message", ""),
+    )
+
+
+@router.post("/jobs/ingest/netkeiba/import", response_model=strategy_schemas.NetkeibaIngestResponse)
+def netkeiba_import_job(
+    request: strategy_schemas.NetkeibaRaceImportRequest,
+    authorization: str | None = Header(default=None),
+) -> strategy_schemas.NetkeibaIngestResponse:
+    _authorize_ingest_job(authorization)
+    summary = import_netkeiba_race_cards(
+        [race.model_dump(mode="json") for race in request.races],
+        source=request.source,
+        auto_predict=request.auto_predict,
+    )
+    return strategy_schemas.NetkeibaIngestResponse(
+        status=summary.get("status", "error"),
+        source=summary.get("source", request.source),
         start_date=summary.get("start_date", ""),
         end_date=summary.get("end_date", ""),
         rows_found=summary.get("rows_found", 0),

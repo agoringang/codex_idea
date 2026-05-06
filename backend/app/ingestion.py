@@ -281,6 +281,52 @@ def ingest_netkeiba_window(
     return summary
 
 
+def import_netkeiba_race_cards(
+    race_cards: list[dict[str, Any]],
+    *,
+    source: str = "netkeiba_local_import",
+    auto_predict: bool = True,
+) -> dict[str, Any]:
+    started_at = datetime.now(timezone.utc).isoformat()
+    races = [race for race in race_cards if isinstance(race, dict)]
+    dates = sorted({str(race.get("date") or "") for race in races if race.get("date")})
+    start_date = dates[0] if dates else ""
+    end_date = dates[-1] if dates else ""
+
+    races_stored = upsert_race_cards(races)
+    auto_predictions = _auto_predict_open_races(races) if auto_predict and races_stored > 0 else 0
+
+    status = "ok"
+    message = f"{len(races)} races imported, {auto_predictions} open-race predictions saved"
+    if not races:
+        status = "skipped"
+        message = "no race cards supplied"
+    if races and races_stored == 0 and not race_storage_available():
+        status = "error"
+        message = "Supabase is not configured, so supplied races were not persisted"
+
+    summary = {
+        "status": status,
+        "source": source,
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "start_date": start_date,
+        "end_date": end_date,
+        "request_count": 0,
+        "race_ids": len(races),
+        "race_pages": len(races),
+        "rows_found": sum(len(race.get("runners") or []) for race in races),
+        "races_found": len(races),
+        "races_stored": races_stored,
+        "auto_predictions": auto_predictions,
+        "raw_dir": "",
+        "output": "",
+        "message": message,
+    }
+    record_ingest_run(summary)
+    return summary
+
+
 def parse_date_window(start_date: str | None, end_date: str | None, days: int) -> tuple[str, str]:
     if start_date and end_date:
         return start_date, end_date

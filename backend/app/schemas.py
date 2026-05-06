@@ -215,6 +215,12 @@ class NetkeibaIngestResponse(BaseModel):
     message: str
 
 
+class NetkeibaRaceImportRequest(BaseModel):
+    source: str = "netkeiba_local_import"
+    auto_predict: bool = True
+    races: list[Race] = Field(default_factory=list)
+
+
 class TrainingJobRequest(BaseModel):
     start_year: int = Field(ge=1986)
     end_year: int = Field(ge=1986)
