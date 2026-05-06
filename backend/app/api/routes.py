@@ -175,6 +175,7 @@ def netkeiba_ingest_job(
     end_date: str | None = None,
     days: int = 2,
     max_requests: int | None = None,
+    delay: float | None = None,
     refresh: bool = False,
 ) -> strategy_schemas.NetkeibaIngestResponse:
     _authorize_ingest_job(authorization)
@@ -183,6 +184,7 @@ def netkeiba_ingest_job(
         end_date=end_date,
         days=days,
         max_requests=max_requests,
+        delay=delay,
         refresh=refresh,
     )
     return strategy_schemas.NetkeibaIngestResponse(
@@ -193,6 +195,7 @@ def netkeiba_ingest_job(
         rows_found=summary.get("rows_found", 0),
         races_found=summary.get("races_found", 0),
         races_stored=summary.get("races_stored", 0),
+        auto_predictions=summary.get("auto_predictions", 0),
         message=summary.get("message", ""),
     )
 

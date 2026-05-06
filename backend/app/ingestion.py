@@ -4,12 +4,16 @@ import argparse
 import csv
 import importlib.util
 import os
+import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .data_sources import build_race_dicts_from_rows
+from .history import record_prediction
+from .model import predict_race
 from .race_storage import race_storage_available, record_ingest_run, upsert_race_cards
+from .schemas import RaceRequest, RunnerInput
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +40,130 @@ def _date_range_for_days(days: int) -> tuple[str, str]:
     end = date.today()
     start = end - timedelta(days=max(days - 1, 0))
     return start.isoformat(), end.isoformat()
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number == number else default
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _race_request_from_dict(race: dict[str, Any]) -> RaceRequest:
+    runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+    odds_rank = {
+        id(item): index + 1
+        for index, item in enumerate(
+            sorted(runners, key=lambda item: _safe_float(item.get("odds") if isinstance(item, dict) else None, 999.0))
+        )
+        if isinstance(item, dict)
+    }
+    course = str(race.get("course") or "")
+    distance_match = re.search(r"(\d+(?:\.\d+)?)m", course)
+    distance = int(float(distance_match.group(1))) if distance_match else None
+    surface = "ダ" if "ダ" in course else "芝" if "芝" in course else None
+    going = next((label for label in ("不良", "稍重", "重", "良") if label in course), None)
+
+    runner_inputs: list[RunnerInput] = []
+    for index, runner in enumerate(runners, start=1):
+        if not isinstance(runner, dict):
+            continue
+        number = _safe_int(runner.get("number"), index)
+        odds = max(_safe_float(runner.get("odds"), 1.1), 1.1)
+        rating = max(1.0, min(100.0, _safe_float(runner.get("rating"), 60.0)))
+        runner_inputs.append(
+            RunnerInput(
+                id=f"{race.get('id')}-{number}",
+                gate=max(1, min(8, _safe_int(runner.get("gate"), (number + 1) // 2))),
+                number=number,
+                name=str(runner.get("name") or f"{number}番"),
+                market_odds=odds,
+                place_odds=max(1.1, odds * 0.32),
+                speed=rating,
+                stamina=rating,
+                pace=rating,
+                condition=rating,
+                base_win=max(0.001, min(0.8, 1 / odds)),
+                carried_weight=runner.get("carriedWeight"),
+                horse_weight=runner.get("horseWeight"),
+                horse_weight_diff=runner.get("horseWeightDiff"),
+                age=runner.get("age"),
+                sex=runner.get("sex"),
+                venue=race.get("venue"),
+                surface=surface,
+                going=going,
+                jockey=runner.get("jockey"),
+                trainer=runner.get("trainer"),
+                running_style=runner.get("runningStyle"),
+                sire=runner.get("sire"),
+                dam_sire=runner.get("damSire"),
+                odds_rank=odds_rank.get(id(runner)),
+            )
+        )
+
+    return RaceRequest(
+        race_id=str(race.get("id") or ""),
+        race_date=str(race.get("date") or date.today().isoformat()),
+        venue=race.get("venue"),
+        title=race.get("title"),
+        race_no=race.get("raceNo"),
+        course=race.get("course"),
+        market=race.get("market") if race.get("market") in {"JRA", "NAR"} else None,
+        model_version="racequant-active",
+        model_mode="ensemble",
+        risk_level=52,
+        bankroll=100_000,
+        min_edge=0.06,
+        min_probability=0.05,
+        max_candidate_odds=45,
+        max_edge=1.1,
+        max_exposure=0.022,
+        runners=runner_inputs,
+    )
+
+
+def _auto_predict_open_races(races: list[dict[str, Any]]) -> int:
+    count = 0
+    for race in races:
+        if str(race.get("status") or "") == "finished":
+            continue
+        runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+        if len(runners) < 2:
+            continue
+        try:
+            request = _race_request_from_dict(race)
+            prediction = predict_race(request)
+            record_prediction(
+                request.race_id,
+                request.race_date or date.today().isoformat(),
+                prediction=prediction.model_dump(mode="json"),
+                metadata={
+                    "race_date": request.race_date,
+                    "venue": request.venue,
+                    "title": request.title,
+                    "race_no": request.race_no,
+                    "course": request.course,
+                    "market": request.market,
+                    "risk_level": request.risk_level,
+                    "bankroll": request.bankroll,
+                    "model_mode": request.model_mode,
+                    "model_version": request.model_version,
+                    "auto_generated": True,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            count += 1
+        except Exception:
+            continue
+    return count
 
 
 def ingest_netkeiba_window(
@@ -117,6 +245,7 @@ def ingest_netkeiba_window(
         source_checked_at=datetime.now(timezone.utc).isoformat(),
     )
     races_stored = upsert_race_cards(race_dicts)
+    auto_predictions = _auto_predict_open_races(race_dicts) if races_stored > 0 else 0
 
     status = "ok"
     if stop_reason:
@@ -140,9 +269,10 @@ def ingest_netkeiba_window(
         "rows_found": int(import_summary.get("rows") or len(rows)),
         "races_found": len(race_dicts),
         "races_stored": races_stored,
+        "auto_predictions": auto_predictions,
         "raw_dir": str(raw_dir),
         "output": str(output),
-        "message": stop_reason or f"{len(race_dicts)} races imported",
+        "message": stop_reason or f"{len(race_dicts)} races imported, {auto_predictions} open-race predictions saved",
     }
     record_ingest_run(summary)
     return summary

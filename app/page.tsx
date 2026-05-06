@@ -759,6 +759,18 @@ function frontendRiskProfile(riskLevel: number) {
   };
 }
 
+function finishPosition(runner: Runner) {
+  const finishTag = runner.tags?.find((tag) => /^\d+着$/.test(tag));
+  return finishTag ? Number(finishTag.replace("着", "")) : undefined;
+}
+
+function raceResultOrder(race: Race) {
+  return race.runners
+    .map((runner) => ({ runner, position: finishPosition(runner) }))
+    .filter((item): item is { runner: Runner; position: number } => Number.isFinite(item.position))
+    .sort((a, b) => a.position - b.position);
+}
+
 function dateAtJst(date: string) {
   return new Date(`${date}T00:00:00+09:00`);
 }
@@ -1367,6 +1379,8 @@ function PredictPanel({
   venueOptions: VenueOption[];
   venueRaces: Race[];
 }) {
+  const resultOrder = raceResultOrder(race);
+
   return (
     <section className="tab-panel">
       <div className="control-strip">
@@ -1431,6 +1445,9 @@ function PredictPanel({
 
       {raceHistory && (
         <ResultStrip history={raceHistory} />
+      )}
+      {race.status === "finished" && (
+        <RaceResultStrip resultOrder={resultOrder} raceHistory={raceHistory} />
       )}
 
       <div className="section-heading">
@@ -1563,6 +1580,25 @@ function ResultStrip({ history }: { history: HistoricalPrediction }) {
       <span>ROI {formatPercent(history.roi, 1)}</span>
       <span>{formatYen(history.payout)} / {formatYen(history.stake)}</span>
       <em>{history.hitCount}/{history.betCount} 点</em>
+    </div>
+  );
+}
+
+function RaceResultStrip({
+  raceHistory,
+  resultOrder,
+}: {
+  raceHistory: HistoricalPrediction | null;
+  resultOrder: { runner: Runner; position: number }[];
+}) {
+  return (
+    <div className={raceHistory?.hit ? "race-result-strip hit" : "race-result-strip"}>
+      <strong>{raceHistory?.hit ? "🎯 的中結果" : "レース結果"}</strong>
+      {resultOrder.slice(0, 3).map(({ runner, position }) => (
+        <span key={runner.number}>{position}着 {runner.number}. {runner.name}</span>
+      ))}
+      {resultOrder.length === 0 && <span>結果待ち</span>}
+      {!raceHistory && <em>事前予想履歴なし</em>}
     </div>
   );
 }

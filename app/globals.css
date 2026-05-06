@@ -812,6 +812,34 @@ h1 {
   font-style: normal;
 }
 
+.race-result-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 12px;
+  border: 1px solid #e1e8ef;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 840;
+}
+
+.race-result-strip.hit {
+  border-color: rgba(10, 143, 105, 0.22);
+  background: #effcf6;
+}
+
+.race-result-strip strong {
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
+.race-result-strip em {
+  font-style: normal;
+}
+
 .month-controls {
   display: grid;
   grid-template-columns: 78px minmax(0, 1fr) 78px;
