@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.error import URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -62,6 +62,7 @@ def _history_entry(row: dict[str, Any]) -> dict[str, Any]:
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     entry: dict[str, Any] = {
         "race_id": row.get("race_id"),
+        "race_date": row.get("race_date"),
         "prediction": row.get("prediction") or {},
         "result": row.get("result") or {},
     }
@@ -74,6 +75,7 @@ def _supabase_record_prediction(
     date: str,
     prediction: Dict[str, Any] | None,
     result: Dict[str, Any] | None,
+    metadata: Dict[str, Any] | None,
 ) -> bool:
     if _supabase_config() is None:
         return False
@@ -82,6 +84,7 @@ def _supabase_record_prediction(
         "race_date": date,
         "prediction": prediction or {},
         "result": result or {},
+        "metadata": metadata or {},
     }
     try:
         _supabase_request(
@@ -115,17 +118,22 @@ def _supabase_history_for_date(date: str) -> List[Dict[str, Any]] | None:
     return [_history_entry(row) for row in rows if isinstance(row, dict)]
 
 
-def _supabase_all_history() -> Dict[str, List[Dict[str, Any]]] | None:
+def _supabase_all_history(
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> Dict[str, List[Dict[str, Any]]] | None:
     if _supabase_config() is None:
         return None
-    query = urlencode(
-        {
-            "select": "race_id,race_date,prediction,result,metadata,created_at",
-            "order": "race_date.desc",
-            "limit": "500",
-        },
-        safe=".,",
-    )
+    query_parts = [
+        ("select", "race_id,race_date,prediction,result,metadata,created_at"),
+        ("order", "race_date.desc"),
+        ("limit", "2000"),
+    ]
+    if start_date:
+        query_parts.append(("race_date", f"gte.{start_date}"))
+    if end_date:
+        query_parts.append(("race_date", f"lte.{end_date}"))
+    query = urlencode(query_parts, safe=".,")
     try:
         rows = _supabase_request(f"{SUPABASE_TABLE}?{query}")
     except (RuntimeError, TimeoutError, URLError, OSError, ValueError):
@@ -154,12 +162,13 @@ def record_prediction(
     date: str,
     prediction: Dict[str, Any] | None = None,
     result: Dict[str, Any] | None = None,
+    metadata: Dict[str, Any] | None = None,
 ) -> None:
     """Append or update a prediction record for a race.
 
     prediction/result are arbitrary dicts (will be stored as-is).
     """
-    if _supabase_record_prediction(race_id, date, prediction, result):
+    if _supabase_record_prediction(race_id, date, prediction, result, metadata):
         return
 
     _ensure_storage()
@@ -173,6 +182,8 @@ def record_prediction(
                 entry["prediction"] = prediction
             if result is not None:
                 entry["result"] = result
+            if metadata is not None:
+                entry.update(metadata)
             STORAGE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             return
     # otherwise append
@@ -181,6 +192,8 @@ def record_prediction(
         entry["prediction"] = prediction
     if result is not None:
         entry["result"] = result
+    if metadata is not None:
+        entry.update(metadata)
     day_entries.append(entry)
     data[day] = day_entries
     STORAGE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -196,10 +209,23 @@ def get_history_for_date(date: str) -> List[Dict[str, Any]]:
     return data.get(date, [])
 
 
-def get_all_history() -> Dict[str, List[Dict[str, Any]]]:
-    supabase_history = _supabase_all_history()
+def get_all_history(
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    supabase_history = _supabase_all_history(start_date, end_date)
     if supabase_history is not None:
         return supabase_history
 
     _ensure_storage()
-    return json.loads(STORAGE.read_text(encoding="utf-8") or "{}")
+    data = json.loads(STORAGE.read_text(encoding="utf-8") or "{}")
+    if not start_date and not end_date:
+        return data
+    filtered: Dict[str, List[Dict[str, Any]]] = {}
+    for day, entries in data.items():
+        if start_date and day < start_date:
+            continue
+        if end_date and day > end_date:
+            continue
+        filtered[day] = entries
+    return filtered

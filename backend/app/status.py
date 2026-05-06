@@ -40,7 +40,9 @@ def get_backend_status() -> BackendStatus:
         place_test = holdout_metrics["best"]["is_place"]["holdout_2026"]
         quality_gate = {"publishable": bool(holdout_metrics["risk_router"]["stable_on_2026"])}
         artifact_path = (
-            "RACEQUANT_MODEL_URL"
+            "RACEQUANT_MODEL_MANIFEST_URL"
+            if os.environ.get("RACEQUANT_MODEL_MANIFEST_URL")
+            else "RACEQUANT_MODEL_URL"
             if os.environ.get("RACEQUANT_MODEL_URL")
             else "models/racequant_holdout_2026/holdout_artifact.joblib"
         )

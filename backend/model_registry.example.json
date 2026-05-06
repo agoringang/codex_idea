@@ -1,0 +1,13 @@
+{
+  "version": "v0.3.1-holdout2026",
+  "trained_until": "2026-05-05",
+  "model_url": "https://example.vercel-storage.com/models/holdout_artifact.joblib",
+  "sha256": "replace-with-artifact-sha256",
+  "metrics": {
+    "win_auc": 0.856558,
+    "top2_auc": 0.84177,
+    "place_auc": 0.825213,
+    "holdout_roi": 1.3499
+  },
+  "notes": "Set RACEQUANT_MODEL_MANIFEST_URL to a Blob URL for this JSON to switch models without code changes."
+}

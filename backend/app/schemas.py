@@ -120,6 +120,13 @@ class RunnerInput(BaseModel):
 
 class RaceRequest(BaseModel):
     race_id: str
+    race_date: str | None = None
+    venue: str | None = None
+    title: str | None = None
+    race_no: str | None = None
+    course: str | None = None
+    market: Literal["JRA", "NAR"] | None = None
+    model_version: str | None = None
     model_mode: ModelMode = "ensemble"
     risk_level: float = Field(default=48, ge=0, le=100)
     bankroll: float = Field(default=100_000, gt=0)
@@ -194,6 +201,17 @@ class SyncJobResponse(BaseModel):
     years: int
     status: Literal["planned", "queued"]
     next_steps: list[str]
+
+
+class NetkeibaIngestResponse(BaseModel):
+    status: Literal["ok", "partial", "skipped", "error"]
+    source: str
+    start_date: str
+    end_date: str
+    rows_found: int
+    races_found: int
+    races_stored: int
+    message: str
 
 
 class TrainingJobRequest(BaseModel):

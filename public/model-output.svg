@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">UmaLab model output</title>
+  <desc id="desc">2026 holdout metrics for UmaLab RaceQuant model.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f4f7fb"/>
+      <stop offset="0.52" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef8f4"/>
+    </linearGradient>
+    <linearGradient id="icon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="0.52" stop-color="#10b981"/>
+      <stop offset="1" stop-color="#6366f1"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect x="70" y="60" width="1060" height="510" rx="44" fill="#ffffff" fill-opacity="0.88" stroke="#ffffff" filter="url(#shadow)"/>
+  <rect x="105" y="96" width="86" height="86" rx="24" fill="url(#icon)"/>
+  <path d="M130 137c18-30 57-30 76 0-12 20-25 31-38 35-13-4-26-15-38-35Z" fill="#ffffff" opacity="0.92"/>
+  <circle cx="168" cy="138" r="13" fill="#0f172a" opacity="0.72"/>
+  <text x="215" y="129" fill="#1d1d1f" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="44" font-weight="850">UmaLab RaceQuant</text>
+  <text x="216" y="166" fill="#6e6e73" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="22" font-weight="700">2025 and earlier training / 2026 holdout validation</text>
+
+  <g transform="translate(105 222)">
+    <rect width="300" height="132" rx="24" fill="#f8fbff" stroke="#dbeafe"/>
+    <text x="26" y="42" fill="#0369a1" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="18" font-weight="800">Win AUC</text>
+    <text x="26" y="96" fill="#111827" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="54" font-weight="900">0.857</text>
+  </g>
+  <g transform="translate(450 222)">
+    <rect width="300" height="132" rx="24" fill="#f3fcf8" stroke="#bbf7d0"/>
+    <text x="26" y="42" fill="#087451" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="18" font-weight="800">Top 2 AUC</text>
+    <text x="26" y="96" fill="#111827" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="54" font-weight="900">0.842</text>
+  </g>
+  <g transform="translate(795 222)">
+    <rect width="300" height="132" rx="24" fill="#f8fbff" stroke="#dbeafe"/>
+    <text x="26" y="42" fill="#0369a1" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="18" font-weight="800">Place AUC</text>
+    <text x="26" y="96" fill="#111827" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="54" font-weight="900">0.825</text>
+  </g>
+
+  <g transform="translate(105 394)">
+    <rect width="990" height="108" rx="26" fill="#111827"/>
+    <text x="30" y="43" fill="#e5e7eb" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="20" font-weight="800">Holdout backtest</text>
+    <text x="30" y="78" fill="#ffffff" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="34" font-weight="900">ROI 134.99%</text>
+    <text x="276" y="78" fill="#cbd5e1" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="26" font-weight="800">Hit rate 25.91%</text>
+    <text x="520" y="78" fill="#cbd5e1" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="26" font-weight="800">5,506 races</text>
+    <text x="740" y="78" fill="#cbd5e1" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="26" font-weight="800">3,423 bets</text>
+  </g>
+  <text x="105" y="538" fill="#6e6e73" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue,Arial,sans-serif" font-size="18" font-weight="700">Public UI treats these values as validation history, not profit guarantees.</text>
+</svg>

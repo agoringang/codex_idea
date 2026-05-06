@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from dataclasses import dataclass
 from functools import lru_cache
@@ -22,6 +23,7 @@ DEFAULT_MODEL_PATH = BACKEND_ROOT / "models/racequant/latest.joblib"
 HOLDOUT_MODEL_PATH = BACKEND_ROOT / "models/racequant_holdout_2026/holdout_artifact.joblib"
 MODEL_URL_ENV = "RACEQUANT_MODEL_URL"
 MODEL_SHA_ENV = "RACEQUANT_MODEL_SHA256"
+MODEL_MANIFEST_URL_ENV = "RACEQUANT_MODEL_MANIFEST_URL"
 MODEL_CACHE_DIR_ENV = "RACEQUANT_MODEL_CACHE_DIR"
 
 
@@ -60,8 +62,8 @@ def _cache_path_for_url(url: str) -> Path:
     return _model_cache_dir() / f"{digest}-{filename}"
 
 
-def _verify_model_checksum(path: Path) -> None:
-    expected = os.environ.get(MODEL_SHA_ENV)
+def _verify_model_checksum(path: Path, expected: str | None = None) -> None:
+    expected = expected or os.environ.get(MODEL_SHA_ENV)
     if not expected:
         return
     actual = _sha256_file(path)
@@ -71,12 +73,12 @@ def _verify_model_checksum(path: Path) -> None:
         )
 
 
-def _download_model(url: str) -> Path:
+def _download_model(url: str, expected_sha256: str | None = None) -> Path:
     cache_path = _cache_path_for_url(url)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
     if cache_path.exists() and cache_path.stat().st_size > 0:
-        _verify_model_checksum(cache_path)
+        _verify_model_checksum(cache_path, expected_sha256)
         return cache_path
 
     tmp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp")
@@ -88,12 +90,30 @@ def _download_model(url: str) -> Path:
                 break
             handle.write(chunk)
 
-    _verify_model_checksum(tmp_path)
+    _verify_model_checksum(tmp_path, expected_sha256)
     tmp_path.replace(cache_path)
     return cache_path
 
 
+def _load_model_manifest(location: str) -> dict[str, Any]:
+    if location.startswith(("http://", "https://")):
+        request = Request(location, headers={"User-Agent": "UmaLab/0.2 model-manifest"})
+        with urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    return json.loads(Path(location).read_text(encoding="utf-8"))
+
+
 def configured_model_path() -> Path:
+    manifest_location = os.environ.get(MODEL_MANIFEST_URL_ENV)
+    if manifest_location:
+        manifest = _load_model_manifest(manifest_location)
+        model_url = manifest.get("model_url") or manifest.get("url")
+        if model_url:
+            return _download_model(str(model_url), manifest.get("sha256") or manifest.get("model_sha256"))
+        model_path = manifest.get("model_path") or manifest.get("path")
+        if model_path:
+            return Path(str(model_path))
+
     model_url = os.environ.get(MODEL_URL_ENV)
     if model_url:
         return _download_model(model_url)

@@ -161,26 +161,19 @@ def _race_group_sort(item: tuple[str, list[dict[str, Any]]]) -> tuple[str, str, 
     )
 
 
-@lru_cache(maxsize=16)
-def _load_real_race_state(
-    path_text: str,
-    file_mtime_ns: int,
-    start_date_text: str,
-    end_date_text: str,
+def build_race_dicts_from_rows(
+    rows: list[dict[str, Any]],
+    *,
+    source_name: str,
+    source_checked_at: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    path = Path(path_text)
-    start_date = _parse_date(start_date_text)
-    end_date = _parse_date(end_date_text)
-    if not path.exists() or start_date is None or end_date is None:
-        return [], {}
-
     grouped_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in _read_window_rows(path, start_date, end_date):
+    for row in rows:
         grouped_rows[(row.get("race_id") or "").strip()].append(row)
 
     races: list[dict[str, Any]] = []
     snapshots: dict[str, dict[str, Any]] = {}
-    source_checked_at = datetime.now(timezone.utc).isoformat()
+    checked_at = source_checked_at or datetime.now(timezone.utc).isoformat()
 
     for race_id, rows in sorted(grouped_rows.items(), key=_race_group_sort):
         if not race_id or not rows:
@@ -259,6 +252,7 @@ def _load_real_race_state(
             for row in finished_runners
             if _runner_number(row, 0) > 0
         ]
+        is_finished = bool(result_order)
         market = "JRA" if venue in JRA_VENUES else "NAR"
 
         race_dict = {
@@ -268,30 +262,30 @@ def _load_real_race_state(
             "venue": venue,
             "meeting": f"{venue} 実データ",
             "raceNo": race_no,
-            "start": "結果確定",
+            "start": "結果確定" if is_finished else "出走表",
             "title": f"{venue}{race_no} 実データ",
             "grade": market,
             "market": market,
             "course": course,
-            "status": "finished",
-            "officialNote": f"{path.name}で照合済み / {race_date} / {len(rows)}頭",
-            "source": path.name,
+            "status": "finished" if is_finished else "open",
+            "officialNote": f"{source_name}で照合済み / {race_date} / {len(rows)}頭",
+            "source": source_name,
             "sourceUrl": f"https://db.netkeiba.com/race/{race_id}/",
-            "sourceCheckedAt": source_checked_at,
+            "sourceCheckedAt": checked_at,
             "verificationStatus": "verified",
             "runners": runners,
         }
         snapshot_dict = {
             "racecard_status": "parsed",
             "odds_status": "closed",
-            "result_status": "official",
+            "result_status": "official" if is_finished else "waiting",
             "updated_at": race_date,
             "next_poll_seconds": 0,
             "odds_moves": [],
             "scratches": [],
             "result": {
-                "status": "official",
-                "message": f"履歴CSVから生成された検証済みデータ {race_date}",
+                "status": "official" if is_finished else "pending",
+                "message": f"{source_name}から生成された検証済みデータ {race_date}",
                 "winning_selection": str(result_order[0]) if result_order else None,
                 "order": result_order or None,
                 "payout": 0,
@@ -302,6 +296,25 @@ def _load_real_race_state(
         snapshots[race_id] = snapshot_dict
 
     return races, snapshots
+
+
+@lru_cache(maxsize=16)
+def _load_real_race_state(
+    path_text: str,
+    file_mtime_ns: int,
+    start_date_text: str,
+    end_date_text: str,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    path = Path(path_text)
+    start_date = _parse_date(start_date_text)
+    end_date = _parse_date(end_date_text)
+    if not path.exists() or start_date is None or end_date is None:
+        return [], {}
+
+    return build_race_dicts_from_rows(
+        _read_window_rows(path, start_date, end_date),
+        source_name=path.name,
+    )
 
 
 def _recent_record(row: dict[str, Any]) -> str | None:
@@ -377,24 +390,61 @@ def _resolve_window(start_date: str | None, end_date: str | None, path: Path) ->
     return _window_from_latest(path)
 
 
+def _sort_race_dict(race: dict[str, Any]) -> tuple[str, str, int, str]:
+    race_no = _int_value({"race_no": str(race.get("raceNo") or "").replace("R", "")}, "race_no", 999)
+    return (
+        str(race.get("date") or ""),
+        str(race.get("venue") or ""),
+        race_no,
+        str(race.get("id") or ""),
+    )
+
+
+def _resolve_requested_window(
+    start_date: str | None,
+    end_date: str | None,
+    path: Path | None,
+) -> tuple[date, date] | None:
+    start = _parse_date(start_date)
+    end = _parse_date(end_date)
+    if start is not None and end is not None:
+        return start, end
+    if path is not None:
+        return _window_from_latest(path)
+    fallback_latest = date(2026, 5, 5)
+    return fallback_latest - timedelta(days=15), fallback_latest + timedelta(days=16)
+
+
 def get_races(start_date: str | None = None, end_date: str | None = None) -> list[Race]:
     """Return verified race cards built from normalized local history CSVs."""
 
     path = _active_history_path()
-    if path is None:
-        fallback_latest = date(2026, 5, 5)
-        start = _parse_date(start_date) or fallback_latest - timedelta(days=15)
-        end = _parse_date(end_date) or fallback_latest + timedelta(days=16)
-        raw_races, _ = _load_public_window(start, end)
-        return [Race(**deepcopy(race)) for race in raw_races]
-
-    window = _resolve_window(start_date, end_date, path)
+    window = _resolve_requested_window(start_date, end_date, path)
     if window is None:
         return []
     start, end = window
-    file_mtime_ns = path.stat().st_mtime_ns
-    raw_races, _ = _load_real_race_state(str(path), file_mtime_ns, start.isoformat(), end.isoformat())
-    return [Race(**deepcopy(race)) for race in raw_races]
+
+    raw_races: list[dict[str, Any]]
+    if path is None:
+        raw_races, _ = _load_public_window(start, end)
+    else:
+        file_mtime_ns = path.stat().st_mtime_ns
+        raw_races, _ = _load_real_race_state(str(path), file_mtime_ns, start.isoformat(), end.isoformat())
+
+    try:
+        from .race_storage import fetch_race_cards
+
+        stored_races = fetch_race_cards(start.isoformat(), end.isoformat())
+    except Exception:
+        stored_races = []
+
+    merged = {str(race.get("id") or ""): race for race in raw_races}
+    for race in stored_races:
+        race_id = str(race.get("id") or "")
+        if race_id:
+            merged[race_id] = race
+
+    return [Race(**deepcopy(race)) for race in sorted(merged.values(), key=_sort_race_dict)]
 
 
 def get_snapshots() -> dict[str, LiveSnapshot]:

@@ -11,5 +11,11 @@
       "entrypoint": ".",
       "routePrefix": "/"
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/jobs/ingest/netkeiba",
+      "schedule": "15 21 * * *"
+    }
+  ]
 }

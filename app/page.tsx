@@ -92,6 +92,19 @@ type CalendarDay = {
   day: string;
 };
 
+type MonthCell = CalendarDay & {
+  inMonth: boolean;
+  raceCount: number;
+  historyCount: number;
+  hitCount: number;
+  isToday: boolean;
+};
+
+type VenueOption = {
+  venue: string;
+  count: number;
+};
+
 type HistoricalPrediction = {
   id: string;
   date: string;
@@ -106,6 +119,10 @@ type HistoricalPrediction = {
   hitRate: number;
   stake: number;
   payout: number;
+  settled: boolean;
+  hit: boolean;
+  hitCount: number;
+  betCount: number;
 };
 
 type ApiState = "loading" | "ready" | "empty" | "fallback";
@@ -225,6 +242,10 @@ const predictionHistory: HistoricalPrediction[] = [
     hitRate: 0.5,
     stake: 10000,
     payout: 11800,
+    settled: true,
+    hit: true,
+    hitCount: 2,
+    betCount: 4,
   },
   {
     id: "kyoto-finished-1",
@@ -240,6 +261,10 @@ const predictionHistory: HistoricalPrediction[] = [
     hitRate: 0.4,
     stake: 7500,
     payout: 8025,
+    settled: true,
+    hit: true,
+    hitCount: 1,
+    betCount: 3,
   },
 ];
 
@@ -415,17 +440,9 @@ const modelStack = [
 const appLinks = [
   { name: "WaliWali", label: "割り勘", href: "https://waliwali-app.vercel.app/", icon: "waliwali" as const },
   { name: "Keisya", label: "傾斜会計", href: "https://keisya-app.vercel.app/", icon: "keisya" as const },
-  { name: "HikakU", label: "比較", href: "https://agoringang.com/#detail-misekurabe", icon: "hikaku" as const },
+  { name: "HikakU", label: "比較", href: "https://hikak-u.vercel.app/", icon: "hikaku" as const },
   { name: "アプリ一覧", label: "agoringang", href: "https://agoringang.com/#apps", icon: "portfolio" as const },
 ];
-
-const backtest = {
-  races: 0,
-  bets: 0,
-  roi: 0,
-  hitRate: 0,
-  maxDrawdown: 0,
-};
 
 const yenFormatter = new Intl.NumberFormat("ja-JP", {
   style: "currency",
@@ -539,20 +556,33 @@ function normalizeApiHistory(payload: any): HistoricalPrediction[] {
       const raceId = String(entry.race_id ?? `${date}-${index}`);
       const stake = safeNumber(prediction.total_stake, 0);
       const payout = safeNumber(result.payout, safeNumber(prediction.expected_return, 0));
+      const settled = Boolean(result.settled);
+      const hit = Boolean(result.hit);
+      const hitCount = safeNumber(result.hit_count, hit ? 1 : 0);
+      const betCount = safeNumber(result.bet_count, Array.isArray(prediction.recommendations) ? prediction.recommendations.length : 0);
       return {
         id: raceId,
-        date,
-        start: "確定",
+        date: String(entry.race_date ?? date),
+        start: settled ? "確定" : "保存",
         venue: String(entry.venue ?? raceId.split("-")[0] ?? "履歴"),
         title: String(entry.title ?? raceId),
         course: String(entry.course ?? "予測履歴"),
-        market: "JRA" as Market,
-        topTicket: String(prediction.top_ticket ?? prediction.warning ?? "AI予想"),
-        result: String(result.message ?? "結果反映"),
+        market: entry.market === "NAR" ? "NAR" as Market : "JRA" as Market,
+        topTicket: String(
+          prediction.recommendations?.[0]?.selection ??
+            prediction.top_ticket ??
+            prediction.warning ??
+            "AI予想",
+        ),
+        result: String(result.message ?? (settled ? "結果反映" : "結果待ち")),
         roi: stake > 0 ? payout / stake : safeNumber(prediction.expected_roi, 0),
-        hitRate: safeNumber(prediction.hit_rate, 0),
+        hitRate: betCount > 0 ? hitCount / betCount : safeNumber(prediction.hit_rate, 0),
         stake,
         payout,
+        settled,
+        hit,
+        hitCount,
+        betCount,
       };
     });
   });
@@ -578,6 +608,13 @@ function buildRaceRequest(race: Race, riskLevel: number, bankroll: number) {
 
   return {
     race_id: race.id,
+    race_date: race.date,
+    venue: race.venue,
+    title: race.title,
+    race_no: `${raceNumberValue(race)}R`,
+    course: race.course,
+    market: race.market,
+    model_version: "racequant-active",
     model_mode: "ensemble",
     risk_level: riskLevel,
     bankroll,
@@ -749,19 +786,59 @@ function calendarLabel(date: string) {
   return `${Number(month)}/${Number(day)}`;
 }
 
-function buildCalendarDays(items: { date: string }[], centerDate: string): CalendarDay[] {
-  const dates = new Set(items.map((item) => item.date));
-  for (let offset = -15; offset <= 16; offset += 1) {
-    dates.add(addDays(centerDate, offset));
-  }
+function monthStart(date: string) {
+  return `${date.slice(0, 7)}-01`;
+}
 
-  return Array.from(dates)
-    .sort()
-    .map((date) => ({
+function addMonths(date: string, months: number) {
+  const [year, month] = date.split("-").map(Number);
+  const next = new Date(Date.UTC(year, month - 1 + months, 1));
+  return next.toISOString().slice(0, 10);
+}
+
+function monthTitle(date: string) {
+  const [year, month] = date.split("-").map(Number);
+  return `${year}年${month}月`;
+}
+
+function buildMonthCells(
+  monthAnchor: string,
+  races: Race[],
+  history: HistoricalPrediction[],
+  today: string,
+): MonthCell[] {
+  const start = monthStart(monthAnchor);
+  const [year, month] = start.split("-").map(Number);
+  const first = new Date(Date.UTC(year, month - 1, 1));
+  const firstWeekday = (first.getUTCDay() + 6) % 7;
+  const gridStart = addDays(start, -firstWeekday);
+  const raceCountByDate = new Map<string, number>();
+  const historyCountByDate = new Map<string, number>();
+  const hitCountByDate = new Map<string, number>();
+
+  races.forEach((race) => {
+    raceCountByDate.set(race.date, (raceCountByDate.get(race.date) ?? 0) + 1);
+  });
+  history.forEach((item) => {
+    historyCountByDate.set(item.date, (historyCountByDate.get(item.date) ?? 0) + 1);
+    if (item.hit) {
+      hitCountByDate.set(item.date, (hitCountByDate.get(item.date) ?? 0) + 1);
+    }
+  });
+
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = addDays(gridStart, index);
+    return {
       date,
       label: calendarLabel(date),
       day: weekdayFormatter.format(dateAtJst(date)).replace("曜日", ""),
-    }));
+      inMonth: date.slice(0, 7) === start.slice(0, 7),
+      raceCount: raceCountByDate.get(date) ?? 0,
+      historyCount: historyCountByDate.get(date) ?? 0,
+      hitCount: hitCountByDate.get(date) ?? 0,
+      isToday: date === today,
+    };
+  });
 }
 
 function verificationLabel(race: Race | null) {
@@ -777,10 +854,16 @@ function sourceLabel(race: Race | null) {
   return race.verificationStatus === "verified" ? "確認済みデータ" : "情報源未設定";
 }
 
+function displayRaceTitle(race: Race) {
+  return race.title.includes(race.venue) ? race.title : `${race.venue} ${race.title}`;
+}
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<ViewTab>("predict");
   const [selectedRaceId, setSelectedRaceId] = useState("");
   const [selectedDate, setSelectedDate] = useState(todayAtJst());
+  const [selectedVenue, setSelectedVenue] = useState("");
+  const [monthAnchor, setMonthAnchor] = useState(monthStart(todayAtJst()));
   const [riskLevel, setRiskLevel] = useState(48);
   const [bankroll, setBankroll] = useState(100000);
   const [apiRaces, setApiRaces] = useState<Race[]>([]);
@@ -794,18 +877,36 @@ export default function Home() {
   const race = availableRaces.find((item) => item.id === selectedRaceId) ?? availableRaces[0] ?? null;
   const selectedDateRaces = availableRaces.filter((item) => item.date === selectedDate);
   const selectedDateHistory = availableHistory.filter((item) => item.date === selectedDate);
-  const raceSelectorRaces = useMemo(() => {
-    const sameDate = selectedDateRaces.length > 0 ? selectedDateRaces : availableRaces;
-    const visible = sameDate.slice(0, 36);
-    if (race && !visible.some((item) => item.id === race.id)) {
-      return [race, ...visible].slice(0, 36);
-    }
-    return visible;
-  }, [availableRaces, race, selectedDateRaces]);
-  const calendarDays = useMemo(
-    () => buildCalendarDays([...availableHistory, ...availableRaces], selectedDate),
-    [availableHistory, availableRaces, selectedDate],
+  const venueOptions = useMemo<VenueOption[]>(() => {
+    const counts = new Map<string, number>();
+    selectedDateRaces.forEach((item) => counts.set(item.venue, (counts.get(item.venue) ?? 0) + 1));
+    return Array.from(counts.entries())
+      .map(([venue, count]) => ({ venue, count }))
+      .sort((a, b) => a.venue.localeCompare(b.venue, "ja"));
+  }, [selectedDateRaces]);
+  const selectedVenueRaces = useMemo(() => {
+    const venue = selectedVenue || venueOptions[0]?.venue;
+    return selectedDateRaces.filter((item) => item.venue === venue).sort(sortRaceCards);
+  }, [selectedDateRaces, selectedVenue, venueOptions]);
+  const monthCells = useMemo(
+    () => buildMonthCells(monthAnchor, availableRaces, availableHistory, todayAtJst()),
+    [availableHistory, availableRaces, monthAnchor],
   );
+  const raceHistory = race ? availableHistory.find((item) => item.id === race.id) ?? null : null;
+  const historySummary = useMemo(() => {
+    const settled = availableHistory.filter((item) => item.settled);
+    const stake = settled.reduce((sum, item) => sum + item.stake, 0);
+    const payout = settled.reduce((sum, item) => sum + item.payout, 0);
+    const hits = settled.filter((item) => item.hit).length;
+    return {
+      total: settled.length,
+      hits,
+      stake,
+      payout,
+      roi: stake > 0 ? payout / stake : 0,
+      hitRate: settled.length > 0 ? hits / settled.length : 0,
+    };
+  }, [availableHistory]);
   const activeBankroll = Number.isFinite(bankroll) ? Math.max(bankroll, 1000) : 100000;
   const riskRatio = riskLevel / 100;
 
@@ -813,12 +914,12 @@ export default function Home() {
     let cancelled = false;
     async function loadInitialData() {
       const centerDate = todayAtJst();
-      const startDate = addDays(centerDate, -15);
-      const endDate = addDays(centerDate, 16);
+      const startDate = addDays(centerDate, -30);
+      const endDate = addDays(centerDate, 31);
       try {
         const [raceResponse, historyResponse] = await Promise.all([
           fetch(`${apiBaseUrl()}/races?start_date=${startDate}&end_date=${endDate}`),
-          fetch(`${apiBaseUrl()}/history`),
+          fetch(`${apiBaseUrl()}/history?start_date=${startDate}&end_date=${centerDate}`),
         ]);
         if (!raceResponse.ok) {
           throw new Error(`races ${raceResponse.status}`);
@@ -847,6 +948,8 @@ export default function Home() {
         setSelectedDate((current) =>
           nextRaces.some((item) => item.date === current) ? current : defaultRace.date,
         );
+        setSelectedVenue(defaultRace.venue);
+        setMonthAnchor(monthStart(defaultRace.date));
         setApiState("ready");
       } catch {
         if (!cancelled) {
@@ -893,6 +996,20 @@ export default function Home() {
       cancelled = true;
     };
   }, [activeBankroll, race, riskLevel]);
+
+  useEffect(() => {
+    if (selectedDateRaces.length === 0) {
+      return;
+    }
+    const currentVenueExists = selectedDateRaces.some((item) => item.venue === selectedVenue);
+    if (!currentVenueExists) {
+      const nextRace = [...selectedDateRaces].sort(sortRaceCards)[0];
+      setSelectedVenue(nextRace.venue);
+      setSelectedRaceId((current) =>
+        selectedDateRaces.some((item) => item.id === current) ? current : nextRace.id,
+      );
+    }
+  }, [selectedDateRaces, selectedVenue]);
 
   const fallbackProjections = useMemo<RunnerProjection[]>(() => {
     if (!race) {
@@ -990,8 +1107,20 @@ export default function Home() {
     setSelectedRaceId(raceId);
     if (nextRace) {
       setSelectedDate(nextRace.date);
+      setSelectedVenue(nextRace.venue);
+      setMonthAnchor(monthStart(nextRace.date));
     }
     setActiveTab(nextTab);
+  }
+
+  function selectDate(date: string) {
+    setSelectedDate(date);
+    setMonthAnchor(monthStart(date));
+    const firstRace = availableRaces.filter((item) => item.date === date).sort(sortRaceCards)[0];
+    if (firstRace) {
+      setSelectedVenue(firstRace.venue);
+      setSelectedRaceId(firstRace.id);
+    }
   }
 
   return (
@@ -1019,7 +1148,7 @@ export default function Home() {
         <section className="race-status-card">
           <div className="race-status-main">
             <span>{race ? `${race.date} ${race.start}` : selectedDate}</span>
-            <h1>{race ? `${race.venue} ${race.title}` : "検証済みレース未取得"}</h1>
+            <h1>{race ? displayRaceTitle(race) : "検証済みレース未取得"}</h1>
             <p>{race ? race.course : "CSV、DB、または取得元で照合できたレースだけ表示します"}</p>
             {race?.officialNote && <small className="source-note">{race.officialNote}</small>}
           </div>
@@ -1054,15 +1183,20 @@ export default function Home() {
             expectedRoi={expectedRoi}
             onBankrollChange={setBankroll}
             onRaceSelect={(raceId) => selectRace(raceId)}
+            onVenueSelect={setSelectedVenue}
             onRiskChange={setRiskLevel}
             apiState={apiPrediction?.race_id === race.id ? "ready" : apiState}
             projections={projections}
             race={race}
-            races={raceSelectorRaces}
+            raceHistory={raceHistory}
             riskLabel={riskLabel}
             riskLevel={riskLevel}
+            selectedDate={selectedDate}
+            selectedVenue={selectedVenue}
             tickets={tickets}
             totalStake={totalStake}
+            venueOptions={venueOptions}
+            venueRaces={selectedVenueRaces}
           />
         )}
         {activeTab === "predict" && !race && (
@@ -1071,20 +1205,26 @@ export default function Home() {
 
         {activeTab === "calendar" && (
           <CalendarPanel
-            calendarDays={calendarDays}
             history={availableHistory}
-            onDateSelect={setSelectedDate}
+            monthAnchor={monthAnchor}
+            monthCells={monthCells}
+            onDateSelect={selectDate}
+            onMonthChange={setMonthAnchor}
             onRaceSelect={(raceId) => selectRace(raceId, "predict")}
+            onVenueSelect={setSelectedVenue}
             races={availableRaces}
             selectedDate={selectedDate}
             selectedDateHistory={selectedDateHistory}
             selectedDateRaces={selectedDateRaces}
             selectedRaceId={selectedRaceId}
+            selectedVenue={selectedVenue}
+            venueOptions={venueOptions}
+            venueRaces={selectedVenueRaces}
           />
         )}
 
         {activeTab === "results" && race && (
-          <ResultsPanel projections={projections} race={race} />
+          <ResultsPanel history={availableHistory} historySummary={historySummary} projections={projections} race={race} />
         )}
         {activeTab === "results" && !race && (
           <VerifiedDataEmptyState apiState={apiState} selectedDate={selectedDate} />
@@ -1135,14 +1275,19 @@ function PredictPanel({
   expectedRoi,
   onBankrollChange,
   onRaceSelect,
+  onVenueSelect,
   onRiskChange,
   projections,
   race,
-  races,
+  raceHistory,
   riskLabel,
   riskLevel,
+  selectedDate,
+  selectedVenue,
   tickets,
   totalStake,
+  venueOptions,
+  venueRaces,
 }: {
   activeBankroll: number;
   apiState: ApiState;
@@ -1150,32 +1295,32 @@ function PredictPanel({
   expectedRoi: number;
   onBankrollChange: (value: number) => void;
   onRaceSelect: (raceId: string) => void;
+  onVenueSelect: (venue: string) => void;
   onRiskChange: (value: number) => void;
   projections: RunnerProjection[];
   race: Race;
-  races: Race[];
+  raceHistory: HistoricalPrediction | null;
   riskLabel: string;
   riskLevel: number;
+  selectedDate: string;
+  selectedVenue: string;
   tickets: TicketProjection[];
   totalStake: number;
+  venueOptions: VenueOption[];
+  venueRaces: Race[];
 }) {
   return (
     <section className="tab-panel">
       <div className="control-strip">
-        <div className="race-selector" aria-label="Race selector">
-          {races.map((item) => (
-            <button
-              className={item.id === race.id ? "active" : ""}
-              key={item.id}
-              onClick={() => onRaceSelect(item.id)}
-              type="button"
-            >
-              <span>{item.start}</span>
-              <strong>{item.venue} {item.title}</strong>
-              <em>{item.market}</em>
-            </button>
-          ))}
-        </div>
+        <RacePicker
+          onRaceSelect={onRaceSelect}
+          onVenueSelect={onVenueSelect}
+          races={venueRaces}
+          selectedDate={selectedDate}
+          selectedRaceId={race.id}
+          selectedVenue={selectedVenue || race.venue}
+          venues={venueOptions}
+        />
 
         <div className="settings-grid">
           <label className="field-card">
@@ -1224,6 +1369,10 @@ function PredictPanel({
         <Metric label="露出" value={formatPercent(totalStake / activeBankroll, 2)} />
         <Metric label="モデル" value={apiState === "ready" ? "実API" : apiState === "loading" ? "接続中" : "試算"} />
       </div>
+
+      {raceHistory && (
+        <ResultStrip history={raceHistory} />
+      )}
 
       <div className="section-heading">
         <h2>買い目</h2>
@@ -1285,52 +1434,152 @@ function PredictPanel({
   );
 }
 
-function CalendarPanel({
-  calendarDays,
-  history,
-  onDateSelect,
+function RacePicker({
   onRaceSelect,
+  onVenueSelect,
+  races,
+  selectedDate,
+  selectedRaceId,
+  selectedVenue,
+  venues,
+}: {
+  onRaceSelect: (raceId: string) => void;
+  onVenueSelect: (venue: string) => void;
+  races: Race[];
+  selectedDate: string;
+  selectedRaceId: string;
+  selectedVenue: string;
+  venues: VenueOption[];
+}) {
+  return (
+    <div className="race-picker">
+      <div className="section-heading compact">
+        <h2>{selectedDate}</h2>
+        <span>{venues.reduce((sum, venue) => sum + venue.count, 0)}R</span>
+      </div>
+      <div className="venue-grid" aria-label="開催場">
+        {venues.length > 0 ? (
+          venues.map((venue) => (
+            <button
+              className={selectedVenue === venue.venue ? "active" : ""}
+              key={venue.venue}
+              onClick={() => onVenueSelect(venue.venue)}
+              type="button"
+            >
+              <strong>{venue.venue}</strong>
+              <span>{venue.count}R</span>
+            </button>
+          ))
+        ) : (
+          <div className="empty-inline">開催なし</div>
+        )}
+      </div>
+      <div className="race-number-grid" aria-label="レース番号">
+        {races.map((item) => (
+          <button
+            className={item.id === selectedRaceId ? "active" : ""}
+            key={item.id}
+            onClick={() => onRaceSelect(item.id)}
+            type="button"
+          >
+            <strong>{raceNumberValue(item)}R</strong>
+            <span>{item.start}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ResultStrip({ history }: { history: HistoricalPrediction }) {
+  return (
+    <div className={history.hit ? "result-strip hit" : "result-strip"}>
+      <strong>{history.hit ? "🎯 的中" : history.settled ? "不的中" : "結果待ち"}</strong>
+      <span>ROI {formatPercent(history.roi, 1)}</span>
+      <span>{formatYen(history.payout)} / {formatYen(history.stake)}</span>
+      <em>{history.hitCount}/{history.betCount} 点</em>
+    </div>
+  );
+}
+
+function CalendarPanel({
+  history,
+  monthAnchor,
+  monthCells,
+  onDateSelect,
+  onMonthChange,
+  onRaceSelect,
+  onVenueSelect,
   races,
   selectedDate,
   selectedDateHistory,
   selectedDateRaces,
   selectedRaceId,
+  selectedVenue,
+  venueOptions,
+  venueRaces,
 }: {
-  calendarDays: CalendarDay[];
   history: HistoricalPrediction[];
+  monthAnchor: string;
+  monthCells: MonthCell[];
   onDateSelect: (date: string) => void;
+  onMonthChange: (date: string) => void;
   onRaceSelect: (raceId: string) => void;
+  onVenueSelect: (venue: string) => void;
   races: Race[];
   selectedDate: string;
   selectedDateHistory: HistoricalPrediction[];
   selectedDateRaces: Race[];
   selectedRaceId: string;
+  selectedVenue: string;
+  venueOptions: VenueOption[];
+  venueRaces: Race[];
 }) {
   return (
     <section className="tab-panel">
       <div className="section-heading">
         <h2>カレンダー</h2>
-        <span>{races.length}R</span>
+        <span>{monthTitle(monthAnchor)}</span>
       </div>
 
-      <div className="date-rail">
-        {calendarDays.map((day) => {
-          const dayRaces = races.filter((race) => race.date === day.date);
-          const dayHistory = history.filter((item) => item.date === day.date);
-          return (
-            <button
-              className={selectedDate === day.date ? "active" : ""}
-              key={day.date}
-              onClick={() => onDateSelect(day.date)}
-              type="button"
-            >
-              <span>{day.day}</span>
-              <strong>{day.label}</strong>
-              <em>{dayRaces.length + dayHistory.length}件</em>
-            </button>
-          );
-        })}
+      <div className="month-controls">
+        <button onClick={() => onMonthChange(addMonths(monthAnchor, -1))} type="button">前月</button>
+        <strong>{monthTitle(monthAnchor)}</strong>
+        <button onClick={() => onMonthChange(addMonths(monthAnchor, 1))} type="button">翌月</button>
       </div>
+
+      <div className="month-grid" aria-label="月間カレンダー">
+        {["月", "火", "水", "木", "金", "土", "日"].map((day) => (
+          <span className="month-weekday" key={day}>{day}</span>
+        ))}
+        {monthCells.map((day) => (
+          <button
+            className={[
+              "month-cell",
+              selectedDate === day.date ? "active" : "",
+              day.inMonth ? "" : "muted",
+              day.isToday ? "today" : "",
+            ].filter(Boolean).join(" ")}
+            key={day.date}
+            onClick={() => onDateSelect(day.date)}
+            type="button"
+          >
+            <strong>{Number(day.date.slice(-2))}</strong>
+            <span>{day.raceCount + day.historyCount}</span>
+            {day.hitCount > 0 && <em>🎯</em>}
+          </button>
+        ))}
+      </div>
+
+      <RacePicker
+        onRaceSelect={onRaceSelect}
+        onVenueSelect={onVenueSelect}
+        races={venueRaces}
+        selectedDate={selectedDate}
+        selectedRaceId={selectedRaceId}
+        selectedVenue={selectedVenue}
+        venues={venueOptions}
+      />
 
       <div className="calendar-list">
         {selectedDateRaces.length + selectedDateHistory.length > 0 ? (
@@ -1354,7 +1603,7 @@ function CalendarPanel({
               </div>
               <div className="history-result">
                 <span>{item.topTicket}</span>
-                <strong>{formatPercent(item.roi, 1)}</strong>
+                <strong>{item.hit ? "🎯 " : ""}{formatPercent(item.roi, 1)}</strong>
                 <em>{item.result} / 的中 {formatPercent(item.hitRate, 0)}</em>
               </div>
             </article>
@@ -1368,18 +1617,53 @@ function CalendarPanel({
   );
 }
 
-function ResultsPanel({ projections, race }: { projections: RunnerProjection[]; race: Race }) {
+function ResultsPanel({
+  history,
+  historySummary,
+  projections,
+  race,
+}: {
+  history: HistoricalPrediction[];
+  historySummary: {
+    total: number;
+    hits: number;
+    stake: number;
+    payout: number;
+    roi: number;
+    hitRate: number;
+  };
+  projections: RunnerProjection[];
+  race: Race;
+}) {
   return (
     <section className="tab-panel">
       <div className="section-heading">
         <h2>実績</h2>
-        <span>未連携</span>
+        <span>直近1ヶ月</span>
       </div>
       <div className="summary-strip">
-        <Metric label="回収率" value={formatPercent(backtest.roi)} />
-        <Metric label="的中率" value={formatPercent(backtest.hitRate)} />
-        <Metric label="対象R" value={numberFormatter.format(backtest.races)} />
-        <Metric label="最大DD" value={formatYen(backtest.maxDrawdown)} />
+        <Metric label="回収率" value={formatPercent(historySummary.roi)} />
+        <Metric label="的中率" value={formatPercent(historySummary.hitRate)} />
+        <Metric label="対象R" value={numberFormatter.format(historySummary.total)} />
+        <Metric label="払戻" value={formatYen(historySummary.payout)} />
+      </div>
+
+      <div className="history-list">
+        {history.slice(0, 20).map((item) => (
+          <article className={item.hit ? "hit" : ""} key={`${item.date}-${item.id}`}>
+            <div>
+              <span>{item.date} / {item.venue} / {item.market}</span>
+              <strong>{item.hit ? "🎯 " : ""}{item.title}</strong>
+              <em>{item.topTicket}</em>
+            </div>
+            <div>
+              <strong>{formatPercent(item.roi, 1)}</strong>
+              <span>{formatYen(item.payout)} / {formatYen(item.stake)}</span>
+              <em>{item.result}</em>
+            </div>
+          </article>
+        ))}
+        {history.length === 0 && <div className="empty-state">保存済み予想はまだありません</div>}
       </div>
 
       <div className="two-column">
