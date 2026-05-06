@@ -452,6 +452,7 @@ const yenFormatter = new Intl.NumberFormat("ja-JP", {
 
 const numberFormatter = new Intl.NumberFormat("ja-JP");
 const weekdayFormatter = new Intl.DateTimeFormat("ja-JP", { weekday: "short" });
+const INITIAL_CALENDAR_DATE = "2026-05-06";
 
 function formatPercent(value: number, digits = 1) {
   return `${(value * 100).toFixed(digits)}%`;
@@ -861,9 +862,10 @@ function displayRaceTitle(race: Race) {
 export default function Home() {
   const [activeTab, setActiveTab] = useState<ViewTab>("predict");
   const [selectedRaceId, setSelectedRaceId] = useState("");
-  const [selectedDate, setSelectedDate] = useState(todayAtJst());
+  const [selectedDate, setSelectedDate] = useState(INITIAL_CALENDAR_DATE);
   const [selectedVenue, setSelectedVenue] = useState("");
-  const [monthAnchor, setMonthAnchor] = useState(monthStart(todayAtJst()));
+  const [monthAnchor, setMonthAnchor] = useState(monthStart(INITIAL_CALENDAR_DATE));
+  const [todayDate, setTodayDate] = useState(INITIAL_CALENDAR_DATE);
   const [riskLevel, setRiskLevel] = useState(48);
   const [bankroll, setBankroll] = useState(100000);
   const [apiRaces, setApiRaces] = useState<Race[]>([]);
@@ -889,8 +891,8 @@ export default function Home() {
     return selectedDateRaces.filter((item) => item.venue === venue).sort(sortRaceCards);
   }, [selectedDateRaces, selectedVenue, venueOptions]);
   const monthCells = useMemo(
-    () => buildMonthCells(monthAnchor, availableRaces, availableHistory, todayAtJst()),
-    [availableHistory, availableRaces, monthAnchor],
+    () => buildMonthCells(monthAnchor, availableRaces, availableHistory, todayDate),
+    [availableHistory, availableRaces, monthAnchor, todayDate],
   );
   const raceHistory = race ? availableHistory.find((item) => item.id === race.id) ?? null : null;
   const historySummary = useMemo(() => {
@@ -914,6 +916,7 @@ export default function Home() {
     let cancelled = false;
     async function loadInitialData() {
       const centerDate = todayAtJst();
+      setTodayDate(centerDate);
       const startDate = addDays(centerDate, -30);
       const endDate = addDays(centerDate, 31);
       try {
