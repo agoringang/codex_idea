@@ -1,0 +1,30 @@
+# Local-only generated assets
+.DS_Store
+.env
+.env.local
+.env.*.local
+.next
+.vercel
+node_modules
+
+# Python environments and caches
+__pycache__
+*.pyc
+.ruff_cache
+.pytest_cache
+.mypy_cache
+.venv
+venv
+backend/.venv
+backend/**/__pycache__
+
+# Training data, model artifacts, and simulation outputs stay in Blob/Supabase/local storage
+backend/data/**
+backend/models/**
+backend/runtime/**
+backend/backtests/**
+*.joblib
+*.pkl
+*.parquet
+*.feather
+*.duckdb
