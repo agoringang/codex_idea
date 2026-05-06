@@ -177,6 +177,7 @@ def netkeiba_ingest_job(
     max_requests: int | None = None,
     delay: float | None = None,
     refresh: bool = False,
+    prefer_results: bool = False,
 ) -> strategy_schemas.NetkeibaIngestResponse:
     _authorize_ingest_job(authorization)
     summary = ingest_netkeiba_window(
@@ -186,6 +187,35 @@ def netkeiba_ingest_job(
         max_requests=max_requests,
         delay=delay,
         refresh=refresh,
+        prefer_results=prefer_results,
+    )
+    return strategy_schemas.NetkeibaIngestResponse(
+        status=summary.get("status", "error"),
+        source=summary.get("source", "netkeiba"),
+        start_date=summary.get("start_date", ""),
+        end_date=summary.get("end_date", ""),
+        rows_found=summary.get("rows_found", 0),
+        races_found=summary.get("races_found", 0),
+        races_stored=summary.get("races_stored", 0),
+        auto_predictions=summary.get("auto_predictions", 0),
+        message=summary.get("message", ""),
+    )
+
+
+@router.get("/jobs/ingest/netkeiba/results", response_model=strategy_schemas.NetkeibaIngestResponse)
+def netkeiba_result_ingest_job(
+    authorization: str | None = Header(default=None),
+    days: int = 2,
+    max_requests: int | None = None,
+    delay: float | None = None,
+) -> strategy_schemas.NetkeibaIngestResponse:
+    _authorize_ingest_job(authorization)
+    summary = ingest_netkeiba_window(
+        days=days,
+        max_requests=max_requests if max_requests is not None else 180,
+        delay=delay if delay is not None else 0.4,
+        refresh=True,
+        prefer_results=True,
     )
     return strategy_schemas.NetkeibaIngestResponse(
         status=summary.get("status", "error"),

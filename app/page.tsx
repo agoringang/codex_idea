@@ -123,6 +123,19 @@ type HistoricalPrediction = {
   hit: boolean;
   hitCount: number;
   betCount: number;
+  prediction?: ApiRacePrediction;
+  resultOrder?: number[];
+  recommendationResults?: RecommendationResult[];
+};
+
+type RecommendationResult = {
+  betType: string;
+  strategy: string;
+  selection: string;
+  hit: boolean;
+  stake: number;
+  odds: number;
+  payout: number;
 };
 
 type ApiState = "loading" | "ready" | "empty" | "fallback";
@@ -556,11 +569,26 @@ function normalizeApiHistory(payload: any): HistoricalPrediction[] {
       const result = entry.result ?? {};
       const raceId = String(entry.race_id ?? `${date}-${index}`);
       const stake = safeNumber(prediction.total_stake, 0);
-      const payout = safeNumber(result.payout, safeNumber(prediction.expected_return, 0));
       const settled = Boolean(result.settled);
+      const resultStake = safeNumber(result.stake, stake);
+      const payout = settled ? safeNumber(result.payout, 0) : safeNumber(prediction.expected_return, 0);
       const hit = Boolean(result.hit);
       const hitCount = safeNumber(result.hit_count, hit ? 1 : 0);
       const betCount = safeNumber(result.bet_count, Array.isArray(prediction.recommendations) ? prediction.recommendations.length : 0);
+      const recommendationResults: RecommendationResult[] = Array.isArray(result.recommendation_results)
+        ? result.recommendation_results.map((item: any) => ({
+            betType: String(item.bet_type ?? ""),
+            strategy: String(item.strategy ?? ""),
+            selection: String(item.selection ?? ""),
+            hit: Boolean(item.hit),
+            stake: safeNumber(item.stake, 0),
+            odds: safeNumber(item.odds, 0),
+            payout: safeNumber(item.payout, 0),
+          }))
+        : [];
+      const resultOrder = Array.isArray(result.order)
+        ? result.order.map((value: any) => Number(value)).filter((value: number) => Number.isFinite(value))
+        : [];
       return {
         id: raceId,
         date: String(entry.race_date ?? date),
@@ -576,14 +604,17 @@ function normalizeApiHistory(payload: any): HistoricalPrediction[] {
             "AI予想",
         ),
         result: String(result.message ?? (settled ? "結果反映" : "結果待ち")),
-        roi: stake > 0 ? payout / stake : safeNumber(prediction.expected_roi, 0),
+        roi: settled && resultStake > 0 ? safeNumber(result.roi, payout / resultStake) : safeNumber(prediction.expected_roi, 0),
         hitRate: betCount > 0 ? hitCount / betCount : safeNumber(prediction.hit_rate, 0),
-        stake,
+        stake: settled ? resultStake : stake,
         payout,
         settled,
         hit,
         hitCount,
         betCount,
+        prediction: prediction && typeof prediction === "object" ? prediction as ApiRacePrediction : undefined,
+        resultOrder,
+        recommendationResults,
       };
     });
   });
@@ -1012,6 +1043,10 @@ export default function Home() {
     let cancelled = false;
     async function loadPrediction() {
       if (!race || race.runners.length < 2) {
+        setApiPrediction(null);
+        return;
+      }
+      if (race.status === "finished") {
         setApiPrediction(null);
         return;
       }
@@ -1449,6 +1484,7 @@ function PredictPanel({
       {race.status === "finished" && (
         <RaceResultStrip resultOrder={resultOrder} raceHistory={raceHistory} />
       )}
+      <PredictionResultDiff race={race} raceHistory={raceHistory} projections={projections} />
 
       <div className="section-heading">
         <h2>買い目</h2>
@@ -1600,6 +1636,126 @@ function RaceResultStrip({
       {resultOrder.length === 0 && <span>結果待ち</span>}
       {!raceHistory && <em>事前予想履歴なし</em>}
     </div>
+  );
+}
+
+function PredictionResultDiff({
+  race,
+  raceHistory,
+  projections,
+}: {
+  race: Race;
+  raceHistory: HistoricalPrediction | null;
+  projections: RunnerProjection[];
+}) {
+  const actualOrder = raceResultOrder(race);
+  const positionByNumber = new Map(actualOrder.map(({ runner, position }) => [runner.number, position]));
+  const savedPredictionRunners = Array.isArray(raceHistory?.prediction?.runners)
+    ? [...raceHistory.prediction.runners]
+        .sort((a, b) => safeNumber(b.score, 0) - safeNumber(a.score, 0))
+        .slice(0, 5)
+        .map((runner) => ({
+          number: runner.number,
+          name: runner.name,
+          winProbability: safeNumber(runner.win_probability, 0),
+          placeProbability: safeNumber(runner.place_probability, 0),
+          score: safeNumber(runner.score, 0),
+        }))
+    : [];
+  const predictedRows = savedPredictionRunners.length > 0
+    ? savedPredictionRunners
+    : projections.slice(0, 5).map((runner) => ({
+        number: runner.number,
+        name: runner.name,
+        winProbability: runner.winProbability,
+        placeProbability: runner.placeProbability,
+        score: runner.score,
+      }));
+  const recommendationResults = raceHistory?.recommendationResults ?? [];
+  const savedRecommendations = Array.isArray(raceHistory?.prediction?.recommendations)
+    ? raceHistory.prediction.recommendations.slice(0, 6)
+    : [];
+
+  return (
+    <section className="prediction-diff">
+      <div className="section-heading compact">
+        <h2>予想と結果</h2>
+        <span>{raceHistory ? (raceHistory.settled ? "照合済み" : "結果待ち") : "履歴なし"}</span>
+      </div>
+
+      {!raceHistory && race.status === "finished" && (
+        <div className="diff-notice">
+          このレースは結果取得後に保存されたため、事前予想との差分はありません。
+        </div>
+      )}
+
+      <div className="diff-grid">
+        <div className="diff-lane">
+          <span>AI上位</span>
+          {predictedRows.slice(0, 3).map((runner, index) => {
+            const actualPosition = positionByNumber.get(runner.number);
+            return (
+              <article className={actualPosition && actualPosition <= 3 ? "matched" : ""} key={`${runner.number}-${index}`}>
+                <strong>{index + 1}. {runner.number} {runner.name}</strong>
+                <em>勝率 {formatPercent(runner.winProbability)} / 複勝 {formatPercent(runner.placeProbability)}</em>
+                <small>{actualPosition ? `${actualPosition}着` : race.status === "finished" ? "圏外/未完走" : "結果待ち"}</small>
+              </article>
+            );
+          })}
+        </div>
+
+        <div className="diff-lane">
+          <span>実着順</span>
+          {actualOrder.slice(0, 3).map(({ runner, position }) => {
+            const predictedIndex = predictedRows.findIndex((item) => item.number === runner.number);
+            return (
+              <article className={predictedIndex >= 0 && predictedIndex <= 2 ? "matched" : ""} key={runner.number}>
+                <strong>{position}着 {runner.number} {runner.name}</strong>
+                <em>{predictedIndex >= 0 ? `AI ${predictedIndex + 1}位` : "AI上位外"}</em>
+                <small>{runner.odds.toFixed(1)}倍</small>
+              </article>
+            );
+          })}
+          {actualOrder.length === 0 && <div className="empty-inline">結果待ち</div>}
+        </div>
+      </div>
+
+      <div className="ticket-audit-list">
+        {recommendationResults.length > 0 ? (
+          recommendationResults.slice(0, 8).map((item, index) => (
+            <article className={item.hit ? "hit" : ""} key={`${item.betType}-${item.selection}-${index}`}>
+              <div>
+                <strong>{item.hit ? "🎯 " : ""}{betTypeLabels[item.betType] ?? item.betType}</strong>
+                <span>{item.strategy || item.selection}</span>
+                <em>{item.selection}</em>
+              </div>
+              <div>
+                <span>{item.hit ? "的中" : "不的中"}</span>
+                <strong>{formatYen(item.payout)}</strong>
+                <em>{formatYen(item.stake)} / {item.odds.toFixed(1)}倍</em>
+              </div>
+            </article>
+          ))
+        ) : savedRecommendations.length > 0 ? (
+          savedRecommendations.slice(0, 6).map((item, index) => (
+            <article key={`${item.bet_type}-${item.selection}-${index}`}>
+              <div>
+                <strong>{betTypeLabels[item.bet_type] ?? item.bet_type}</strong>
+                <span>{item.strategy || item.note}</span>
+                <em>{item.selection}</em>
+              </div>
+              <div>
+                <span>結果待ち</span>
+                <strong>{formatYen(safeNumber(item.stake, 0))}</strong>
+                <em>{safeNumber(item.odds, 0).toFixed(1)}倍</em>
+              </div>
+            </article>
+          ))
+        ) : (
+          <div className="empty-inline">保存済み買い目なし</div>
+        )}
+      </div>
+    </section>
   );
 }
 

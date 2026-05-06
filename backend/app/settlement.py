@@ -102,12 +102,29 @@ def settle_prediction_entry(entry: dict[str, Any], race: Race | None) -> dict[st
         total_stake = sum(float(item.get("stake") or 0) for item in recommendations if isinstance(item, dict))
 
     hit_recommendations: list[dict[str, Any]] = []
+    recommendation_results: list[dict[str, Any]] = []
     total_payout = 0.0
     for recommendation in recommendations:
-        if not isinstance(recommendation, dict) or not _is_hit(recommendation, order):
+        if not isinstance(recommendation, dict):
             continue
-        hit_recommendations.append(recommendation)
-        total_payout += float(recommendation.get("stake") or 0) * float(recommendation.get("odds") or 0)
+        stake = float(recommendation.get("stake") or 0)
+        odds = float(recommendation.get("odds") or 0)
+        recommendation_hit = _is_hit(recommendation, order)
+        payout = stake * odds if recommendation_hit else 0.0
+        if recommendation_hit:
+            hit_recommendations.append(recommendation)
+            total_payout += payout
+        recommendation_results.append(
+            {
+                "bet_type": recommendation.get("bet_type"),
+                "strategy": recommendation.get("strategy") or recommendation.get("note"),
+                "selection": recommendation.get("selection"),
+                "hit": recommendation_hit,
+                "stake": stake,
+                "odds": odds,
+                "payout": payout,
+            }
+        )
 
     roi = total_payout / total_stake if total_stake > 0 else 0.0
     hit = bool(hit_recommendations)
@@ -121,6 +138,7 @@ def settle_prediction_entry(entry: dict[str, Any], race: Race | None) -> dict[st
         "payout": total_payout,
         "roi": roi,
         "order": order,
+        "recommendation_results": recommendation_results,
         "message": "🎯 的中" if hit else "不的中",
     }
     return enriched

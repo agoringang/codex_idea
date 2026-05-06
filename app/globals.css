@@ -840,6 +840,109 @@ h1 {
   font-style: normal;
 }
 
+.prediction-diff {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.diff-notice {
+  padding: 9px 10px;
+  border: 1px dashed rgba(15, 23, 42, 0.14);
+  border-radius: 14px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 820;
+  line-height: 1.45;
+}
+
+.diff-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.diff-lane {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.diff-lane > span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 860;
+}
+
+.diff-lane article,
+.ticket-audit-list article {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.diff-lane article.matched,
+.ticket-audit-list article.hit {
+  border-color: rgba(10, 143, 105, 0.22);
+  background: #effcf6;
+}
+
+.diff-lane strong,
+.ticket-audit-list strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 880;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-lane em,
+.diff-lane small,
+.ticket-audit-list span,
+.ticket-audit-list em {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-style: normal;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ticket-audit-list {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.ticket-audit-list article {
+  grid-template-columns: minmax(0, 1fr) minmax(92px, auto);
+  align-items: center;
+}
+
+.ticket-audit-list article > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.ticket-audit-list article > div:last-child {
+  justify-items: end;
+  text-align: right;
+}
+
 .month-controls {
   display: grid;
   grid-template-columns: 78px minmax(0, 1fr) 78px;
@@ -1362,8 +1465,10 @@ h1 {
   .settings-grid,
   .summary-strip,
   .two-column,
+  .diff-grid,
   .ticket-list article,
-  .ticket-data {
+  .ticket-data,
+  .ticket-audit-list article {
     grid-template-columns: 1fr;
   }
 
@@ -1409,6 +1514,11 @@ h1 {
   }
 
   .history-list article > div:last-child {
+    justify-items: start;
+    text-align: left;
+  }
+
+  .ticket-audit-list article > div:last-child {
     justify-items: start;
     text-align: left;
   }

@@ -178,6 +178,7 @@ def ingest_netkeiba_window(
     max_requests: int | None = None,
     delay: float | None = None,
     refresh: bool = False,
+    prefer_results: bool = False,
 ) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc).isoformat()
     if not start_date or not end_date:
@@ -204,6 +205,7 @@ def ingest_netkeiba_window(
         retries=int(os.getenv("NETKEIBA_INGEST_RETRIES", "1")),
         max_requests=max_requests if max_requests is not None else int(os.getenv("NETKEIBA_INGEST_MAX_REQUESTS", "120")),
         refresh=refresh,
+        prefer_results=prefer_results,
         no_calendar=False,
         list_only=False,
         skip_import=False,

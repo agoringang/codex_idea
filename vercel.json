@@ -16,6 +16,10 @@
     {
       "path": "/api/jobs/ingest/netkeiba",
       "schedule": "15 21 * * *"
+    },
+    {
+      "path": "/api/jobs/ingest/netkeiba/results",
+      "schedule": "30 12 * * *"
     }
   ]
 }

@@ -211,8 +211,14 @@ def jst_today() -> date:
     return datetime.now(timezone(timedelta(hours=9))).date()
 
 
-def race_url_for_dynamic_id(race_id: str, *, source: str, race_date: date) -> str:
-    is_past = race_date < jst_today()
+def race_url_for_dynamic_id(
+    race_id: str,
+    *,
+    source: str,
+    race_date: date,
+    prefer_results: bool = False,
+) -> str:
+    is_past = prefer_results or race_date < jst_today()
     if source == "jra":
         template = JRA_RESULT_URL if is_past else JRA_SHUTUBA_URL
     else:
@@ -263,6 +269,7 @@ def scrape_calendar_pages(
                         race_id,
                         source=source,
                         race_date=day,
+                        prefer_results=bool(getattr(args, "prefer_results", False)),
                     )
             elif sub_result.status in {"blocked", "access_limited"}:
                 sub_row["warning"] = f"netkeiba {source} race list blocked: {sub_result.status}"
