@@ -126,6 +126,9 @@ type HistoricalPrediction = {
   prediction?: ApiRacePrediction;
   resultOrder?: number[];
   recommendationResults?: RecommendationResult[];
+  predictionKind?: string;
+  officialPrediction?: boolean;
+  generatedAfterResult?: boolean;
 };
 
 type RecommendationResult = {
@@ -615,6 +618,9 @@ function normalizeApiHistory(payload: any): HistoricalPrediction[] {
         prediction: prediction && typeof prediction === "object" ? prediction as ApiRacePrediction : undefined,
         resultOrder,
         recommendationResults,
+        predictionKind: String(entry.prediction_kind ?? ""),
+        officialPrediction: entry.official_prediction !== false,
+        generatedAfterResult: Boolean(entry.generated_after_result),
       };
     });
   });
@@ -1671,17 +1677,29 @@ function PredictionResultDiff({
   const savedRecommendations = Array.isArray(raceHistory?.prediction?.recommendations)
     ? raceHistory.prediction.recommendations.slice(0, 6)
     : [];
+  const statusLabel = raceHistory
+    ? raceHistory.generatedAfterResult
+      ? "検証照合"
+      : raceHistory.settled
+        ? "照合済み"
+        : "結果待ち"
+    : "履歴なし";
 
   return (
     <section className="prediction-diff">
       <div className="section-heading compact">
         <h2>予想と結果</h2>
-        <span>{raceHistory ? (raceHistory.settled ? "照合済み" : "結果待ち") : "履歴なし"}</span>
+        <span>{statusLabel}</span>
       </div>
 
       {!raceHistory && race.status === "finished" && (
         <div className="diff-notice">
           このレースは結果取得後に保存されたため、事前予想との差分はありません。
+        </div>
+      )}
+      {raceHistory?.generatedAfterResult && (
+        <div className="diff-notice">
+          この差分は運用開始前の欠損分を補う検証用予想です。今後の自動取得分は発走前の保存予想として照合します。
         </div>
       )}
 

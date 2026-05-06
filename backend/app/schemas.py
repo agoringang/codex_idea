@@ -212,6 +212,7 @@ class NetkeibaIngestResponse(BaseModel):
     races_found: int
     races_stored: int
     auto_predictions: int = 0
+    backfilled_predictions: int = 0
     message: str
 
 

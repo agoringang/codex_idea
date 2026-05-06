@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .data_sources import build_race_dicts_from_rows
-from .history import record_prediction
+from .history import get_all_history, record_prediction
 from .model import predict_race
 from .race_storage import race_storage_available, record_ingest_run, upsert_race_cards
 from .schemas import RaceRequest, RunnerInput
@@ -134,39 +134,81 @@ def _race_request_from_dict(race: dict[str, Any]) -> RaceRequest:
     )
 
 
+def _record_prediction_for_race(race: dict[str, Any], *, generated_after_result: bool = False) -> bool:
+    runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+    if len(runners) < 2:
+        return False
+    try:
+        request = _race_request_from_dict(race)
+        prediction = predict_race(request)
+        record_prediction(
+            request.race_id,
+            request.race_date or date.today().isoformat(),
+            prediction=prediction.model_dump(mode="json"),
+            metadata={
+                "race_date": request.race_date,
+                "venue": request.venue,
+                "title": request.title,
+                "race_no": request.race_no,
+                "course": request.course,
+                "market": request.market,
+                "risk_level": request.risk_level,
+                "bankroll": request.bankroll,
+                "model_mode": request.model_mode,
+                "model_version": request.model_version,
+                "auto_generated": True,
+                "official_prediction": not generated_after_result,
+                "generated_after_result": generated_after_result,
+                "prediction_kind": "post_result_simulation" if generated_after_result else "pre_race_auto",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except Exception:
+        return False
+    return True
+
+
 def _auto_predict_open_races(races: list[dict[str, Any]]) -> int:
     count = 0
     for race in races:
         if str(race.get("status") or "") == "finished":
             continue
-        runners = race.get("runners") if isinstance(race.get("runners"), list) else []
-        if len(runners) < 2:
-            continue
-        try:
-            request = _race_request_from_dict(race)
-            prediction = predict_race(request)
-            record_prediction(
-                request.race_id,
-                request.race_date or date.today().isoformat(),
-                prediction=prediction.model_dump(mode="json"),
-                metadata={
-                    "race_date": request.race_date,
-                    "venue": request.venue,
-                    "title": request.title,
-                    "race_no": request.race_no,
-                    "course": request.course,
-                    "market": request.market,
-                    "risk_level": request.risk_level,
-                    "bankroll": request.bankroll,
-                    "model_mode": request.model_mode,
-                    "model_version": request.model_version,
-                    "auto_generated": True,
-                    "generated_at": datetime.now(timezone.utc).isoformat(),
-                },
-            )
+        if _record_prediction_for_race(race):
             count += 1
-        except Exception:
+    return count
+
+
+def _existing_prediction_ids(start_date: str, end_date: str) -> set[str]:
+    existing: set[str] = set()
+    try:
+        history = get_all_history(start_date, end_date)
+    except Exception:
+        return existing
+    for entries in history.values():
+        if not isinstance(entries, list):
             continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            prediction = entry.get("prediction")
+            race_id = str(entry.get("race_id") or "")
+            if race_id and isinstance(prediction, dict) and prediction:
+                existing.add(race_id)
+    return existing
+
+
+def _auto_predict_missing_finished_races(races: list[dict[str, Any]], start_date: str, end_date: str) -> int:
+    existing = _existing_prediction_ids(start_date, end_date)
+    count = 0
+    for race in races:
+        race_id = str(race.get("id") or "")
+        if not race_id or race_id in existing:
+            continue
+        if str(race.get("status") or "") != "finished":
+            continue
+        if _record_prediction_for_race(race, generated_after_result=True):
+            existing.add(race_id)
+            count += 1
     return count
 
 
@@ -251,7 +293,13 @@ def ingest_netkeiba_window(
         source_checked_at=datetime.now(timezone.utc).isoformat(),
     )
     races_stored = upsert_race_cards(race_dicts)
-    auto_predictions = _auto_predict_open_races(race_dicts) if races_stored > 0 else 0
+    open_predictions = _auto_predict_open_races(race_dicts) if races_stored > 0 else 0
+    backfilled_predictions = (
+        _auto_predict_missing_finished_races(race_dicts, start_date, end_date)
+        if prefer_results and races_stored > 0
+        else 0
+    )
+    auto_predictions = open_predictions + backfilled_predictions
 
     status = "ok"
     if stop_reason:
@@ -276,9 +324,15 @@ def ingest_netkeiba_window(
         "races_found": len(race_dicts),
         "races_stored": races_stored,
         "auto_predictions": auto_predictions,
+        "backfilled_predictions": backfilled_predictions,
         "raw_dir": str(raw_dir),
         "output": str(output),
-        "message": stop_reason or f"{len(race_dicts)} races imported, {auto_predictions} open-race predictions saved",
+        "message": stop_reason
+        or (
+            f"{len(race_dicts)} races imported, "
+            f"{open_predictions} open-race predictions saved, "
+            f"{backfilled_predictions} finished-race simulations backfilled"
+        ),
     }
     record_ingest_run(summary)
     return summary
@@ -322,6 +376,7 @@ def import_netkeiba_race_cards(
         "races_found": len(races),
         "races_stored": races_stored,
         "auto_predictions": auto_predictions,
+        "backfilled_predictions": 0,
         "raw_dir": "",
         "output": "",
         "message": message,

@@ -198,6 +198,7 @@ def netkeiba_ingest_job(
         races_found=summary.get("races_found", 0),
         races_stored=summary.get("races_stored", 0),
         auto_predictions=summary.get("auto_predictions", 0),
+        backfilled_predictions=summary.get("backfilled_predictions", 0),
         message=summary.get("message", ""),
     )
 
@@ -226,6 +227,7 @@ def netkeiba_result_ingest_job(
         races_found=summary.get("races_found", 0),
         races_stored=summary.get("races_stored", 0),
         auto_predictions=summary.get("auto_predictions", 0),
+        backfilled_predictions=summary.get("backfilled_predictions", 0),
         message=summary.get("message", ""),
     )
 
@@ -250,6 +252,7 @@ def netkeiba_import_job(
         races_found=summary.get("races_found", 0),
         races_stored=summary.get("races_stored", 0),
         auto_predictions=summary.get("auto_predictions", 0),
+        backfilled_predictions=summary.get("backfilled_predictions", 0),
         message=summary.get("message", ""),
     )
 
