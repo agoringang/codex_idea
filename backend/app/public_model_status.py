@@ -55,6 +55,8 @@ PUBLIC_HOLDOUT_METRICS = {
         "surface": 1.0,
         "going": 1.0,
         "weather": 1.0,
+        "jockey": 1.0,
+        "trainer": 1.0,
     },
     "risk_router": {
         "stable_on_2026": True,
