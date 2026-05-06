@@ -650,6 +650,11 @@ h1 {
   border-color: var(--line-blue);
 }
 
+.calendar-list article.hit {
+  border-color: rgba(10, 143, 105, 0.26);
+  background: #f1fcf7;
+}
+
 .calendar-list article.history {
   align-items: stretch;
   border-color: #d9e6f0;
@@ -720,6 +725,7 @@ h1 {
 
 .venue-grid button,
 .race-number-grid button {
+  position: relative;
   display: grid;
   min-width: 0;
   gap: 3px;
@@ -737,6 +743,19 @@ h1 {
   border-color: rgba(10, 143, 105, 0.28);
   background: #eafaf3;
   color: #075f46;
+}
+
+.race-number-grid button.hit {
+  border-color: rgba(10, 143, 105, 0.24);
+  background: #f1fcf7;
+}
+
+.race-number-grid button em {
+  position: absolute;
+  right: 5px;
+  top: 3px;
+  font-size: 0.72rem;
+  font-style: normal;
 }
 
 .venue-grid strong,

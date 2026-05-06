@@ -49,11 +49,31 @@ BET_TYPE_UTILITY: dict[BetType, float] = {
 }
 
 
-def risk_profile(risk_level: float) -> dict[str, float]:
+def risk_profile(risk_level: float) -> dict[str, float | str]:
     normalized = clamp(risk_level, 0, 100) / 100
+    if normalized < 0.34:
+        local = normalized / 0.34
+        return {
+            "band": "low",
+            "multiplier": 0.05 + local * 0.07,
+            "max_stake": 0.003 + local * 0.003,
+            "portfolio_exposure": 0.006 + local * 0.004,
+            "target": normalized,
+        }
+    if normalized < 0.67:
+        local = (normalized - 0.34) / 0.33
+        return {
+            "band": "middle",
+            "multiplier": 0.14 + local * 0.12,
+            "max_stake": 0.008 + local * 0.008,
+            "portfolio_exposure": 0.014 + local * 0.012,
+            "target": normalized,
+        }
     return {
-        "multiplier": 0.12 + normalized * 0.42,
-        "max_stake": 0.008 + normalized * 0.032,
+        "band": "high",
+        "multiplier": 0.30 + (normalized - 0.67) / 0.33 * 0.20,
+        "max_stake": 0.020 + (normalized - 0.67) / 0.33 * 0.026,
+        "portfolio_exposure": 0.035 + (normalized - 0.67) / 0.33 * 0.025,
         "target": normalized,
     }
 
@@ -68,7 +88,11 @@ def kelly_fraction(probability: float, odds: float) -> float:
 
 def stake_size(bankroll: float, risk_level: float, max_exposure: float, kelly: float) -> float:
     risk = risk_profile(risk_level)
-    stake_ratio = min(kelly * risk["multiplier"], risk["max_stake"], max_exposure)
+    stake_ratio = min(
+        kelly * float(risk["multiplier"]),
+        float(risk["max_stake"]),
+        max_exposure,
+    )
     return round(bankroll * stake_ratio / 100) * 100
 
 
@@ -176,14 +200,29 @@ def trio_probability(combo: RunnerCombo) -> float:
 
 
 def bet_type_matches_risk(bet_type: BetType, risk_level: float) -> bool:
-    normalized = clamp(risk_level, 0, 100) / 100
-    bet_risk = BET_TYPE_RISK[bet_type]
+    band = str(risk_profile(risk_level)["band"])
+    if band == "low":
+        return bet_type in {"place", "wide"}
+    if band == "middle":
+        return bet_type in {"place", "wide", "win", "bracket_quinella", "quinella", "exacta", "trio"}
+    return bet_type in {"win", "place", "wide", "quinella", "exacta", "trio", "trifecta"}
 
-    if normalized < 0.34:
-        return bet_risk <= 0.55
-    if normalized < 0.67:
-        return bet_risk <= 0.78
-    return bet_risk >= 0.44 or bet_type in {"place", "wide", "quinella"}
+
+def round_to_ticket_unit(value: float) -> float:
+    return max(100, round(value / 100) * 100)
+
+
+def scale_recommendation_stake(item: BetRecommendation, available_budget: float) -> BetRecommendation | None:
+    if available_budget < 100:
+        return None
+    unit_stake = round_to_ticket_unit(available_budget / item.tickets)
+    stake = unit_stake * item.tickets
+    if stake > available_budget and unit_stake > 100:
+        unit_stake = max(100, unit_stake - 100)
+        stake = unit_stake * item.tickets
+    if stake > available_budget:
+        return None
+    return item.model_copy(update={"unit_stake": unit_stake, "stake": stake})
 
 
 def add_candidate(
@@ -216,7 +255,7 @@ def add_candidate(
 
     kelly = kelly_fraction(probability, odds)
     stake_budget = stake_size(request.bankroll, request.risk_level, request.max_exposure, kelly)
-    unit_stake = max(100, round(stake_budget / tickets / 100) * 100)
+    unit_stake = round_to_ticket_unit(stake_budget / tickets)
     stake = unit_stake * tickets
 
     minimum_edge = request.min_edge if edge_floor is None else edge_floor
@@ -389,6 +428,7 @@ def two_axis_multi_combos(
 
 def risk_adjusted_score(recommendation: BetRecommendation, risk_level: float) -> float:
     normalized = clamp(risk_level, 0, 100) / 100
+    band = str(risk_profile(risk_level)["band"])
     bet_risk = BET_TYPE_RISK[recommendation.bet_type]
     risk_fit = 1 - abs(bet_risk - normalized)
     hit_rate_weight = (1 - normalized) * recommendation.probability * 3.6
@@ -403,6 +443,10 @@ def risk_adjusted_score(recommendation: BetRecommendation, risk_level: float) ->
         strategy_bonus = 0.8
     else:
         strategy_bonus = 0
+    if band == "low" and recommendation.bet_type in {"place", "wide"}:
+        strategy_bonus += 1.2
+    if band == "high" and recommendation.bet_type == "trifecta":
+        strategy_bonus += 1.1
 
     return (
         recommendation.edge * 0.9
@@ -416,13 +460,11 @@ def risk_adjusted_score(recommendation: BetRecommendation, risk_level: float) ->
 
 
 def bet_type_cap(bet_type: BetType, risk_level: float) -> int:
-    normalized = clamp(risk_level, 0, 100) / 100
-    if bet_type == "support":
+    band = str(risk_profile(risk_level)["band"])
+    if band == "low":
         return 2
-    if normalized < 0.34:
-        return 4 if bet_type in {"place", "wide"} else 2
-    if normalized < 0.67:
-        return 3
+    if band == "middle":
+        return 2 if bet_type in {"win", "place"} else 3
     return 4 if bet_type in {"exacta", "trio", "trifecta"} else 2
 
 
@@ -430,10 +472,16 @@ def diversify_recommendations(
     recommendations: list[BetRecommendation], request: RaceRequest, limit: int = 12
 ) -> list[BetRecommendation]:
     risk_level = request.risk_level
-    normalized = clamp(risk_level, 0, 100) / 100
+    profile = risk_profile(risk_level)
+    band = str(profile["band"])
+    portfolio_budget = round_to_ticket_unit(
+        request.bankroll * min(request.max_exposure, float(profile["portfolio_exposure"]))
+    )
+    target_limit = min(limit, 3 if band == "low" else 5 if band == "middle" else 7)
     selected: list[BetRecommendation] = []
     selected_keys: set[tuple[str, str, str]] = set()
     counts: dict[str, int] = {}
+    spent = 0.0
 
     def projected_roi(items: Sequence[BetRecommendation]) -> float:
         stake = sum(item.stake for item in items)
@@ -443,40 +491,49 @@ def diversify_recommendations(
         return expected_return / stake
 
     def add_item(item: BetRecommendation) -> bool:
+        nonlocal spent
         key = (item.bet_type, item.selection, item.note)
         if key in selected_keys:
             return False
         bucket = f"{item.bet_type}:{item.strategy}" if item.strategy != "single" else item.bet_type
         if counts.get(bucket, 0) >= bet_type_cap(item.bet_type, risk_level):
             return False
-        next_items = [*selected, item]
-        if item.edge <= 0 and projected_roi(next_items) < request.min_portfolio_roi:
+        remaining_budget = portfolio_budget - spent
+        candidate = item
+        if candidate.stake > remaining_budget:
+            scaled = scale_recommendation_stake(candidate, remaining_budget)
+            if scaled is None:
+                return False
+            candidate = scaled
+        next_items = [*selected, candidate]
+        if candidate.edge <= 0 and projected_roi(next_items) < request.min_portfolio_roi:
             return False
-        selected.append(item)
+        selected.append(candidate)
         selected_keys.add(key)
         counts[bucket] = counts.get(bucket, 0) + 1
+        spent += candidate.stake
         return True
 
-    if normalized < 0.34:
+    if band == "low":
         anchor_types: tuple[BetType, ...] = ("place", "wide")
-    elif normalized < 0.67:
+    elif band == "middle":
         anchor_types = ("place", "win", "wide")
     else:
-        anchor_types = ("place", "win")
+        anchor_types = ("win", "trifecta", "trio", "wide")
 
     for bet_type in anchor_types:
         anchor = next((item for item in recommendations if item.bet_type == bet_type), None)
         if anchor:
             add_item(anchor)
-        if len(selected) == limit:
+        if len(selected) == target_limit:
             return selected
 
     for item in recommendations:
-        if add_item(item) and len(selected) == limit:
+        if add_item(item) and len(selected) == target_limit:
             return selected
 
     for item in recommendations:
-        if add_item(item) and len(selected) == limit:
+        if add_item(item) and len(selected) == target_limit:
             break
 
     return selected

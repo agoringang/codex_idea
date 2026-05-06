@@ -619,11 +619,11 @@ function buildRaceRequest(race: Race, riskLevel: number, bankroll: number) {
     model_mode: "ensemble",
     risk_level: riskLevel,
     bankroll,
-    min_edge: riskLevel < 34 ? 0.02 : riskLevel < 67 ? 0.06 : 0.1,
-    min_probability: riskLevel < 34 ? 0.08 : riskLevel < 67 ? 0.04 : 0.015,
-    max_candidate_odds: riskLevel < 34 ? 18 : riskLevel < 67 ? 45 : 120,
-    max_edge: 1.4,
-    max_exposure: riskLevel < 34 ? 0.012 : riskLevel < 67 ? 0.02 : 0.035,
+    min_edge: riskLevel < 34 ? 0.04 : riskLevel < 67 ? 0.06 : 0.09,
+    min_probability: riskLevel < 34 ? 0.12 : riskLevel < 67 ? 0.05 : 0.015,
+    max_candidate_odds: riskLevel < 34 ? 12 : riskLevel < 67 ? 45 : 140,
+    max_edge: riskLevel < 34 ? 0.7 : riskLevel < 67 ? 1.1 : 1.6,
+    max_exposure: riskLevel < 34 ? 0.008 : riskLevel < 67 ? 0.022 : 0.055,
     runners: race.runners.map((runner) => {
       const odds = Math.max(runner.odds, 1.1);
       const form = Math.max(1, Math.min(100, runner.form));
@@ -735,6 +735,28 @@ function mergeApiProjections(prediction: ApiRacePrediction | null, race: Race) {
 
 function roundStake(value: number) {
   return Math.max(100, Math.round(value / 100) * 100);
+}
+
+function frontendRiskProfile(riskLevel: number) {
+  if (riskLevel < 34) {
+    return {
+      maxExposure: 0.008,
+      limit: 3,
+      allowedTypes: new Set(["複勝", "ワイド"]),
+    };
+  }
+  if (riskLevel < 67) {
+    return {
+      maxExposure: 0.022,
+      limit: 5,
+      allowedTypes: new Set(["複勝", "ワイド", "単勝", "馬連", "馬単", "3連複"]),
+    };
+  }
+  return {
+    maxExposure: 0.055,
+    limit: 7,
+    allowedTypes: new Set(["複勝", "ワイド", "単勝", "馬連", "馬単", "3連複", "3連単"]),
+  };
 }
 
 function dateAtJst(date: string) {
@@ -876,6 +898,14 @@ export default function Home() {
   const demoRacesEnabled = process.env.NEXT_PUBLIC_ENABLE_DEMO_RACES === "1";
   const availableRaces = apiRaces.length > 0 ? apiRaces : demoRacesEnabled ? races : [];
   const availableHistory = apiHistory.length > 0 ? apiHistory : demoRacesEnabled ? predictionHistory : [];
+  const sortedHistory = useMemo(
+    () => [...availableHistory].sort((a, b) => b.date.localeCompare(a.date) || b.start.localeCompare(a.start) || b.id.localeCompare(a.id)),
+    [availableHistory],
+  );
+  const historyByRaceId = useMemo(
+    () => new Map(availableHistory.map((item) => [item.id, item])),
+    [availableHistory],
+  );
   const race = availableRaces.find((item) => item.id === selectedRaceId) ?? availableRaces[0] ?? null;
   const selectedDateRaces = availableRaces.filter((item) => item.date === selectedDate);
   const selectedDateHistory = availableHistory.filter((item) => item.date === selectedDate);
@@ -894,7 +924,7 @@ export default function Home() {
     () => buildMonthCells(monthAnchor, availableRaces, availableHistory, todayDate),
     [availableHistory, availableRaces, monthAnchor, todayDate],
   );
-  const raceHistory = race ? availableHistory.find((item) => item.id === race.id) ?? null : null;
+  const raceHistory = race ? historyByRaceId.get(race.id) ?? null : null;
   const historySummary = useMemo(() => {
     const settled = availableHistory.filter((item) => item.settled);
     const stake = settled.reduce((sum, item) => sum + item.stake, 0);
@@ -1054,14 +1084,16 @@ export default function Home() {
     if (projections.length === 0) {
       return [];
     }
+    const profile = frontendRiskProfile(riskLevel);
+    let spent = 0;
     const projected = ticketTemplates
-      .filter((ticket) => Math.abs(ticket.risk - riskLevel) <= 40 || ticket.risk <= riskLevel + 12)
+      .filter((ticket) => profile.allowedTypes.has(ticket.type))
+      .filter((ticket) => Math.abs(ticket.risk - riskLevel) <= 42 || ticket.risk <= riskLevel + 14)
       .map((ticket) => {
         const top = projections.slice(0, 6);
         const edge = ticket.probability * ticket.odds - 1 + (riskRatio - 0.45) * 0.08;
-        const exposure = 0.006 + riskRatio * 0.027;
         const tickets = Math.max(ticket.tickets(top), 1);
-        const rawStake = activeBankroll * exposure * Math.max(0.35, 1 + edge) * (ticket.risk / 100);
+        const rawStake = activeBankroll * profile.maxExposure * Math.max(0.28, 1 + edge) * Math.max(0.35, ticket.risk / 100);
         const unitStake = roundStake(rawStake / tickets);
         const stake = unitStake * tickets;
         return {
@@ -1089,7 +1121,26 @@ export default function Home() {
       .filter((ticket): ticket is TicketProjection => Boolean(ticket));
     const anchorKeys = new Set(anchors.map((ticket) => `${ticket.type}-${ticket.selection}`));
     return [...anchors, ...sorted.filter((ticket) => !anchorKeys.has(`${ticket.type}-${ticket.selection}`))]
-      .slice(0, riskLevel < 34 ? 4 : 5);
+      .map((ticket) => {
+        const remaining = activeBankroll * profile.maxExposure - spent;
+        if (remaining < 100) {
+          return null;
+        }
+        const unitStake = Math.min(ticket.unitStake, roundStake(remaining / ticket.tickets));
+        const stake = unitStake * ticket.tickets;
+        if (stake > remaining) {
+          return null;
+        }
+        spent += stake;
+        return {
+          ...ticket,
+          unitStake,
+          stake,
+          expectedReturn: stake * ticket.odds * ticket.probability,
+        };
+      })
+      .filter((ticket): ticket is TicketProjection => Boolean(ticket))
+      .slice(0, profile.limit);
   }, [activeBankroll, projections, riskLevel, riskRatio]);
 
   const apiTickets = useMemo(() => {
@@ -1191,6 +1242,7 @@ export default function Home() {
             apiState={apiPrediction?.race_id === race.id ? "ready" : apiState}
             projections={projections}
             race={race}
+            historyByRaceId={historyByRaceId}
             raceHistory={raceHistory}
             riskLabel={riskLabel}
             riskLevel={riskLevel}
@@ -1209,6 +1261,7 @@ export default function Home() {
         {activeTab === "calendar" && (
           <CalendarPanel
             history={availableHistory}
+            historyByRaceId={historyByRaceId}
             monthAnchor={monthAnchor}
             monthCells={monthCells}
             onDateSelect={selectDate}
@@ -1227,7 +1280,7 @@ export default function Home() {
         )}
 
         {activeTab === "results" && race && (
-          <ResultsPanel history={availableHistory} historySummary={historySummary} projections={projections} race={race} />
+          <ResultsPanel history={sortedHistory} historySummary={historySummary} projections={projections} race={race} />
         )}
         {activeTab === "results" && !race && (
           <VerifiedDataEmptyState apiState={apiState} selectedDate={selectedDate} />
@@ -1282,6 +1335,7 @@ function PredictPanel({
   onRiskChange,
   projections,
   race,
+  historyByRaceId,
   raceHistory,
   riskLabel,
   riskLevel,
@@ -1302,6 +1356,7 @@ function PredictPanel({
   onRiskChange: (value: number) => void;
   projections: RunnerProjection[];
   race: Race;
+  historyByRaceId: Map<string, HistoricalPrediction>;
   raceHistory: HistoricalPrediction | null;
   riskLabel: string;
   riskLevel: number;
@@ -1319,6 +1374,7 @@ function PredictPanel({
           onRaceSelect={onRaceSelect}
           onVenueSelect={onVenueSelect}
           races={venueRaces}
+          historyByRaceId={historyByRaceId}
           selectedDate={selectedDate}
           selectedRaceId={race.id}
           selectedVenue={selectedVenue || race.venue}
@@ -1441,6 +1497,7 @@ function RacePicker({
   onRaceSelect,
   onVenueSelect,
   races,
+  historyByRaceId,
   selectedDate,
   selectedRaceId,
   selectedVenue,
@@ -1449,6 +1506,7 @@ function RacePicker({
   onRaceSelect: (raceId: string) => void;
   onVenueSelect: (venue: string) => void;
   races: Race[];
+  historyByRaceId: Map<string, HistoricalPrediction>;
   selectedDate: string;
   selectedRaceId: string;
   selectedVenue: string;
@@ -1478,17 +1536,21 @@ function RacePicker({
         )}
       </div>
       <div className="race-number-grid" aria-label="レース番号">
-        {races.map((item) => (
-          <button
-            className={item.id === selectedRaceId ? "active" : ""}
-            key={item.id}
-            onClick={() => onRaceSelect(item.id)}
-            type="button"
-          >
-            <strong>{raceNumberValue(item)}R</strong>
-            <span>{item.start}</span>
-          </button>
-        ))}
+        {races.map((item) => {
+          const history = historyByRaceId.get(item.id);
+          return (
+            <button
+              className={[item.id === selectedRaceId ? "active" : "", history?.hit ? "hit" : ""].filter(Boolean).join(" ")}
+              key={item.id}
+              onClick={() => onRaceSelect(item.id)}
+              type="button"
+            >
+              {history?.hit && <em aria-label="的中">🎯</em>}
+              <strong>{raceNumberValue(item)}R</strong>
+              <span>{item.start}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -1507,6 +1569,7 @@ function ResultStrip({ history }: { history: HistoricalPrediction }) {
 
 function CalendarPanel({
   history,
+  historyByRaceId,
   monthAnchor,
   monthCells,
   onDateSelect,
@@ -1523,6 +1586,7 @@ function CalendarPanel({
   venueRaces,
 }: {
   history: HistoricalPrediction[];
+  historyByRaceId: Map<string, HistoricalPrediction>;
   monthAnchor: string;
   monthCells: MonthCell[];
   onDateSelect: (date: string) => void;
@@ -1578,6 +1642,7 @@ function CalendarPanel({
         onRaceSelect={onRaceSelect}
         onVenueSelect={onVenueSelect}
         races={venueRaces}
+        historyByRaceId={historyByRaceId}
         selectedDate={selectedDate}
         selectedRaceId={selectedRaceId}
         selectedVenue={selectedVenue}
@@ -1587,16 +1652,32 @@ function CalendarPanel({
       <div className="calendar-list">
         {selectedDateRaces.length + selectedDateHistory.length > 0 ? (
           <>
-          {selectedDateRaces.map((item) => (
-            <article className={item.id === selectedRaceId ? "active" : ""} key={item.id}>
-              <div>
-                <span>{item.start} / {item.market}</span>
-                <strong>{item.venue} {item.title}</strong>
-                <em>{item.course}</em>
-              </div>
-              <button onClick={() => onRaceSelect(item.id)} type="button">予想へ</button>
-            </article>
-          ))}
+          {selectedDateRaces.map((item) => {
+            const raceResult = historyByRaceId.get(item.id);
+            return (
+              <article
+                className={[
+                  item.id === selectedRaceId ? "active" : "",
+                  raceResult?.hit ? "hit" : "",
+                ].filter(Boolean).join(" ")}
+                key={item.id}
+              >
+                <div>
+                  <span>{item.start} / {item.market}</span>
+                  <strong>{raceResult?.hit ? "🎯 " : ""}{item.venue} {item.title}</strong>
+                  <em>{item.course}</em>
+                </div>
+                {raceResult && (
+                  <div className="history-result">
+                    <span>{raceResult.topTicket}</span>
+                    <strong>{formatPercent(raceResult.roi, 1)}</strong>
+                    <em>{raceResult.result} / 的中 {raceResult.hitCount}/{raceResult.betCount}</em>
+                  </div>
+                )}
+                <button onClick={() => onRaceSelect(item.id)} type="button">予想へ</button>
+              </article>
+            );
+          })}
           {selectedDateHistory.map((item) => (
             <article className="history" key={item.id}>
               <div>
@@ -1650,9 +1731,15 @@ function ResultsPanel({
         <Metric label="対象R" value={numberFormatter.format(historySummary.total)} />
         <Metric label="払戻" value={formatYen(historySummary.payout)} />
       </div>
+      <div className="result-strip">
+        <strong>直近1ヶ月の全予想</strong>
+        <span>的中 {historySummary.hits}/{historySummary.total}R</span>
+        <span>投資 {formatYen(historySummary.stake)}</span>
+        <span>払戻 {formatYen(historySummary.payout)}</span>
+      </div>
 
       <div className="history-list">
-        {history.slice(0, 20).map((item) => (
+        {history.map((item) => (
           <article className={item.hit ? "hit" : ""} key={`${item.date}-${item.id}`}>
             <div>
               <span>{item.date} / {item.venue} / {item.market}</span>
