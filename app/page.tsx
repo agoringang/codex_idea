@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 type Market = "JRA" | "NAR";
 type ViewTab = "predict" | "calendar" | "results";
 type AppIconId = "waliwali" | "keisya" | "hikaku" | "portfolio";
+type BetProfileId = "safe" | "standard" | "aggressive";
 
 type Runner = {
   number: number;
@@ -445,12 +446,16 @@ const tabs: { id: ViewTab; label: string; icon: string }[] = [
   { id: "results", label: "実績", icon: "◇" },
 ];
 
-const modelStack = [
-  ["Win", "単勝"],
-  ["Place", "複勝"],
-  ["Pair", "馬連/ワイド"],
-  ["EV", "3連系"],
-  ["Odds", "直前"],
+const betProfiles: {
+  id: BetProfileId;
+  label: string;
+  riskLevel: number;
+  description: string;
+  focus: string;
+}[] = [
+  { id: "safe", label: "堅実", riskLevel: 24, description: "複勝・ワイド中心", focus: "点数少 / 露出低" },
+  { id: "standard", label: "標準", riskLevel: 52, description: "単勝・馬連まで", focus: "回収率と的中の均衡" },
+  { id: "aggressive", label: "攻め", riskLevel: 84, description: "3連系も許可", focus: "高配当狙い" },
 ];
 
 const appLinks = [
@@ -500,6 +505,29 @@ function optionalText(value: unknown) {
 }
 
 const jraVenues = new Set(["札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉"]);
+
+function marketClass(market: Market | undefined) {
+  return market === "JRA" ? "market-jra" : "market-nar";
+}
+
+function venueMarket(venue: string): Market {
+  return jraVenues.has(venue) ? "JRA" : "NAR";
+}
+
+function normalizedTopTicket(prediction: any) {
+  const recommendation = prediction.recommendations?.[0];
+  if (recommendation?.selection) {
+    return String(recommendation.selection);
+  }
+  if (prediction.top_ticket) {
+    return String(prediction.top_ticket);
+  }
+  const warning = String(prediction.warning ?? "");
+  if (warning.startsWith("No model can guarantee")) {
+    return "見送り";
+  }
+  return warning || "AI予想";
+}
 
 function normalizeApiRace(item: any): Race {
   const runners = Array.isArray(item.runners) ? item.runners : [];
@@ -600,12 +628,7 @@ function normalizeApiHistory(payload: any): HistoricalPrediction[] {
         title: String(entry.title ?? raceId),
         course: String(entry.course ?? "予測履歴"),
         market: entry.market === "NAR" ? "NAR" as Market : "JRA" as Market,
-        topTicket: String(
-          prediction.recommendations?.[0]?.selection ??
-            prediction.top_ticket ??
-            prediction.warning ??
-            "AI予想",
-        ),
+        topTicket: normalizedTopTicket(prediction),
         result: String(result.message ?? (settled ? "結果反映" : "結果待ち")),
         roi: settled && resultStake > 0 ? safeNumber(result.roi, payout / resultStake) : safeNumber(prediction.expected_roi, 0),
         hitRate: betCount > 0 ? hitCount / betCount : safeNumber(prediction.hit_rate, 0),
@@ -801,6 +824,29 @@ function finishPosition(runner: Runner) {
   return finishTag ? Number(finishTag.replace("着", "")) : undefined;
 }
 
+function taggedPopularity(runner: Runner) {
+  const popularityTag = runner.tags?.find((tag) => /^\d+人気$/.test(tag));
+  return popularityTag ? Number(popularityTag.replace("人気", "")) : undefined;
+}
+
+function oddsRankMap(race: Race) {
+  return new Map(
+    [...race.runners]
+      .sort((a, b) => a.odds - b.odds || a.number - b.number)
+      .map((runner, index) => [runner.number, index + 1]),
+  );
+}
+
+function runnerPopularity(runner: Runner, race: Race) {
+  return taggedPopularity(runner) ?? oddsRankMap(race).get(runner.number);
+}
+
+function runnerOddsMeta(runner: Runner, race: Race) {
+  const popularity = runnerPopularity(runner, race);
+  const popularityLabel = popularity ? `${popularity}人気` : "人気不明";
+  return `${runner.odds.toFixed(1)}倍 / ${popularityLabel}`;
+}
+
 function raceResultOrder(race: Race) {
   return race.runners
     .map((runner) => ({ runner, position: finishPosition(runner) }))
@@ -947,7 +993,7 @@ export default function Home() {
   const [selectedVenue, setSelectedVenue] = useState("");
   const [monthAnchor, setMonthAnchor] = useState(monthStart(INITIAL_CALENDAR_DATE));
   const [todayDate, setTodayDate] = useState(INITIAL_CALENDAR_DATE);
-  const [riskLevel, setRiskLevel] = useState(48);
+  const [riskLevel, setRiskLevel] = useState(52);
   const [bankroll, setBankroll] = useState(100000);
   const [apiRaces, setApiRaces] = useState<Race[]>([]);
   const [apiHistory, setApiHistory] = useState<HistoricalPrediction[]>([]);
@@ -1217,7 +1263,8 @@ export default function Home() {
   const totalStake = tickets.reduce((sum, ticket) => sum + ticket.stake, 0);
   const expectedReturn = tickets.reduce((sum, ticket) => sum + ticket.expectedReturn, 0);
   const expectedRoi = totalStake > 0 ? expectedReturn / totalStake : 0;
-  const riskLabel = riskLevel < 34 ? "堅実" : riskLevel < 67 ? "標準" : "攻め";
+  const activeProfile = betProfiles.find((profile) => profile.riskLevel === riskLevel) ?? betProfiles[1];
+  const riskLabel = activeProfile.label;
 
   function selectRace(raceId: string, nextTab: ViewTab = activeTab) {
     const nextRace = availableRaces.find((item) => item.id === raceId);
@@ -1262,7 +1309,7 @@ export default function Home() {
           </a>
         </header>
 
-        <section className="race-status-card">
+        <section className={`race-status-card ${race ? marketClass(race.market) : ""}`}>
           <div className="race-status-main">
             <span>{race ? `${race.date} ${race.start}` : selectedDate}</span>
             <h1>{race ? displayRaceTitle(race) : "検証済みレース未取得"}</h1>
@@ -1343,7 +1390,7 @@ export default function Home() {
         )}
 
         {activeTab === "results" && race && (
-          <ResultsPanel history={sortedHistory} historySummary={historySummary} projections={projections} race={race} />
+          <ResultsPanel history={sortedHistory} historySummary={historySummary} />
         )}
         {activeTab === "results" && !race && (
           <VerifiedDataEmptyState apiState={apiState} selectedDate={selectedDate} />
@@ -1431,9 +1478,11 @@ function PredictPanel({
   venueRaces: Race[];
 }) {
   const resultOrder = raceResultOrder(race);
+  const isFinished = race.status === "finished";
+  const activeProfile = betProfiles.find((profile) => profile.riskLevel === riskLevel) ?? betProfiles[1];
 
   return (
-    <section className="tab-panel">
+    <section className={`tab-panel ${marketClass(race.market)}`}>
       <div className="control-strip">
         <RacePicker
           onRaceSelect={onRaceSelect}
@@ -1446,119 +1495,150 @@ function PredictPanel({
           venues={venueOptions}
         />
 
-        <div className="settings-grid">
-          <label className="field-card">
-            <span>軍資金</span>
-            <input
-              min={1000}
-              onChange={(event) => onBankrollChange(Number(event.target.value))}
-              step={1000}
-              type="number"
-              value={bankroll}
+        {!isFinished && (
+          <div className="settings-grid">
+            <label className="field-card bankroll-card">
+              <span>軍資金</span>
+              <input
+                min={1000}
+                onChange={(event) => onBankrollChange(Number(event.target.value))}
+                step={1000}
+                type="number"
+                value={bankroll}
+              />
+            </label>
+            <BetProfileSelector
+              activeProfile={activeProfile}
+              onProfileChange={(profile) => onRiskChange(profile.riskLevel)}
             />
-          </label>
-          <div className="field-card risk-card">
-            <span>リスク {riskLabel} / {riskLevel}</span>
-            <input
-              max={100}
-              min={0}
-              onChange={(event) => onRiskChange(Number(event.target.value))}
-              type="range"
-              value={riskLevel}
-            />
-            <div className="risk-presets">
-              {[
-                ["堅実", 24],
-                ["標準", 52],
-                ["攻め", 84],
-              ].map(([label, value]) => (
-                <button
-                  className={Math.abs(riskLevel - Number(value)) <= 14 ? "active" : ""}
-                  key={label}
-                  onClick={() => onRiskChange(Number(value))}
-                  type="button"
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
           </div>
-        </div>
+        )}
       </div>
 
-      <div className="summary-strip">
-        <Metric label="候補" value={`${tickets.length}件`} />
-        <Metric label="投資" value={formatYen(totalStake)} />
-        <Metric label="期待ROI" value={formatPercent(expectedRoi, 1)} />
-        <Metric label="露出" value={formatPercent(totalStake / activeBankroll, 2)} />
-        <Metric label="モデル" value={apiState === "ready" ? "実API" : apiState === "loading" ? "接続中" : "試算"} />
-      </div>
+      {!isFinished && (
+        <PredictionOrderCard projections={projections} race={race} />
+      )}
 
       {raceHistory && (
         <ResultStrip history={raceHistory} />
       )}
-      {race.status === "finished" && (
-        <RaceResultStrip resultOrder={resultOrder} raceHistory={raceHistory} />
+      {isFinished && (
+        <RaceResultStrip race={race} resultOrder={resultOrder} raceHistory={raceHistory} />
       )}
-      <PredictionResultDiff race={race} raceHistory={raceHistory} projections={projections} />
+      {isFinished && (
+        <PredictionResultDiff race={race} raceHistory={raceHistory} projections={projections} />
+      )}
 
-      <div className="section-heading">
-        <h2>買い目</h2>
-        <span>{race.grade}</span>
+      {!isFinished && (
+        <section className="bet-plan-card">
+          <div className="section-heading">
+            <h2>{riskLabel}の買い方</h2>
+            <span>{activeProfile.description}</span>
+          </div>
+          <div className="summary-strip compact">
+            <Metric label="候補" value={`${tickets.length}件`} />
+            <Metric label="投資" value={formatYen(totalStake)} />
+            <Metric label="期待ROI" value={formatPercent(expectedRoi, 1)} />
+            <Metric label="露出" value={formatPercent(totalStake / activeBankroll, 2)} />
+            <Metric label="モデル" value={apiState === "ready" ? "実API" : apiState === "loading" ? "接続中" : "試算"} />
+          </div>
+          <TicketList tickets={tickets} />
+        </section>
+      )}
+
+      <section className="mini-card runner-table-card">
+        <div className="section-heading compact">
+          <h2>出走馬</h2>
+          <span>{race.course}</span>
+        </div>
+        <RunnerTable projections={projections} race={race} />
+      </section>
+    </section>
+  );
+}
+
+function BetProfileSelector({
+  activeProfile,
+  onProfileChange,
+}: {
+  activeProfile: (typeof betProfiles)[number];
+  onProfileChange: (profile: (typeof betProfiles)[number]) => void;
+}) {
+  return (
+    <div className="field-card profile-card">
+      <span>買い方</span>
+      <div className="profile-switch" role="group" aria-label="買い方">
+        {betProfiles.map((profile) => (
+          <button
+            className={activeProfile.id === profile.id ? "active" : ""}
+            key={profile.id}
+            onClick={() => onProfileChange(profile)}
+            type="button"
+          >
+            <strong>{profile.label}</strong>
+            <small>{profile.description}</small>
+          </button>
+        ))}
       </div>
-      <div className="ticket-list">
-        {tickets.map((ticket) => (
-          <article key={`${ticket.type}-${ticket.selection}`}>
-            <div className="ticket-name">
-              <span>{ticket.type}</span>
-              <strong>{ticket.method}</strong>
-              <small>{ticket.model}</small>
+      <em>{activeProfile.focus}</em>
+    </div>
+  );
+}
+
+function PredictionOrderCard({ projections, race }: { projections: RunnerProjection[]; race: Race }) {
+  return (
+    <section className="prediction-order-card">
+      <div className="section-heading">
+        <h2>着順予想</h2>
+        <span>{race.market === "JRA" ? "中央" : "地方"}</span>
+      </div>
+      <div className="order-grid">
+        {projections.slice(0, 5).map((runner, index) => (
+          <article key={runner.number} className={index === 0 ? "lead" : ""}>
+            <div className="order-rank">{index + 1}</div>
+            <div>
+              <strong>{runner.number}. {runner.name}</strong>
+              <span>{runner.jockey} / {runnerOddsMeta(runner, race)}</span>
             </div>
-            <div className="ticket-body">
-              <TicketLegs legs={ticket.legs} />
-              <div className="ticket-meta">
-                <span>{ticket.tickets}通り</span>
-                <span>各{formatYen(ticket.unitStake)}</span>
-                <strong>合計 {formatYen(ticket.stake)}</strong>
-              </div>
-              <div className="ticket-data">
-                <Value label="的中" value={formatPercent(ticket.probability)} />
-                <Value label="想定" value={ticket.odds.toFixed(1)} />
-                <Value label="Edge" value={formatPercent(ticket.edge)} tone={ticket.edge >= 0 ? "positive" : "negative"} />
-                <Value label="期待" value={formatYen(ticket.expectedReturn)} />
-              </div>
+            <div className="order-probs">
+              <b>勝 {formatPercent(runner.winProbability)}</b>
+              <em>3内 {formatPercent(runner.placeProbability)}</em>
             </div>
           </article>
         ))}
       </div>
-
-      <div className="two-column">
-        <section className="mini-card">
-          <div className="section-heading compact">
-            <h2>直前オッズ</h2>
-            <span>watch</span>
-          </div>
-          <div className="alert-list">
-            {projections.slice(0, 3).map((runner) => (
-              <article key={runner.number}>
-                <strong>{runner.number}. {runner.name}</strong>
-                <span className={runner.drift < 0 ? "positive" : "negative"}>
-                  {runner.drift < 0 ? "妙味" : "過熱"} {Math.abs(runner.drift).toFixed(1)}%
-                </span>
-              </article>
-            ))}
-          </div>
-        </section>
-
-        <section className="mini-card">
-          <div className="section-heading compact">
-            <h2>出走馬</h2>
-            <span>{race.course}</span>
-          </div>
-          <RunnerList projections={projections} />
-        </section>
-      </div>
     </section>
+  );
+}
+
+function TicketList({ tickets }: { tickets: TicketProjection[] }) {
+  return (
+    <div className="ticket-list">
+      {tickets.map((ticket) => (
+        <article key={`${ticket.type}-${ticket.selection}`}>
+          <div className="ticket-name">
+            <span>{ticket.type}</span>
+            <strong>{ticket.method}</strong>
+            <small>{ticket.model}</small>
+          </div>
+          <div className="ticket-body">
+            <TicketLegs legs={ticket.legs} />
+            <div className="ticket-meta">
+              <span>{ticket.tickets}通り</span>
+              <span>各{formatYen(ticket.unitStake)}</span>
+              <strong>合計 {formatYen(ticket.stake)}</strong>
+            </div>
+            <div className="ticket-data">
+              <Value label="的中" value={formatPercent(ticket.probability)} />
+              <Value label="想定" value={ticket.odds.toFixed(1)} />
+              <Value label="Edge" value={formatPercent(ticket.edge)} tone={ticket.edge >= 0 ? "positive" : "negative"} />
+              <Value label="期待" value={formatYen(ticket.expectedReturn)} />
+            </div>
+          </div>
+        </article>
+      ))}
+      {tickets.length === 0 && <div className="empty-inline">この条件では購入候補なし</div>}
+    </div>
   );
 }
 
@@ -1591,7 +1671,10 @@ function RacePicker({
         {venues.length > 0 ? (
           venues.map((venue) => (
             <button
-              className={selectedVenue === venue.venue ? "active" : ""}
+              className={[
+                selectedVenue === venue.venue ? "active" : "",
+                marketClass(venueMarket(venue.venue)),
+              ].filter(Boolean).join(" ")}
               key={venue.venue}
               onClick={() => onVenueSelect(venue.venue)}
               type="button"
@@ -1637,9 +1720,11 @@ function ResultStrip({ history }: { history: HistoricalPrediction }) {
 }
 
 function RaceResultStrip({
+  race,
   raceHistory,
   resultOrder,
 }: {
+  race: Race;
   raceHistory: HistoricalPrediction | null;
   resultOrder: { runner: Runner; position: number }[];
 }) {
@@ -1647,7 +1732,9 @@ function RaceResultStrip({
     <div className={raceHistory?.hit ? "race-result-strip hit" : "race-result-strip"}>
       <strong>{raceHistory?.hit ? "🎯 的中結果" : "レース結果"}</strong>
       {resultOrder.slice(0, 3).map(({ runner, position }) => (
-        <span key={runner.number}>{position}着 {runner.number}. {runner.name}</span>
+        <span key={runner.number}>
+          {position}着 {runner.number}. {runner.name} / {runnerOddsMeta(runner, race)}
+        </span>
       ))}
       {resultOrder.length === 0 && <span>結果待ち</span>}
       {!raceHistory && <em>事前予想履歴なし</em>}
@@ -1665,6 +1752,7 @@ function PredictionResultDiff({
   projections: RunnerProjection[];
 }) {
   const actualOrder = raceResultOrder(race);
+  const runnerByNumber = new Map(race.runners.map((runner) => [runner.number, runner]));
   const positionByNumber = new Map(actualOrder.map(({ runner, position }) => [runner.number, position]));
   const savedPredictionRunners = Array.isArray(raceHistory?.prediction?.runners)
     ? [...raceHistory.prediction.runners]
@@ -1687,10 +1775,6 @@ function PredictionResultDiff({
         placeProbability: runner.placeProbability,
         score: runner.score,
       }));
-  const recommendationResults = raceHistory?.recommendationResults ?? [];
-  const savedRecommendations = Array.isArray(raceHistory?.prediction?.recommendations)
-    ? raceHistory.prediction.recommendations.slice(0, 6)
-    : [];
   const statusLabel = raceHistory
     ? raceHistory.generatedAfterResult
       ? "検証照合"
@@ -1722,11 +1806,15 @@ function PredictionResultDiff({
           <span>AI上位</span>
           {predictedRows.slice(0, 3).map((runner, index) => {
             const actualPosition = positionByNumber.get(runner.number);
+            const sourceRunner = runnerByNumber.get(runner.number);
             return (
               <article className={actualPosition && actualPosition <= 3 ? "matched" : ""} key={`${runner.number}-${index}`}>
                 <strong>{index + 1}. {runner.number} {runner.name}</strong>
                 <em>勝率 {formatPercent(runner.winProbability)} / 複勝 {formatPercent(runner.placeProbability)}</em>
-                <small>{actualPosition ? `${actualPosition}着` : race.status === "finished" ? "圏外/未完走" : "結果待ち"}</small>
+                <small>
+                  {actualPosition ? `${actualPosition}着` : race.status === "finished" ? "圏外/未完走" : "結果待ち"}
+                  {sourceRunner ? ` / ${runnerOddsMeta(sourceRunner, race)}` : ""}
+                </small>
               </article>
             );
           })}
@@ -1740,48 +1828,12 @@ function PredictionResultDiff({
               <article className={predictedIndex >= 0 && predictedIndex <= 2 ? "matched" : ""} key={runner.number}>
                 <strong>{position}着 {runner.number} {runner.name}</strong>
                 <em>{predictedIndex >= 0 ? `AI ${predictedIndex + 1}位` : "AI上位外"}</em>
-                <small>{runner.odds.toFixed(1)}倍</small>
+                <small>{runnerOddsMeta(runner, race)}</small>
               </article>
             );
           })}
           {actualOrder.length === 0 && <div className="empty-inline">結果待ち</div>}
         </div>
-      </div>
-
-      <div className="ticket-audit-list">
-        {recommendationResults.length > 0 ? (
-          recommendationResults.slice(0, 8).map((item, index) => (
-            <article className={item.hit ? "hit" : ""} key={`${item.betType}-${item.selection}-${index}`}>
-              <div>
-                <strong>{item.hit ? "🎯 " : ""}{betTypeLabels[item.betType] ?? item.betType}</strong>
-                <span>{item.strategy || item.selection}</span>
-                <em>{item.selection}</em>
-              </div>
-              <div>
-                <span>{item.hit ? "的中" : "不的中"}</span>
-                <strong>{formatYen(item.payout)}</strong>
-                <em>{formatYen(item.stake)} / {item.odds.toFixed(1)}倍</em>
-              </div>
-            </article>
-          ))
-        ) : savedRecommendations.length > 0 ? (
-          savedRecommendations.slice(0, 6).map((item, index) => (
-            <article key={`${item.bet_type}-${item.selection}-${index}`}>
-              <div>
-                <strong>{betTypeLabels[item.bet_type] ?? item.bet_type}</strong>
-                <span>{item.strategy || item.note}</span>
-                <em>{item.selection}</em>
-              </div>
-              <div>
-                <span>結果待ち</span>
-                <strong>{formatYen(safeNumber(item.stake, 0))}</strong>
-                <em>{safeNumber(item.odds, 0).toFixed(1)}倍</em>
-              </div>
-            </article>
-          ))
-        ) : (
-          <div className="empty-inline">保存済み買い目なし</div>
-        )}
       </div>
     </section>
   );
@@ -1879,6 +1931,7 @@ function CalendarPanel({
                 className={[
                   item.id === selectedRaceId ? "active" : "",
                   raceResult?.hit ? "hit" : "",
+                  marketClass(item.market),
                 ].filter(Boolean).join(" ")}
                 key={item.id}
               >
@@ -1924,8 +1977,6 @@ function CalendarPanel({
 function ResultsPanel({
   history,
   historySummary,
-  projections,
-  race,
 }: {
   history: HistoricalPrediction[];
   historySummary: {
@@ -1936,9 +1987,24 @@ function ResultsPanel({
     roi: number;
     hitRate: number;
   };
-  projections: RunnerProjection[];
-  race: Race;
 }) {
+  const settledHistory = history.filter((item) => item.settled);
+  const daySummary = Array.from(
+    settledHistory.reduce((map, item) => {
+      const current = map.get(item.date) ?? { date: item.date, total: 0, hits: 0, stake: 0, payout: 0 };
+      current.total += 1;
+      current.hits += item.hit ? 1 : 0;
+      current.stake += item.stake;
+      current.payout += item.payout;
+      map.set(item.date, current);
+      return map;
+    }, new Map<string, { date: string; total: number; hits: number; stake: number; payout: number }>()),
+  )
+    .map(([, item]) => ({ ...item, roi: item.stake > 0 ? item.payout / item.stake : 0 }))
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 8);
+  const compactHistory = settledHistory;
+
   return (
     <section className="tab-panel">
       <div className="section-heading">
@@ -1958,13 +2024,27 @@ function ResultsPanel({
         <span>払戻 {formatYen(historySummary.payout)}</span>
       </div>
 
-      <div className="history-list">
-        {history.map((item) => (
+      <div className="result-day-grid">
+        {daySummary.map((item) => (
+          <article className={item.hits > 0 ? "hit" : ""} key={item.date}>
+            <strong>{item.date.slice(5)}</strong>
+            <span>{item.hits}/{item.total}R</span>
+            <b>{formatPercent(item.roi, 0)}</b>
+          </article>
+        ))}
+      </div>
+
+      <div className="section-heading compact">
+        <h2>レース別</h2>
+        <span>全{compactHistory.length}件</span>
+      </div>
+      <div className="history-list compact">
+        {compactHistory.map((item) => (
           <article className={item.hit ? "hit" : ""} key={`${item.date}-${item.id}`}>
             <div>
               <span>{item.date} / {item.venue} / {item.market}</span>
               <strong>{item.hit ? "🎯 " : ""}{item.title}</strong>
-              <em>{item.topTicket}</em>
+              <em>{item.topTicket} / 的中 {item.hitCount}/{item.betCount}</em>
             </div>
             <div>
               <strong>{formatPercent(item.roi, 1)}</strong>
@@ -1973,32 +2053,7 @@ function ResultsPanel({
             </div>
           </article>
         ))}
-        {history.length === 0 && <div className="empty-state">保存済み予想はまだありません</div>}
-      </div>
-
-      <div className="two-column">
-        <section className="mini-card">
-          <div className="section-heading compact">
-            <h2>モデル</h2>
-            <span>{modelStack.length}</span>
-          </div>
-          <div className="model-list">
-            {modelStack.map(([name, detail]) => (
-              <article key={name}>
-                <strong>{name}</strong>
-                <span>{detail}</span>
-              </article>
-            ))}
-          </div>
-        </section>
-
-        <section className="mini-card">
-          <div className="section-heading compact">
-            <h2>現在の順位</h2>
-            <span>{race.venue}</span>
-          </div>
-          <RunnerList projections={projections.slice(0, 4)} />
-        </section>
+        {settledHistory.length === 0 && <div className="empty-state">保存済み予想はまだありません</div>}
       </div>
     </section>
   );
@@ -2094,52 +2149,66 @@ function TicketLegs({ legs }: { legs: TicketLeg[] }) {
   );
 }
 
-function RunnerList({ projections }: { projections: RunnerProjection[] }) {
+function RunnerTable({ projections, race }: { projections: RunnerProjection[]; race: Race }) {
   return (
-    <div className="runner-list">
-      {projections.map((runner, index) => {
-        const horseWeight =
-          runner.horseWeight !== undefined
-            ? `馬体 ${runner.horseWeight}kg${
-                runner.horseWeightDiff !== undefined
-                  ? ` ${runner.horseWeightDiff >= 0 ? "+" : ""}${runner.horseWeightDiff}`
-                  : ""
-              }`
-            : undefined;
-        const profile = [
-          runner.sex || runner.age ? `${runner.sex ?? ""}${runner.age ? `${runner.age}歳` : ""}` : undefined,
-          runner.carriedWeight !== undefined ? `斤量 ${runner.carriedWeight.toFixed(1)}` : undefined,
-          horseWeight,
-          runner.runningStyle ? `脚質 ${runner.runningStyle}` : undefined,
-        ].filter(Boolean);
-        const staff = [runner.jockey ? `騎 ${runner.jockey}` : undefined, runner.trainer ? `厩 ${runner.trainer}` : undefined]
-          .filter(Boolean)
-          .join(" / ");
-        const bloodline = [runner.sire ? `父 ${runner.sire}` : undefined, runner.damSire ? `母父 ${runner.damSire}` : undefined]
-          .filter(Boolean)
-          .join(" / ");
+    <div className="runner-table-wrap">
+      <table className="runner-table">
+        <thead>
+          <tr>
+            <th>印</th>
+            <th>馬</th>
+            <th>オッズ</th>
+            <th>予測</th>
+            <th>状態</th>
+          </tr>
+        </thead>
+        <tbody>
+          {projections.map((runner, index) => {
+            const horseWeight =
+              runner.horseWeight !== undefined
+                ? `${runner.horseWeight}kg${
+                    runner.horseWeightDiff !== undefined
+                      ? ` ${runner.horseWeightDiff >= 0 ? "+" : ""}${runner.horseWeightDiff}`
+                      : ""
+                  }`
+                : "-";
+            const profile = [
+              runner.sex || runner.age ? `${runner.sex ?? ""}${runner.age ? `${runner.age}歳` : ""}` : undefined,
+              runner.carriedWeight !== undefined ? `${runner.carriedWeight.toFixed(1)}kg` : undefined,
+            ].filter(Boolean);
+            const staff = [runner.jockey ? `騎 ${runner.jockey}` : undefined, runner.trainer ? `厩 ${runner.trainer}` : undefined]
+              .filter(Boolean)
+              .join(" / ");
+            const result = finishPosition(runner);
+            const popularity = runnerPopularity(runner, race);
 
-        return (
-          <article key={runner.number}>
-            <span>{index + 1}</span>
-            <div className="runner-main">
-              <strong>{runner.number}. {runner.name}</strong>
-              <em>{staff || runner.jockey}</em>
-              {profile.length > 0 && <small>{profile.join(" / ")}</small>}
-              {runner.recentRecord && <small>{runner.recentRecord}</small>}
-              {bloodline && <small>{bloodline}</small>}
-            </div>
-            <div className="runner-probs">
-              <b>勝 {formatPercent(runner.winProbability)}</b>
-              <b>2内 {formatPercent(runner.top2Probability ?? runner.winProbability)}</b>
-              <b>3内 {formatPercent(runner.placeProbability)}</b>
-            </div>
-            <small className={runner.drift < 0 ? "positive odds-move" : "negative odds-move"}>
-              {runner.drift > 0 ? "+" : ""}{runner.drift.toFixed(1)}%
-            </small>
-          </article>
-        );
-      })}
+            return (
+              <tr className={result && result <= 3 ? "placed" : ""} key={runner.number}>
+                <td>
+                  <b>{index + 1}</b>
+                  {result && <em>{result}着</em>}
+                </td>
+                <td>
+                  <strong>{runner.number}. {runner.name}</strong>
+                  <span>{staff || runner.jockey}</span>
+                </td>
+                <td>
+                  <strong>{runner.odds.toFixed(1)}倍</strong>
+                  <span>{popularity ? `${popularity}人気` : "人気不明"}</span>
+                </td>
+                <td>
+                  <strong>勝 {formatPercent(runner.winProbability)}</strong>
+                  <span>3内 {formatPercent(runner.placeProbability)}</span>
+                </td>
+                <td>
+                  <strong>{profile.join(" / ") || "-"}</strong>
+                  <span>{horseWeight}</span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
