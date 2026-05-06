@@ -40,6 +40,33 @@ JRA_AND_LOCAL_VENUES = [
     "佐賀",
     "帯広",
 ]
+VENUE_BY_RACE_ID_CODE = {
+    "01": "札幌",
+    "02": "函館",
+    "03": "福島",
+    "04": "新潟",
+    "05": "東京",
+    "06": "中山",
+    "07": "中京",
+    "08": "京都",
+    "09": "阪神",
+    "10": "小倉",
+    "30": "門別",
+    "35": "盛岡",
+    "36": "水沢",
+    "42": "浦和",
+    "43": "船橋",
+    "44": "大井",
+    "45": "川崎",
+    "46": "金沢",
+    "47": "笠松",
+    "48": "名古屋",
+    "50": "園田",
+    "51": "姫路",
+    "54": "高知",
+    "55": "佐賀",
+    "65": "帯広",
+}
 
 ALIASES: dict[str, tuple[str, ...]] = {
     "race_id": ("race_id", "レースID", "レースid", "raceid"),
@@ -425,7 +452,16 @@ def infer_race_no(path: Path, text: str, default_race_no: int | None) -> int | N
 
 
 def infer_venue(path: Path, text: str, default_venue: str) -> str:
+    race_id_match = re.search(r"(20\d{10})", f"{path.stem} {text[:2000]}")
+    if race_id_match:
+        venue = VENUE_BY_RACE_ID_CODE.get(race_id_match.group(1)[4:6])
+        if venue:
+            return venue
+
     haystack = f"{path.name} {text[:20000]}"
+    for venue in JRA_AND_LOCAL_VENUES:
+        if re.search(rf"{re.escape(venue)}\s*\d{{1,2}}R", haystack):
+            return venue
     for venue in JRA_AND_LOCAL_VENUES:
         if venue in haystack:
             return venue
