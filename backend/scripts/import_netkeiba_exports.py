@@ -247,12 +247,19 @@ def read_csv_frame(path: Path, encoding: str) -> pd.DataFrame:
 
 
 def read_text_file(path: Path, encoding: str) -> str:
-    for candidate in dict.fromkeys([encoding, "utf-8-sig", "utf-8", "cp932", "euc-jp"]):
-        try:
-            return path.read_text(encoding=candidate)
-        except UnicodeDecodeError:
-            continue
-    return path.read_text(encoding=encoding, errors="replace")
+    raw = path.read_bytes()
+    best_text = ""
+    best_score = -10**9
+    for candidate in dict.fromkeys([encoding, "utf-8-sig", "utf-8", "euc-jp", "cp932"]):
+        text = raw.decode(candidate, errors="replace")
+        score = sum(
+            text.count(token) * 100
+            for token in ("馬名", "騎手", "レース", "出馬表", "着順", "オッズ")
+        ) - text.count("\ufffd")
+        if score > best_score:
+            best_text = text
+            best_score = score
+    return best_text
 
 
 def read_source_tables(path: Path, encoding: str) -> list[SourceTable]:
@@ -610,11 +617,28 @@ def normalize_table(
         place_odds = to_float(first_value(row, frame, "place_odds")) or estimated_place_odds(
             market_odds
         )
-        horse_weight, horse_weight_diff = parse_horse_weight(
-            first_value(row, frame, "horse_weight")
-        )
+        raw_horse_weight = first_value(row, frame, "horse_weight")
+        horse_weight, horse_weight_diff = parse_horse_weight(raw_horse_weight)
         explicit_diff = to_int(first_value(row, frame, "horse_weight_diff"))
         horse_weight_diff = explicit_diff if explicit_diff is not None else horse_weight_diff
+        odds_rank = to_int(first_value(row, frame, "odds_rank"))
+
+        predicted_odds_column = next(
+            (
+                str(column)
+                for column in frame.columns
+                if normalized_name(column) == normalized_name("予想オッズ")
+            ),
+            None,
+        )
+        if finish_position is None and predicted_odds_column and market_odds is None:
+            shifted_odds = to_float(raw_horse_weight)
+            shifted_rank = to_int(row.get(predicted_odds_column))
+            if shifted_odds is not None and shifted_odds > 1:
+                market_odds = shifted_odds
+                odds_rank = shifted_rank if shifted_rank is not None else odds_rank
+                horse_weight = None
+                horse_weight_diff = None
 
         record = {
             "race_id": race_id,
@@ -650,7 +674,7 @@ def normalize_table(
             ),
             "market_odds": market_odds,
             "place_odds": place_odds,
-            "odds_rank": to_int(first_value(row, frame, "odds_rank")),
+            "odds_rank": odds_rank,
             "source_file": path.name,
             "source_table": source.index,
             "source_runner_id": f"{race_id}-{runner_number:02d}",

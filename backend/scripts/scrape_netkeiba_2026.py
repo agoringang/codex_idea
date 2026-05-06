@@ -6,7 +6,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -21,7 +21,13 @@ from import_netkeiba_exports import normalize_records, read_records, write_combi
 
 LIST_URL = "https://db.netkeiba.com/race/list/{yyyymmdd}/"
 RACE_URL = "https://db.netkeiba.com/race/{race_id}/"
-RACE_ID_RE = re.compile(r"/race/(20\d{10})/?")
+NAR_LIST_SUB_URL = "https://nar.netkeiba.com/top/race_list_sub.html?kaisai_date={yyyymmdd}"
+JRA_LIST_SUB_URL = "https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={yyyymmdd}"
+NAR_SHUTUBA_URL = "https://nar.netkeiba.com/race/shutuba.html?race_id={race_id}"
+JRA_SHUTUBA_URL = "https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
+NAR_RESULT_URL = "https://nar.netkeiba.com/race/result.html?race_id={race_id}"
+JRA_RESULT_URL = "https://race.netkeiba.com/race/result.html?race_id={race_id}"
+RACE_ID_RE = re.compile(r"/race/(20\d{10})/?|race_id=(20\d{10})")
 ACCESS_LIMIT_TEXT = (
     "アクセス制限",
     "通信制限",
@@ -71,7 +77,12 @@ def read_html(path: Path) -> str:
 
 
 def extract_race_ids(html: str) -> list[str]:
-    return sorted(set(RACE_ID_RE.findall(html)))
+    ids: list[str] = []
+    for match in RACE_ID_RE.finditer(html):
+        race_id = match.group(1) or match.group(2)
+        if race_id:
+            ids.append(race_id)
+    return sorted(set(ids))
 
 
 def has_access_limit(html: str) -> bool:
@@ -196,12 +207,26 @@ def read_race_ids_file(path: Path | None) -> list[str]:
     return ids
 
 
+def jst_today() -> date:
+    return datetime.now(timezone(timedelta(hours=9))).date()
+
+
+def race_url_for_dynamic_id(race_id: str, *, source: str, race_date: date) -> str:
+    is_past = race_date < jst_today()
+    if source == "jra":
+        template = JRA_RESULT_URL if is_past else JRA_SHUTUBA_URL
+    else:
+        template = NAR_RESULT_URL if is_past else NAR_SHUTUBA_URL
+    return template.format(race_id=race_id)
+
+
 def scrape_calendar_pages(
     args: argparse.Namespace,
     fetcher: RateLimitedFetcher,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     race_ids: list[str] = []
     results: list[dict[str, Any]] = []
+    dynamic_page_urls: dict[str, str] = getattr(args, "race_page_urls", {}) or {}
 
     for day in date_range(parse_date(args.start_date), parse_date(args.end_date)):
         yyyymmdd = day.strftime("%Y%m%d")
@@ -217,11 +242,33 @@ def scrape_calendar_pages(
             row["race_ids"] = ids
             race_ids.extend(ids)
         elif result.status in {"blocked", "access_limited"}:
-            results.append(row)
-            raise SystemExit(f"netkeiba access stopped: {result.status} {result.url}")
+            row["warning"] = f"netkeiba db list blocked: {result.status}"
 
         results.append(row)
 
+        for source, url_template in (("nar", NAR_LIST_SUB_URL), ("jra", JRA_LIST_SUB_URL)):
+            sub_output_path = args.raw_dir / "_list" / f"{yyyymmdd}_{source}_sub.html"
+            sub_result = fetcher.fetch(url_template.format(yyyymmdd=yyyymmdd), sub_output_path)
+            sub_row = sub_result.__dict__.copy()
+            sub_row["date"] = day.isoformat()
+            sub_row["race_ids"] = []
+            sub_row["source"] = source
+            if sub_result.status in {"fetched", "cached"} and sub_output_path.exists():
+                html = read_html(sub_output_path)
+                ids = extract_race_ids(html)
+                sub_row["race_ids"] = ids
+                race_ids.extend(ids)
+                for race_id in ids:
+                    dynamic_page_urls[race_id] = race_url_for_dynamic_id(
+                        race_id,
+                        source=source,
+                        race_date=day,
+                    )
+            elif sub_result.status in {"blocked", "access_limited"}:
+                sub_row["warning"] = f"netkeiba {source} race list blocked: {sub_result.status}"
+            results.append(sub_row)
+
+    args.race_page_urls = dynamic_page_urls
     return sorted(set(race_ids)), results
 
 
@@ -231,9 +278,11 @@ def scrape_race_pages(
     fetcher: RateLimitedFetcher,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    race_page_urls: dict[str, str] = getattr(args, "race_page_urls", {}) or {}
 
     for race_id in race_ids:
-        result = fetcher.fetch(RACE_URL.format(race_id=race_id), args.raw_dir / f"{race_id}.html")
+        race_url = race_page_urls.get(race_id, RACE_URL.format(race_id=race_id))
+        result = fetcher.fetch(race_url, args.raw_dir / f"{race_id}.html")
         row = result.__dict__.copy()
         row["race_id"] = race_id
         results.append(row)

@@ -254,6 +254,10 @@ def build_race_dicts_from_rows(
         ]
         is_finished = bool(result_order)
         market = "JRA" if venue in JRA_VENUES else "NAR"
+        source_url = f"https://db.netkeiba.com/race/{race_id}/"
+        if not is_finished:
+            host = "race.netkeiba.com" if market == "JRA" else "nar.netkeiba.com"
+            source_url = f"https://{host}/race/shutuba.html?race_id={race_id}"
 
         race_dict = {
             "id": race_id,
@@ -270,7 +274,7 @@ def build_race_dicts_from_rows(
             "status": "finished" if is_finished else "open",
             "officialNote": f"{source_name}で照合済み / {race_date} / {len(rows)}頭",
             "source": source_name,
-            "sourceUrl": f"https://db.netkeiba.com/race/{race_id}/",
+            "sourceUrl": source_url,
             "sourceCheckedAt": checked_at,
             "verificationStatus": "verified",
             "runners": runners,

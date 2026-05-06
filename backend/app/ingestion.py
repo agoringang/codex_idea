@@ -19,6 +19,7 @@ from .schemas import RaceRequest, RunnerInput
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 SCRAPER_PATH = BACKEND_ROOT / "scripts" / "scrape_netkeiba_2026.py"
+JST = timezone(timedelta(hours=9))
 
 
 def _load_scraper_module() -> Any:
@@ -40,7 +41,7 @@ def _read_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def _date_range_for_days(days: int) -> tuple[str, str]:
-    end = date.today()
+    end = datetime.now(JST).date()
     start = end - timedelta(days=max(days - 1, 0))
     return start.isoformat(), end.isoformat()
 
