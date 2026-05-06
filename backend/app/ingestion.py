@@ -5,6 +5,7 @@ import csv
 import importlib.util
 import os
 import re
+import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -21,10 +22,12 @@ SCRAPER_PATH = BACKEND_ROOT / "scripts" / "scrape_netkeiba_2026.py"
 
 
 def _load_scraper_module() -> Any:
-    spec = importlib.util.spec_from_file_location("umalab_netkeiba_scraper", SCRAPER_PATH)
+    module_name = "umalab_netkeiba_scraper"
+    spec = importlib.util.spec_from_file_location(module_name, SCRAPER_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load scraper module: {SCRAPER_PATH}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
