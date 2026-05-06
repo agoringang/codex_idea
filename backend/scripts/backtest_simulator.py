@@ -271,19 +271,56 @@ def normalized_selection(selection: str, unordered: bool = False) -> str:
     return "-".join(parts)
 
 
-def is_hit(recommendation: BetRecommendation, keys: dict[str, str | set[str]]) -> bool:
+def winning_ticket_count(recommendation: BetRecommendation, keys: dict[str, str | set[str]]) -> int:
     key = keys[recommendation.bet_type]
     covered = recommendation.covered_selections or [recommendation.selection]
 
     if recommendation.bet_type in {"place", "support"}:
-        return normalized_selection(recommendation.selection) in key
+        return int(any(normalized_selection(selection) in key for selection in covered))
     if recommendation.bet_type in {"bracket_quinella", "quinella", "trio"}:
-        return normalized_selection(recommendation.selection, unordered=True) == key
+        covered_keys = {normalized_selection(selection, unordered=True) for selection in covered}
+        return int(key in covered_keys)
     if recommendation.bet_type == "wide":
-        return any(normalized_selection(selection, unordered=True) in key for selection in covered)
-    if recommendation.bet_type == "trifecta":
-        return key in {normalized_selection(selection) for selection in covered}
-    return normalized_selection(recommendation.selection) == key
+        covered_keys = {normalized_selection(selection, unordered=True) for selection in covered}
+        return sum(1 for selection in covered_keys if selection in key)
+    if recommendation.bet_type in {"exacta", "trifecta"}:
+        covered_keys = {normalized_selection(selection) for selection in covered}
+        return int(key in covered_keys)
+    return int(normalized_selection(recommendation.selection) == key)
+
+
+def is_hit(recommendation: BetRecommendation, keys: dict[str, str | set[str]]) -> bool:
+    return winning_ticket_count(recommendation, keys) > 0
+
+
+def payout_price(
+    recommendation: BetRecommendation,
+    race_frame: pd.DataFrame,
+    *,
+    synthetic_exotics: bool,
+) -> tuple[float, str]:
+    payout_column = PAYOUT_COLUMNS.get(recommendation.bet_type)
+    if payout_column and payout_column in race_frame:
+        if recommendation.bet_type in {"win", "place"}:
+            row = selected_runner(race_frame, recommendation.selection)
+            if row is not None:
+                odds = decimal_from_payout(row.get(payout_column))
+                if odds is not None:
+                    return odds, "official"
+        else:
+            odds = race_frame[payout_column].dropna().map(decimal_from_payout).dropna()
+            if not odds.empty:
+                return float(odds.iloc[0]), "official"
+
+    if recommendation.bet_type == "win":
+        row = selected_runner(race_frame, recommendation.selection)
+        return (float(row["market_odds"]), "market") if row is not None else (0.0, "none")
+    if recommendation.bet_type == "place":
+        row = selected_runner(race_frame, recommendation.selection)
+        return (float(row["__place_odds"]), "market") if row is not None else (0.0, "none")
+    if recommendation.bet_type in EXOTIC_BET_TYPES and synthetic_exotics:
+        return recommendation.odds, "synthetic"
+    return 0.0, "none"
 
 
 def selected_runner(frame: pd.DataFrame, selection: str) -> pd.Series | None:
@@ -303,28 +340,12 @@ def payout_odds(
     *,
     synthetic_exotics: bool,
 ) -> float:
-    payout_column = PAYOUT_COLUMNS.get(recommendation.bet_type)
-    if payout_column and payout_column in race_frame:
-        if recommendation.bet_type in {"win", "place"}:
-            row = selected_runner(race_frame, recommendation.selection)
-            if row is not None:
-                odds = decimal_from_payout(row.get(payout_column))
-                if odds is not None:
-                    return odds
-        else:
-            odds = race_frame[payout_column].dropna().map(decimal_from_payout).dropna()
-            if not odds.empty:
-                return float(odds.iloc[0])
-
-    if recommendation.bet_type == "win":
-        row = selected_runner(race_frame, recommendation.selection)
-        return float(row["market_odds"]) if row is not None else 0.0
-    if recommendation.bet_type == "place":
-        row = selected_runner(race_frame, recommendation.selection)
-        return float(row["__place_odds"]) if row is not None else 0.0
-    if recommendation.bet_type in EXOTIC_BET_TYPES and synthetic_exotics:
-        return recommendation.odds
-    return 0.0
+    odds, _source = payout_price(
+        recommendation,
+        race_frame,
+        synthetic_exotics=synthetic_exotics,
+    )
+    return odds
 
 
 def parse_bet_types(text: str | None, synthetic_exotics: bool) -> list[BetType]:
@@ -470,8 +491,19 @@ def simulate(
 
         for recommendation in prediction.recommendations[:limit]:
             stake = recommendation.stake
-            odds = payout_odds(recommendation, race_frame, synthetic_exotics=synthetic_exotics)
-            payout = stake * odds if odds > 0 and is_hit(recommendation, keys) else 0.0
+            odds, payout_source = payout_price(
+                recommendation,
+                race_frame,
+                synthetic_exotics=synthetic_exotics,
+            )
+            winning_tickets = winning_ticket_count(recommendation, keys)
+            if odds > 0 and winning_tickets > 0:
+                if payout_source == "synthetic" and recommendation.tickets > 1:
+                    payout = stake * odds * winning_tickets
+                else:
+                    payout = recommendation.unit_stake * odds * winning_tickets
+            else:
+                payout = 0.0
             hit_count += 1 if payout else 0
             bet_count += 1
             total_stake += stake

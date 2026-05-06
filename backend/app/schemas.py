@@ -113,6 +113,7 @@ class RaceRequest(BaseModel):
     min_probability: float = Field(default=0.0, ge=0, le=1)
     max_candidate_odds: float = Field(default=999.0, gt=1)
     max_edge: float | None = Field(default=None, ge=0)
+    min_portfolio_roi: float = Field(default=1.0, ge=0)
     max_exposure: float = Field(default=0.02, gt=0, le=0.1)
     enabled_bet_types: list[BetType] = Field(default_factory=lambda: DEFAULT_BET_TYPES.copy())
     runners: list[RunnerInput] = Field(min_length=2)
@@ -131,6 +132,11 @@ class RunnerPrediction(BaseModel):
     score: float
 
 
+class BetLeg(BaseModel):
+    label: str
+    numbers: list[int]
+
+
 class BetRecommendation(BaseModel):
     selection: str
     note: str
@@ -139,6 +145,7 @@ class BetRecommendation(BaseModel):
     tickets: int = Field(default=1, ge=1)
     unit_stake: float = Field(default=100, ge=0)
     covered_selections: list[str] = Field(default_factory=list)
+    legs: list[BetLeg] = Field(default_factory=list)
     probability: float
     odds: float
     edge: float
