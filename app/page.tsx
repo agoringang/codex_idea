@@ -1018,12 +1018,8 @@ export default function Home() {
         }
         setApiRaces(nextRaces);
         const defaultRace = pickDefaultRace(nextRaces, centerDate) ?? nextRaces[0];
-        setSelectedRaceId((current) =>
-          nextRaces.some((item) => item.id === current) ? current : defaultRace.id,
-        );
-        setSelectedDate((current) =>
-          nextRaces.some((item) => item.date === current) ? current : defaultRace.date,
-        );
+        setSelectedRaceId(defaultRace.id);
+        setSelectedDate(defaultRace.date);
         setSelectedVenue(defaultRace.venue);
         setMonthAnchor(monthStart(defaultRace.date));
         setApiState("ready");
