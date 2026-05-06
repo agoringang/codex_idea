@@ -1,7 +1,9 @@
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .public_model_status import PUBLIC_HOLDOUT_BACKTEST, PUBLIC_HOLDOUT_METRICS
 from .schemas import BackendStage, BackendStatus, BacktestSummary, FeatureCoverage, ModelArtifact
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -15,12 +17,14 @@ def read_json(path: Path) -> dict | None:
 
 def get_backend_status() -> BackendStatus:
     now = datetime.now(timezone.utc)
-    holdout_metrics = read_json(
-        BACKEND_ROOT / "models/racequant_holdout_2026/holdout_experiment.json"
-    )
+    holdout_metrics = read_json(BACKEND_ROOT / "models/racequant_holdout_2026/holdout_experiment.json")
+    if holdout_metrics is None and os.environ.get("RACEQUANT_MODEL_URL"):
+        holdout_metrics = PUBLIC_HOLDOUT_METRICS
     metrics = holdout_metrics or read_json(BACKEND_ROOT / "models/racequant/metrics.json")
     backtest = read_json(BACKEND_ROOT / "backtests/holdout2026-risk52.json")
     backtest_window = "2026 holdout risk52"
+    if backtest is None and os.environ.get("RACEQUANT_MODEL_URL"):
+        backtest = PUBLIC_HOLDOUT_BACKTEST
     if backtest is None:
         backtest = read_json(BACKEND_ROOT / "backtests/smoke-risk72.json")
         backtest_window = "sample smoke"
@@ -35,7 +39,11 @@ def get_backend_status() -> BackendStatus:
         top2_test = holdout_metrics["best"]["is_top2"]["holdout_2026"]
         place_test = holdout_metrics["best"]["is_place"]["holdout_2026"]
         quality_gate = {"publishable": bool(holdout_metrics["risk_router"]["stable_on_2026"])}
-        artifact_path = "models/racequant_holdout_2026/holdout_artifact.joblib"
+        artifact_path = (
+            "RACEQUANT_MODEL_URL"
+            if os.environ.get("RACEQUANT_MODEL_URL")
+            else "models/racequant_holdout_2026/holdout_artifact.joblib"
+        )
         data_window = (
             f"<=2025 train / 2026 holdout / {split['holdout_races']} holdout races"
         )
