@@ -125,7 +125,11 @@ class RunnerPrediction(BaseModel):
     number: int
     name: str
     win_probability: float
+    top2_probability: float | None = None
     place_probability: float
+    second_probability: float | None = None
+    third_probability: float | None = None
+    out_probability: float | None = None
     fair_odds: float
     market_odds: float
     edge: float

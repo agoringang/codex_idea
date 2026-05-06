@@ -15,34 +15,84 @@ def read_json(path: Path) -> dict | None:
 
 def get_backend_status() -> BackendStatus:
     now = datetime.now(timezone.utc)
-    metrics = read_json(BACKEND_ROOT / "models/racequant/metrics.json")
-    backtest = read_json(BACKEND_ROOT / "backtests/smoke-risk72.json")
+    holdout_metrics = read_json(
+        BACKEND_ROOT / "models/racequant_holdout_2026/holdout_experiment.json"
+    )
+    metrics = holdout_metrics or read_json(BACKEND_ROOT / "models/racequant/metrics.json")
+    backtest = read_json(BACKEND_ROOT / "backtests/holdout2026-risk52.json")
+    backtest_window = "2026 holdout risk52"
+    if backtest is None:
+        backtest = read_json(BACKEND_ROOT / "backtests/smoke-risk72.json")
+        backtest_window = "sample smoke"
 
-    trained_rows = int(metrics["rows"]) if metrics else 0
-    trained_races = int(metrics["races"]) if metrics else 0
-    win_test = metrics["targets"]["is_win"]["test"] if metrics else {}
-    place_test = metrics["targets"]["is_place"]["test"] if metrics else {}
+    if holdout_metrics:
+        split = holdout_metrics["split"]
+        trained_rows = int(split["fit_rows"] + split["calibration_rows"] + split["holdout_rows"])
+        trained_races = int(
+            split["fit_races"] + split["calibration_races"] + split["holdout_races"]
+        )
+        win_test = holdout_metrics["best"]["is_win"]["holdout_2026"]
+        top2_test = holdout_metrics["best"]["is_top2"]["holdout_2026"]
+        place_test = holdout_metrics["best"]["is_place"]["holdout_2026"]
+        quality_gate = {"publishable": bool(holdout_metrics["risk_router"]["stable_on_2026"])}
+        artifact_path = "models/racequant_holdout_2026/holdout_artifact.joblib"
+        data_window = (
+            f"<=2025 train / 2026 holdout / {split['holdout_races']} holdout races"
+        )
+        active_model_name = "umalab-risk-routed-holdout2026"
+        model_version = "v0.3.0-holdout2026"
+    elif metrics:
+        trained_rows = int(metrics["rows"])
+        trained_races = int(metrics["races"])
+        win_test = metrics["targets"]["is_win"]["test"]
+        top2_test = {}
+        place_test = metrics["targets"]["is_place"]["test"]
+        quality_gate = metrics.get("quality_gate", {})
+        artifact_path = "models/racequant/latest.joblib"
+        data_window = f"local CSV評価済み / {trained_races} races / {trained_rows} rows"
+        active_model_name = (
+            "umalab-local-gated-v0"
+            if bool(quality_gate.get("publishable"))
+            else "umalab-local-research-v0"
+        )
+        model_version = (
+            "v0.2.0-gated" if bool(quality_gate.get("publishable")) else "v0.2.0-research"
+        )
+    else:
+        trained_rows = 0
+        trained_races = 0
+        win_test = {}
+        top2_test = {}
+        place_test = {}
+        quality_gate = {}
+        artifact_path = "models/racequant/latest.joblib"
+        data_window = "未接続: 学習用CSV未作成"
+        active_model_name = "umalab-sample-v0"
+        model_version = "v0.1.0-sample"
+
     feature_presence = metrics.get("feature_presence", {}) if metrics else {}
-    quality_gate = metrics.get("quality_gate", {}) if metrics else {}
     publishable = bool(quality_gate.get("publishable"))
     model_status = "ready" if publishable else "partial"
-    model_version = "v0.2.0-gated" if publishable else "v0.2.0-research"
+    if backtest_window.startswith("2026"):
+        backtest_note = (
+            "2026ホールドアウトでリスク別の買い目を検証。"
+            "公開表示では利益保証ではなく検証実績として扱う"
+        )
+    elif backtest:
+        backtest_note = (
+            "単勝・複勝のみの検証。"
+            "3連系などは公式払戻列の取り込み後に公開用ROIとして扱う"
+        )
+    else:
+        backtest_note = "実データバックテストは未実行"
 
     return BackendStatus(
         mode="local-trained" if publishable else ("research" if metrics else "setup"),
         provider="local_csv",
-        data_window=(
-            f"local CSV評価済み / {trained_races} races / {trained_rows} rows"
-            if metrics
-            else "未接続: 学習用CSV未作成"
-        ),
+        data_window=data_window,
         last_sync_at=(now - timedelta(minutes=7)).isoformat(),
         next_retrain_at=(now + timedelta(hours=18)).isoformat(),
-        active_model=(
-            ("umalab-local-gated-v0" if publishable else "umalab-local-research-v0")
-            if metrics
-            else "umalab-sample-v0"
-        ),
+        active_model=active_model_name,
         stages=[
             BackendStage(
                 id="ingest",
@@ -135,7 +185,7 @@ def get_backend_status() -> BackendStatus:
                     if metrics
                     else "未評価: 学習用CSV待ち"
                 ),
-                path="models/racequant/latest.joblib",
+                path=artifact_path,
             ),
             ModelArtifact(
                 name="place_probability",
@@ -148,7 +198,20 @@ def get_backend_status() -> BackendStatus:
                     if metrics
                     else "未評価: 学習用CSV待ち"
                 ),
-                path="models/racequant/latest.joblib",
+                path=artifact_path,
+            ),
+            ModelArtifact(
+                name="top2_probability",
+                version=model_version if holdout_metrics else "not_generated",
+                target="2着以内確率",
+                metric=(
+                    f"holdout AUC {top2_test.get('auc', 0):.3f} / "
+                    f"Brier {top2_test.get('brier', 0):.3f} / "
+                    f"market差 {top2_test.get('brier_vs_market', 0):+.3f}"
+                    if holdout_metrics
+                    else "未評価: holdoutモデル待ち"
+                ),
+                path=artifact_path,
             ),
             ModelArtifact(
                 name="ticket_ev",
@@ -239,8 +302,8 @@ def get_backend_status() -> BackendStatus:
             ),
         ],
         backtest=BacktestSummary(
-            status="sample" if backtest else "not_started",
-            window="sample smoke" if backtest else "未実行",
+            status="ready" if backtest_window.startswith("2026") else ("sample" if backtest else "not_started"),
+            window=backtest_window if backtest else "未実行",
             races=int(backtest["races"]) if backtest else 0,
             bets=int(backtest["bets"]) if backtest else 0,
             total_stake=float(backtest["total_stake"]) if backtest else 0,
@@ -248,12 +311,7 @@ def get_backend_status() -> BackendStatus:
             roi=float(backtest["roi"]) if backtest else 0,
             hit_rate=float(backtest["hit_rate"]) if backtest else 0,
             max_drawdown=float(backtest["max_drawdown"]) if backtest else 0,
-            note=(
-                "単勝・複勝のみの検証。"
-                "3連系などは公式払戻列の取り込み後に公開用ROIとして扱う"
-                if backtest
-                else "実データバックテストは未実行"
-            ),
+            note=backtest_note,
         ),
         runtime_notes=(
             [

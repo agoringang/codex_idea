@@ -236,21 +236,28 @@ def canonicalize_runner_columns(frame: pd.DataFrame) -> pd.DataFrame:
     if "gate" in frame:
         frame["gate"] = pd.to_numeric(frame["gate"], errors="coerce")
 
+    runner_number = pd.Series(np.nan, index=frame.index, dtype="float32")
     if "runner_number" in frame:
         runner_number = pd.to_numeric(frame["runner_number"], errors="coerce")
-    elif "horse_number" in frame:
-        runner_number = pd.to_numeric(frame["horse_number"], errors="coerce")
-    elif "number" in frame and "gate" in frame:
-        # Older normalized CSVs stored race number in `number` and horse number in `gate`.
+    if "horse_number" in frame:
+        horse_number = pd.to_numeric(frame["horse_number"], errors="coerce")
+        runner_number = runner_number.fillna(horse_number)
+    if "gate" in frame and "number" in frame:
+        # Older normalized CSVs stored the race number in `number` and the horse
+        # number in `gate`. Newer netkeiba imports have explicit runner_number.
         number_unique = frame.groupby("race_id")["number"].transform("nunique")
         gate_unique = frame.groupby("race_id")["gate"].transform("nunique")
         use_gate_as_runner_number = (number_unique <= 2) & (gate_unique > number_unique)
-        runner_number = frame["number"].where(~use_gate_as_runner_number, frame["gate"])
+        runner_number = runner_number.fillna(frame["gate"].where(use_gate_as_runner_number))
         if "race_no" not in frame:
             frame["race_no"] = frame["number"].where(use_gate_as_runner_number)
-    elif "number" in frame:
-        runner_number = frame["number"]
-    else:
+        else:
+            frame["race_no"] = pd.to_numeric(frame["race_no"], errors="coerce").fillna(
+                frame["number"].where(use_gate_as_runner_number)
+            )
+    if "number" in frame:
+        runner_number = runner_number.fillna(frame["number"])
+    if runner_number.isna().all():
         raise ValueError(
             "missing runner number column: expected number, gate, runner_number, or horse_number"
         )
@@ -258,10 +265,17 @@ def canonicalize_runner_columns(frame: pd.DataFrame) -> pd.DataFrame:
     frame["runner_number"] = pd.to_numeric(runner_number, errors="coerce").astype("float32")
     if "horse_number" not in frame:
         frame["horse_number"] = frame["runner_number"]
-    if "bracket" in frame:
-        frame["bracket"] = pd.to_numeric(frame["bracket"], errors="coerce")
     else:
-        frame["bracket"] = frame["runner_number"].map(bracket_from_runner_number)
+        frame["horse_number"] = pd.to_numeric(frame["horse_number"], errors="coerce").fillna(
+            frame["runner_number"]
+        )
+    bracket = (
+        pd.to_numeric(frame["bracket"], errors="coerce")
+        if "bracket" in frame
+        else pd.Series(np.nan, index=frame.index)
+    )
+    computed_bracket = frame["runner_number"].map(bracket_from_runner_number)
+    frame["bracket"] = bracket.where((bracket >= 1) & (bracket <= 8), computed_bracket)
     frame["gate"] = frame["bracket"]
     if "field_size" not in frame:
         frame["field_size"] = frame.groupby("race_id")["race_id"].transform("size")

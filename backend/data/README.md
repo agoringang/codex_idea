@@ -18,4 +18,41 @@ For the current local central-racing archive, use:
 uv run python scripts/convert_keiba_data.py --input-dir data/keiba_data --output data/keiba_history_normalized.csv
 ```
 
+For manually saved 2026 netkeiba result/card tables, place CSV/HTML files under
+`data/raw/netkeiba_2026/`. Prefer filenames that include the date and race
+number, for example `2026-01-05_中山_11R.csv`. Saved result pages can also
+include payout tables; the importer maps them to `payout_*` columns for
+backtests.
+
+```bash
+uv run python scripts/import_netkeiba_exports.py \
+  --input-dir data/raw/netkeiba_2026 \
+  --output data/netkeiba_2026_normalized.csv \
+  --base-csv data/keiba_history_normalized.csv \
+  --combined-output data/keiba_history_with_2026.csv
+```
+
+This importer is for files you have manually saved or otherwise have permission
+to use. Do not use automated scraping against login, paid, CAPTCHA-protected, or
+rate-limited pages.
+
+If you choose to collect public netkeiba DB pages directly, use the conservative
+scraper. It caches raw HTML first, then writes the normalized and combined CSVs.
+
+```bash
+uv run python scripts/scrape_netkeiba_2026.py \
+  --start-date 2026-01-01 \
+  --end-date 2026-05-06 \
+  --delay 1.5
+```
+
 The generated `*.csv` files are ignored by git.
+
+Current model validation expects:
+
+- `data/keiba_history_normalized.csv`: central-racing archive through 2025
+- `data/netkeiba_2026_normalized.csv`: 2026 holdout data
+- `data/keiba_history_with_2026.csv`: combined archive for analysis only
+
+Do not commit those files. Deploy the trained artifact through Blob and
+`RACEQUANT_MODEL_URL` instead of placing it in the repository.

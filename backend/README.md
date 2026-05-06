@@ -17,11 +17,65 @@ Convert the local central-racing CSV archive:
 uv run python scripts/convert_keiba_data.py --input-dir data/keiba_data --output data/keiba_history_normalized.csv
 ```
 
+Import manually saved 2026 netkeiba CSV/HTML result tables, including payout
+tables when present, and merge them with the existing training archive:
+
+```bash
+uv run python scripts/import_netkeiba_exports.py \
+  --input-dir data/raw/netkeiba_2026 \
+  --output data/netkeiba_2026_normalized.csv \
+  --base-csv data/keiba_history_normalized.csv \
+  --combined-output data/keiba_history_with_2026.csv
+```
+
+Scrape public netkeiba DB race pages for a 2026 date range, cache the HTML, and
+then run the same importer automatically:
+
+```bash
+uv run python scripts/scrape_netkeiba_2026.py \
+  --start-date 2026-01-01 \
+  --end-date 2026-05-06 \
+  --delay 1.5 \
+  --output data/netkeiba_2026_normalized.csv \
+  --combined-output data/keiba_history_with_2026.csv
+```
+
 Train the current win/place production baseline:
 
 ```bash
 uv run python scripts/train_production.py --csv data/keiba_history_normalized.csv --output-dir models/racequant
 ```
+
+Train and validate the current risk-routed model setup with 2025 and older races
+as training data and 2026 as the holdout:
+
+```bash
+uv run python scripts/experiment_holdout_2026.py \
+  --train-csv data/keiba_history_normalized.csv \
+  --holdout-csv data/netkeiba_2026_normalized.csv \
+  --output-dir models/racequant_holdout_2026
+```
+
+When `models/racequant_holdout_2026/holdout_artifact.joblib` exists, inference
+uses it by default. Override with `RACEQUANT_MODEL_PATH` if needed.
+
+For Vercel, keep the model artifact out of Git and load it from Blob or another
+public file URL:
+
+```bash
+npm run upload:model -- backend/models/racequant_holdout_2026/holdout_artifact.joblib
+```
+
+Set the printed values in the Vercel project:
+
+```text
+RACEQUANT_MODEL_URL=https://...
+RACEQUANT_MODEL_SHA256=...
+```
+
+At runtime the API downloads the artifact once into `/tmp/umalab-racequant-models`.
+Use `RACEQUANT_MODEL_CACHE_DIR` only when you need a different writable cache
+directory.
 
 Smoke-train before spending time on the full archive:
 
@@ -35,6 +89,14 @@ Run a risk-specific simulation:
 
 ```bash
 uv run python scripts/backtest_simulator.py --csv data/keiba_history_normalized.csv --risk 72 --bankroll 100000 --output backtests/local-risk72.json
+```
+
+Run the 2026 holdout simulations used by the product UI:
+
+```bash
+uv run python scripts/backtest_simulator.py --csv data/netkeiba_2026_normalized.csv --risk 24 --bankroll 100000 --output backtests/holdout2026-risk24.json
+uv run python scripts/backtest_simulator.py --csv data/netkeiba_2026_normalized.csv --risk 52 --bankroll 100000 --output backtests/holdout2026-risk52.json
+uv run python scripts/backtest_simulator.py --csv data/netkeiba_2026_normalized.csv --risk 84 --bankroll 100000 --output backtests/holdout2026-risk84.json
 ```
 
 The simulator now defaults to conservative filters: `min_edge=0.12`, `min_probability=0.20`, `max_odds=40`, `max_edge=0.8`, and `limit=3`. Use `--skip-races` to evaluate a later holdout window instead of the same early races used for smoke training.

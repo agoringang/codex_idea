@@ -37,6 +37,12 @@ npm run dev
 
 http://localhost:3000 を開きます。
 
+ローカルでバックエンドを別ポートに立てる場合は、フロント側にAPIの向き先を渡します:
+
+```bash
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000 npm run dev
+```
+
 ## Backend With uv
 
 ```bash
@@ -73,6 +79,15 @@ uv run python scripts/train_production.py \
   --output-dir models/racequant
 ```
 
+2025年までを学習、2026年を検証にする現在の本命モデル:
+
+```bash
+uv run python scripts/experiment_holdout_2026.py \
+  --train-csv data/keiba_history_normalized.csv \
+  --holdout-csv data/netkeiba_2026_normalized.csv \
+  --output-dir models/racequant_holdout_2026
+```
+
 慎重に進める場合は、先に小規模ゲートを通します:
 
 ```bash
@@ -106,6 +121,18 @@ uv run python scripts/render_prediction_card.py \
   --backtest backtests/local-risk72.json \
   --output ../public/model-output.svg
 ```
+
+## Vercel
+
+このリポジトリは `vercel.json` の Services 構成で、Next.jsを `/`、FastAPIを `/api` に載せます。Vercelの Project Settings で Framework Preset を `Services` にしてから再デプロイしてください。
+
+モデル本体はGitに入れません。Vercel Blobを接続して環境変数を取得した後、以下でアップロードします:
+
+```bash
+npm run upload:model -- backend/models/racequant_holdout_2026/holdout_artifact.joblib
+```
+
+出力された `RACEQUANT_MODEL_URL` と `RACEQUANT_MODEL_SHA256` をVercelのEnvironment Variablesに設定します。フロントは本番では相対パス `/api` を使うため、`NEXT_PUBLIC_API_BASE_URL` は通常不要です。
 
 ## API Surface
 
