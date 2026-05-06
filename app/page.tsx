@@ -884,15 +884,21 @@ function buildMonthCells(
   const first = new Date(Date.UTC(year, month - 1, 1));
   const firstWeekday = (first.getUTCDay() + 6) % 7;
   const gridStart = addDays(start, -firstWeekday);
-  const raceCountByDate = new Map<string, number>();
+  const raceIdsByDate = new Map<string, Set<string>>();
   const historyCountByDate = new Map<string, number>();
+  const historyIdsByDate = new Map<string, Set<string>>();
   const hitCountByDate = new Map<string, number>();
 
   races.forEach((race) => {
-    raceCountByDate.set(race.date, (raceCountByDate.get(race.date) ?? 0) + 1);
+    const ids = raceIdsByDate.get(race.date) ?? new Set<string>();
+    ids.add(race.id);
+    raceIdsByDate.set(race.date, ids);
   });
   history.forEach((item) => {
     historyCountByDate.set(item.date, (historyCountByDate.get(item.date) ?? 0) + 1);
+    const ids = historyIdsByDate.get(item.date) ?? new Set<string>();
+    ids.add(item.id);
+    historyIdsByDate.set(item.date, ids);
     if (item.hit) {
       hitCountByDate.set(item.date, (hitCountByDate.get(item.date) ?? 0) + 1);
     }
@@ -900,12 +906,16 @@ function buildMonthCells(
 
   return Array.from({ length: 42 }, (_, index) => {
     const date = addDays(gridStart, index);
+    const uniqueRaceIds = new Set([
+      ...(raceIdsByDate.get(date) ?? []),
+      ...(historyIdsByDate.get(date) ?? []),
+    ]);
     return {
       date,
       label: calendarLabel(date),
       day: weekdayFormatter.format(dateAtJst(date)).replace("曜日", ""),
       inMonth: date.slice(0, 7) === start.slice(0, 7),
-      raceCount: raceCountByDate.get(date) ?? 0,
+      raceCount: uniqueRaceIds.size,
       historyCount: historyCountByDate.get(date) ?? 0,
       hitCount: hitCountByDate.get(date) ?? 0,
       isToday: date === today,
@@ -957,7 +967,11 @@ export default function Home() {
   );
   const race = availableRaces.find((item) => item.id === selectedRaceId) ?? availableRaces[0] ?? null;
   const selectedDateRaces = availableRaces.filter((item) => item.date === selectedDate);
-  const selectedDateHistory = availableHistory.filter((item) => item.date === selectedDate);
+  const selectedDateRaceIds = useMemo(
+    () => new Set(selectedDateRaces.map((item) => item.id)),
+    [selectedDateRaces],
+  );
+  const selectedDateHistory = availableHistory.filter((item) => item.date === selectedDate && !selectedDateRaceIds.has(item.id));
   const venueOptions = useMemo<VenueOption[]>(() => {
     const counts = new Map<string, number>();
     selectedDateRaces.forEach((item) => counts.set(item.venue, (counts.get(item.venue) ?? 0) + 1));
@@ -1838,7 +1852,7 @@ function CalendarPanel({
             type="button"
           >
             <strong>{Number(day.date.slice(-2))}</strong>
-            <span>{day.raceCount + day.historyCount}</span>
+            <span>{day.raceCount}</span>
             {day.hitCount > 0 && <em>🎯</em>}
           </button>
         ))}
