@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import html as html_lib
 import json
 import re
 import sys
@@ -28,7 +29,10 @@ NAR_SHUTUBA_URL = "https://nar.netkeiba.com/race/shutuba.html?race_id={race_id}"
 JRA_SHUTUBA_URL = "https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
 NAR_RESULT_URL = "https://nar.netkeiba.com/race/result.html?race_id={race_id}"
 JRA_RESULT_URL = "https://race.netkeiba.com/race/result.html?race_id={race_id}"
+NAR_ODDS_TANFUKU_URL = "https://nar.netkeiba.com/odds/index.html?type=b1&race_id={race_id}"
+JRA_ODDS_TANFUKU_URL = "https://race.netkeiba.com/odds/index.html?race_id={race_id}&type=b1"
 RACE_ID_RE = re.compile(r"/race/(20\d{10})/?|race_id=(20\d{10})")
+JRA_COURSE_CODES = {"01", "02", "03", "04", "05", "06", "07", "08", "09", "10"}
 ACCESS_LIMIT_TEXT = (
     "アクセス制限",
     "通信制限",
@@ -65,12 +69,18 @@ def date_range(start: date, end: date) -> list[date]:
 
 
 def decode_html(raw: bytes) -> str:
+    best_text = ""
+    best_score = -10**9
     for encoding in ["euc-jp", "cp932", "utf-8", "utf-8-sig"]:
-        try:
-            return raw.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", errors="replace")
+        text = raw.decode(encoding, errors="replace")
+        score = sum(
+            text.count(token) * 100
+            for token in ("馬名", "騎手", "単勝", "複勝", "出馬表", "着順", "オッズ")
+        ) - text.count("\ufffd")
+        if score > best_score:
+            best_text = text
+            best_score = score
+    return best_text
 
 
 def read_html(path: Path) -> str:
@@ -272,6 +282,21 @@ def estimated_post_time(
     )
 
 
+def infer_source_from_race_id(race_id: str) -> str:
+    if len(race_id) >= 6 and race_id[4:6] in JRA_COURSE_CODES:
+        return "jra"
+    return "nar"
+
+
+def infer_local_date_from_race_id(race_id: str) -> date | None:
+    if infer_source_from_race_id(race_id) != "nar" or len(race_id) < 10:
+        return None
+    try:
+        return date(int(race_id[:4]), int(race_id[6:8]), int(race_id[8:10]))
+    except ValueError:
+        return None
+
+
 def race_url_for_dynamic_id(
     race_id: str,
     *,
@@ -282,11 +307,19 @@ def race_url_for_dynamic_id(
     now = datetime.now(timezone(timedelta(hours=9)))
     estimated = estimated_post_time(race_id, source, race_date=race_date)
     result_overdue = estimated is not None and now >= estimated + timedelta(minutes=25)
-    is_past = prefer_results or race_date < jst_today() or result_overdue
+    # Do not force today's races onto result pages just because the live
+    # polling endpoint is running. Before the result page exists, the shutuba
+    # page plus the odds page is the only reliable source for prediction.
+    is_past = race_date < jst_today() or result_overdue or (prefer_results and race_date < jst_today())
     if source == "jra":
         template = JRA_RESULT_URL if is_past else JRA_SHUTUBA_URL
     else:
         template = NAR_RESULT_URL if is_past else NAR_SHUTUBA_URL
+    return template.format(race_id=race_id)
+
+
+def odds_url_for_dynamic_id(race_id: str, *, source: str) -> str:
+    template = JRA_ODDS_TANFUKU_URL if source == "jra" else NAR_ODDS_TANFUKU_URL
     return template.format(race_id=race_id)
 
 
@@ -297,6 +330,7 @@ def scrape_calendar_pages(
     race_ids: list[str] = []
     results: list[dict[str, Any]] = []
     dynamic_page_urls: dict[str, str] = getattr(args, "race_page_urls", {}) or {}
+    race_meta: dict[str, dict[str, str]] = getattr(args, "race_meta", {}) or {}
 
     for day in date_range(parse_date(args.start_date), parse_date(args.end_date)):
         yyyymmdd = day.strftime("%Y%m%d")
@@ -335,11 +369,13 @@ def scrape_calendar_pages(
                         race_date=day,
                         prefer_results=bool(getattr(args, "prefer_results", False)),
                     )
+                    race_meta[race_id] = {"date": day.isoformat(), "source": source}
             elif sub_result.status in {"blocked", "access_limited"}:
                 sub_row["warning"] = f"netkeiba {source} race list blocked: {sub_result.status}"
             results.append(sub_row)
 
     args.race_page_urls = dynamic_page_urls
+    args.race_meta = race_meta
     return sorted(set(race_ids)), results
 
 
@@ -352,7 +388,18 @@ def scrape_race_pages(
     race_page_urls: dict[str, str] = getattr(args, "race_page_urls", {}) or {}
 
     for race_id in race_ids:
-        race_url = race_page_urls.get(race_id, RACE_URL.format(race_id=race_id))
+        race_url = race_page_urls.get(race_id)
+        if not race_url:
+            inferred_date = infer_local_date_from_race_id(race_id)
+            if inferred_date is not None:
+                race_url = race_url_for_dynamic_id(
+                    race_id,
+                    source=infer_source_from_race_id(race_id),
+                    race_date=inferred_date,
+                    prefer_results=bool(getattr(args, "prefer_results", False)),
+                )
+            else:
+                race_url = RACE_URL.format(race_id=race_id)
         result = fetcher.fetch(race_url, args.raw_dir / f"{race_id}.html")
         row = result.__dict__.copy()
         row["race_id"] = race_id
@@ -361,6 +408,212 @@ def scrape_race_pages(
             raise SystemExit(f"netkeiba access stopped: {result.status} {result.url}")
 
     return results
+
+
+def should_fetch_odds_page(race_id: str, args: argparse.Namespace) -> bool:
+    if not bool(getattr(args, "include_odds", False)):
+        return False
+    meta = (getattr(args, "race_meta", {}) or {}).get(race_id, {})
+    race_date_text = meta.get("date")
+    if not race_date_text:
+        return True
+    try:
+        race_date = parse_date(race_date_text)
+    except ValueError:
+        return True
+    return race_date <= jst_today()
+
+
+def scrape_odds_pages(
+    race_ids: list[str],
+    args: argparse.Namespace,
+    fetcher: RateLimitedFetcher,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    race_meta: dict[str, dict[str, str]] = getattr(args, "race_meta", {}) or {}
+    output_dir = args.raw_dir / "_odds"
+
+    for race_id in race_ids:
+        if not should_fetch_odds_page(race_id, args):
+            continue
+        source = race_meta.get(race_id, {}).get("source") or infer_source_from_race_id(race_id)
+        odds_url = odds_url_for_dynamic_id(race_id, source=source)
+        result = fetcher.fetch(odds_url, output_dir / f"{race_id}_b1.html")
+        row = result.__dict__.copy()
+        row["race_id"] = race_id
+        row["source"] = source
+        results.append(row)
+        if result.status in {"blocked", "access_limited"}:
+            raise SystemExit(f"netkeiba odds access stopped: {result.status} {result.url}")
+
+    return results
+
+
+def strip_html_fragment(value: str) -> str:
+    text = html_lib.unescape(value).replace("\u3000", " ").replace("\xa0", " ")
+    text = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def parse_odds_number(value: str) -> float | None:
+    text = strip_html_fragment(value).translate(str.maketrans("０１２３４５６７８９．", "0123456789."))
+    if not text or "---" in text or "取消" in text or "除外" in text:
+        return None
+    match = re.search(r"\d+(?:\.\d+)?", text.replace(",", ""))
+    if not match:
+        return None
+    try:
+        number = float(match.group(0))
+    except ValueError:
+        return None
+    if number <= 0:
+        return None
+    return number
+
+
+def extract_odds_table(text: str, block_id: str) -> str:
+    block_index = text.find(block_id)
+    if block_index < 0:
+        return ""
+    table_start = text.find("<table", block_index)
+    if table_start < 0:
+        return ""
+    table_end = text.find("</table>", table_start)
+    if table_end < 0:
+        return ""
+    return text[table_start : table_end + len("</table>")]
+
+
+def parse_odds_block(text: str, block_id: str, value_key: str) -> dict[int, dict[str, Any]]:
+    table = extract_odds_table(text, block_id)
+    if not table:
+        return {}
+
+    parsed: dict[int, dict[str, Any]] = {}
+    for row_match in re.finditer(r"<tr\b[^>]*>(.*?)</tr>", table, flags=re.IGNORECASE | re.DOTALL):
+        row_html = row_match.group(1)
+        cells = re.findall(r"<td\b([^>]*)>(.*?)</td>", row_html, flags=re.IGNORECASE | re.DOTALL)
+        if len(cells) < 3:
+            continue
+
+        cell_texts = [strip_html_fragment(cell_html) for _attrs, cell_html in cells]
+        numeric_cells = [
+            int(match.group(0))
+            for text_value in cell_texts[:3]
+            for match in [re.fullmatch(r"\d{1,2}", text_value)]
+            if match
+        ]
+        if not numeric_cells:
+            continue
+        runner_number = numeric_cells[1] if len(numeric_cells) >= 2 else numeric_cells[0]
+
+        horse_name_match = re.search(
+            r"class=[\"'][^\"']*Horse_Name[^\"']*[\"'][^>]*>(.*?)</td>",
+            row_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        horse_name = strip_html_fragment(horse_name_match.group(1)) if horse_name_match else ""
+        odds_match = re.search(
+            r"class=[\"'][^\"']*Odds[^\"']*[\"'][^>]*>(.*?)</td>",
+            row_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        odds_text = odds_match.group(1) if odds_match else cells[-1][1]
+        odds_value = parse_odds_number(odds_text)
+        if odds_value is None:
+            continue
+        parsed[runner_number] = {
+            "runner_number": runner_number,
+            "horse_name": horse_name,
+            value_key: odds_value,
+        }
+    return parsed
+
+
+def parse_live_odds_file(path: Path) -> list[dict[str, Any]]:
+    race_id_match = re.search(r"(20\d{10})", path.stem)
+    if not race_id_match:
+        return []
+    race_id = race_id_match.group(1)
+    text = read_html(path)
+    win_odds = parse_odds_block(text, "odds_tan_block", "market_odds")
+    place_odds = parse_odds_block(text, "odds_fuku_block", "place_odds")
+    runner_numbers = sorted(set(win_odds) | set(place_odds))
+    if not runner_numbers:
+        return []
+
+    snapshot_at = datetime.now(timezone.utc).isoformat()
+    rows: list[dict[str, Any]] = []
+    for runner_number in runner_numbers:
+        row = {
+            "race_id": race_id,
+            "runner_number": runner_number,
+            "odds_snapshot_at": snapshot_at,
+        }
+        row.update(place_odds.get(runner_number, {}))
+        row.update(win_odds.get(runner_number, {}))
+        rows.append(row)
+
+    valid_win_odds = sorted(
+        (
+            (float(row["market_odds"]), int(row["runner_number"]))
+            for row in rows
+            if row.get("market_odds") is not None and float(row["market_odds"]) > 1.0
+        )
+    )
+    rank_by_runner = {runner_number: index + 1 for index, (_odds, runner_number) in enumerate(valid_win_odds)}
+    for row in rows:
+        rank = rank_by_runner.get(int(row["runner_number"]))
+        if rank is not None:
+            row["odds_rank"] = rank
+    return rows
+
+
+def load_live_odds_rows(raw_dir: Path) -> list[dict[str, Any]]:
+    odds_dir = raw_dir / "_odds"
+    if not odds_dir.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for path in sorted(odds_dir.glob("*_b1.html")):
+        rows.extend(parse_live_odds_file(path))
+    return rows
+
+
+def overlay_live_odds(frame: pd.DataFrame, raw_dir: Path) -> pd.DataFrame:
+    odds_rows = load_live_odds_rows(raw_dir)
+    if frame.empty or not odds_rows:
+        return frame
+
+    odds_frame = pd.DataFrame(odds_rows)
+    if odds_frame.empty:
+        return frame
+    odds_frame["race_id"] = odds_frame["race_id"].astype(str)
+    odds_frame["runner_number"] = pd.to_numeric(odds_frame["runner_number"], errors="coerce").astype("Int64")
+    odds_frame = odds_frame.dropna(subset=["runner_number"])
+    odds_frame = odds_frame.drop_duplicates(["race_id", "runner_number"], keep="last")
+
+    live_columns = [
+        column
+        for column in ["market_odds", "place_odds", "odds_rank", "odds_snapshot_at"]
+        if column in odds_frame
+    ]
+    if not live_columns:
+        return frame
+
+    work = frame.copy()
+    work["race_id"] = work["race_id"].astype(str)
+    work["runner_number"] = pd.to_numeric(work["runner_number"], errors="coerce").astype("Int64")
+    live = odds_frame[["race_id", "runner_number", *live_columns]].rename(
+        columns={column: f"{column}_live" for column in live_columns}
+    )
+    work = work.merge(live, how="left", on=["race_id", "runner_number"])
+    for column in live_columns:
+        live_column = f"{column}_live"
+        if live_column in work:
+            work[column] = work[live_column].where(work[live_column].notna(), work[column])
+            work = work.drop(columns=[live_column])
+    return work
 
 
 def import_downloaded_html(args: argparse.Namespace) -> dict[str, Any]:
@@ -382,6 +635,7 @@ def import_downloaded_html(args: argparse.Namespace) -> dict[str, Any]:
     )
     records, diagnostics = read_records(import_args)
     frame = normalize_records(records)
+    frame = overlay_live_odds(frame, args.raw_dir)
     if frame.empty:
         return {
             "rows": 0,
@@ -454,6 +708,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list-only", action="store_true")
     parser.add_argument("--skip-import", action="store_true")
     parser.add_argument("--skip-enrich", action="store_true")
+    parser.add_argument("--include-odds", action="store_true")
     parser.add_argument(
         "--user-agent",
         default=(
@@ -487,9 +742,11 @@ def main() -> None:
             calendar_ids, calendar_results = scrape_calendar_pages(args, fetcher)
         race_ids = sorted(set([*explicit_ids, *calendar_ids]))
         race_results = [] if args.list_only else scrape_race_pages(race_ids, args, fetcher)
+        odds_results = [] if args.list_only else scrape_odds_pages(race_ids, args, fetcher)
     except MaxRequestsReached as exc:
         race_ids = sorted(set([*explicit_ids, *calendar_ids]))
         race_results = []
+        odds_results = []
         stop_reason = str(exc)
     else:
         stop_reason = ""
@@ -510,6 +767,8 @@ def main() -> None:
         "calendar_results": calendar_results,
         "race_pages": len(race_results),
         "race_results": race_results,
+        "odds_pages": len(odds_results),
+        "odds_results": odds_results,
         "import": import_summary,
     }
     write_manifest(args.raw_dir / "scrape_manifest.json", summary)

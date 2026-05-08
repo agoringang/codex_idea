@@ -273,6 +273,56 @@ def _auto_predict_missing_finished_races(races: list[dict[str, Any]], start_date
     return count
 
 
+def _apply_live_odds_to_races(races: list[dict[str, Any]], odds_rows: list[dict[str, Any]]) -> int:
+    if not races or not odds_rows:
+        return 0
+
+    odds_by_runner: dict[tuple[str, int], dict[str, Any]] = {}
+    for row in odds_rows:
+        if not isinstance(row, dict):
+            continue
+        race_id = str(row.get("race_id") or "")
+        runner_number = _safe_int(row.get("runner_number"), 0)
+        if not race_id or runner_number <= 0:
+            continue
+        odds_by_runner[(race_id, runner_number)] = row
+
+    updated = 0
+    for race in races:
+        race_id = str(race.get("id") or "")
+        runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+        race_updated = False
+        for runner in runners:
+            if not isinstance(runner, dict):
+                continue
+            number = _safe_int(runner.get("number"), 0)
+            odds_row = odds_by_runner.get((race_id, number))
+            if not odds_row:
+                continue
+
+            win_odds = _safe_float(odds_row.get("market_odds"), 0.0)
+            place_odds = _safe_float(odds_row.get("place_odds"), 0.0)
+            if win_odds > 1.0:
+                runner["odds"] = win_odds
+                race_updated = True
+            if place_odds > 1.0 and (win_odds <= 1.0 or place_odds <= win_odds):
+                runner["placeOdds"] = place_odds
+                race_updated = True
+            odds_rank = _safe_int(odds_row.get("odds_rank"), 0)
+            if odds_rank > 0:
+                tags = runner.get("tags") if isinstance(runner.get("tags"), list) else []
+                tags = [tag for tag in tags if not re.fullmatch(r"\d+人気", str(tag))]
+                runner["tags"] = [*tags, f"{odds_rank}人気"]
+            if odds_row.get("odds_snapshot_at"):
+                runner["oddsSnapshotAt"] = str(odds_row.get("odds_snapshot_at"))
+
+        if race_updated:
+            race["sourceCheckedAt"] = datetime.now(timezone.utc).isoformat()
+            race["verificationStatus"] = "odds_verified"
+            updated += 1
+    return updated
+
+
 def _attach_live_feature_deltas(races: list[dict[str, Any]], start_date: str, end_date: str) -> None:
     try:
         previous_races = fetch_race_cards(start_date, end_date)
@@ -343,6 +393,7 @@ def ingest_netkeiba_window(
         list_only=False,
         skip_import=False,
         skip_enrich=True,
+        include_odds=True,
         enriched_output=None,
         enriched_combined_output=None,
         user_agent=os.getenv(
@@ -367,14 +418,18 @@ def ingest_netkeiba_window(
         calendar_ids, _calendar_results = scraper.scrape_calendar_pages(args, fetcher)
         race_ids = sorted(set(calendar_ids))
         race_results = scraper.scrape_race_pages(race_ids, args, fetcher)
+        odds_results = scraper.scrape_odds_pages(race_ids, args, fetcher)
     except scraper.MaxRequestsReached as exc:
         race_ids = sorted(set(calendar_ids))
         stop_reason = str(exc)
+        odds_results = []
     except SystemExit as exc:
         race_ids = sorted(set(calendar_ids))
         stop_reason = str(exc)
+        odds_results = []
 
     import_summary = scraper.import_downloaded_html(args)
+    live_odds_rows = scraper.load_live_odds_rows(raw_dir)
     rows = _read_rows(output)
     rows = [
         row
@@ -386,6 +441,22 @@ def ingest_netkeiba_window(
         source_name="netkeiba live scrape",
         source_checked_at=datetime.now(timezone.utc).isoformat(),
     )
+
+    odds_updates = _apply_live_odds_to_races(race_dicts, live_odds_rows)
+    existing_races: list[dict[str, Any]] = []
+    if live_odds_rows:
+        try:
+            existing_races = fetch_race_cards(start_date, end_date)
+        except Exception:
+            existing_races = []
+        existing_updates = _apply_live_odds_to_races(existing_races, live_odds_rows)
+        if existing_updates:
+            race_ids_from_rows = {str(race.get("id") or "") for race in race_dicts}
+            race_dicts.extend(
+                race for race in existing_races if str(race.get("id") or "") not in race_ids_from_rows
+            )
+            odds_updates += existing_updates
+
     _attach_live_feature_deltas(race_dicts, start_date, end_date)
     races_stored = upsert_race_cards(race_dicts)
     open_predictions = _auto_predict_open_races(race_dicts) if races_stored > 0 else 0
@@ -415,6 +486,9 @@ def ingest_netkeiba_window(
         "request_count": fetcher.request_count,
         "race_ids": len(race_ids),
         "race_pages": len(race_results),
+        "odds_pages": len(odds_results),
+        "odds_rows": len(live_odds_rows),
+        "odds_updates": odds_updates,
         "rows_found": int(import_summary.get("rows") or len(rows)),
         "races_found": len(race_dicts),
         "races_stored": races_stored,
