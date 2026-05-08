@@ -1,5 +1,5 @@
 import os
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Header, HTTPException, Response
 
@@ -24,6 +24,7 @@ from app.services.status import get_status
 from app.status import get_backend_status
 
 router = APIRouter()
+JST = timezone(timedelta(hours=9))
 
 
 @router.get("/health")
@@ -212,11 +213,44 @@ def netkeiba_ingest_job(
     )
 
 
+@router.get("/jobs/ingest/netkeiba/preday", response_model=strategy_schemas.NetkeibaIngestResponse)
+def netkeiba_preday_ingest_job(
+    authorization: str | None = Header(default=None),
+    x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
+    max_requests: int | None = None,
+    delay: float | None = None,
+) -> strategy_schemas.NetkeibaIngestResponse:
+    _authorize_ingest_job(authorization, x_cron_secret)
+    tomorrow = (datetime.now(JST).date() + timedelta(days=1)).isoformat()
+    summary = ingest_netkeiba_window(
+        start_date=tomorrow,
+        end_date=tomorrow,
+        max_requests=max_requests if max_requests is not None else 260,
+        delay=delay if delay is not None else 0.30,
+        refresh=True,
+        prefer_results=False,
+        backfill_finished_predictions=False,
+    )
+    return strategy_schemas.NetkeibaIngestResponse(
+        status=summary.get("status", "error"),
+        source=summary.get("source", "netkeiba"),
+        start_date=summary.get("start_date", ""),
+        end_date=summary.get("end_date", ""),
+        rows_found=summary.get("rows_found", 0),
+        races_found=summary.get("races_found", 0),
+        races_stored=summary.get("races_stored", 0),
+        auto_predictions=summary.get("auto_predictions", 0),
+        backfilled_predictions=summary.get("backfilled_predictions", 0),
+        message=summary.get("message", ""),
+    )
+
+
 @router.get("/jobs/ingest/netkeiba/results", response_model=strategy_schemas.NetkeibaIngestResponse)
 def netkeiba_result_ingest_job(
     authorization: str | None = Header(default=None),
     x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
     days: int = 2,
+    days_ahead: int = 1,
     max_requests: int | None = None,
     delay: float | None = None,
     backfill_finished_predictions: bool = False,
@@ -224,8 +258,8 @@ def netkeiba_result_ingest_job(
     _authorize_ingest_job(authorization, x_cron_secret)
     summary = ingest_netkeiba_window(
         days=days,
-        days_ahead=0,
-        max_requests=max_requests if max_requests is not None else 260,
+        days_ahead=days_ahead,
+        max_requests=max_requests if max_requests is not None else 320,
         delay=delay if delay is not None else 0.25,
         refresh=True,
         prefer_results=True,

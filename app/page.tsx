@@ -2843,7 +2843,6 @@ function PredictPanel({
             <Metric label="券種" value={`${PUBLIC_BET_TYPE_GUIDES.length}種`} />
             <Metric label="予想点数" value={`${tickets.reduce((sum, ticket) => sum + ticket.tickets, 0)}点`} />
             <Metric label="券オッズ" value={primaryTicket ? ticketOddsLabel(primaryTicket, oddsReady) : "-"} />
-            <Metric label="100円払戻" value={primaryTicket ? ticketPayoutPer100Label(primaryTicket, oddsReady) : "-"} />
             <Metric label="表示" value="券種別" />
           </div>
           <TicketList projections={projections} race={race} tickets={tickets} />
@@ -2957,7 +2956,7 @@ function DecisionCard({
       <div className="decision-examples">
         {!shouldPass && topTicket ? (
           <>
-            <span>100円あたり払戻 {ticketPayoutPer100Label(topTicket, !isTentative)}</span>
+            <span>券オッズ {ticketOddsLabel(topTicket, !isTentative)}</span>
             <span>的中率 {formatPercent(topTicket.probability)} / {topTicket.tickets}通り</span>
           </>
         ) : (
@@ -3134,7 +3133,6 @@ function TicketList({
                 </div>
                 <div className="ticket-data">
                   <Value label="券オッズ" value="-" />
-                  <Value label="100円払戻" value="-" />
                   <Value label="予想点数" value="-" />
                   <Value label="状態" value={oddsReady ? "生成待ち" : "取得待ち"} />
                 </div>
@@ -3159,12 +3157,10 @@ function TicketList({
               <div className="ticket-meta">
                 <span>{ticket.tickets}通り</span>
                 <span>{oddsLabel}</span>
-                <strong>100円払戻 {payoutLabel}</strong>
               </div>
               <div className="ticket-data">
                 <Value label="的中率" value={formatPercent(ticket.probability)} />
                 <Value label="券オッズ" value={oddsLabel} />
-                <Value label="100円払戻" value={payoutLabel} />
                 <Value label="予想点数" value={`${ticket.tickets}点`} />
               </div>
               <div className="ticket-reasons">
@@ -3247,9 +3243,8 @@ function SettledTicketList({
               {ticket ? <TicketLegs legs={ticket.legs} /> : <strong>{resultBetSummary(result!)}</strong>}
               <div className="settled-ticket-metrics">
                 <Value label="券オッズ" value={oddsLabel} />
-                <Value label="予想100円払戻" value={ticket ? ticketPayoutPer100Label(ticket, true) : "-"} />
-                <Value label="公式払戻" value={payoutLabel} />
-                <Value label="回収" value={result ? (result.payout > 0 ? formatYen(result.payout) : "払戻なし") : "-"} tone={hit || refunded ? "positive" : result ? "negative" : undefined} />
+                <Value label="払戻" value={payoutLabel} tone={hit || refunded ? "positive" : result ? "negative" : undefined} />
+                <Value label="予想点数" value={ticket ? `${ticket.tickets}点` : "-"} />
               </div>
               <div className="settled-ticket-foot">
                 <span>{ticket ? ticketCompactMethod(ticket) : publicStrategyLabel(result?.strategy)}</span>
@@ -3357,7 +3352,7 @@ function ResultStrip({ history }: { history: HistoricalPrediction }) {
     return (
       <div className="result-strip pending">
         <strong>結果待ち</strong>
-        <span>公式払戻取得後に回収率を表示</span>
+        <span>払戻取得後に結果表示</span>
         <span>投資比率 {formatPercent(safeRatio(history.stake, 100_000), 2)}</span>
         <em>{history.betCount}点</em>
       </div>
@@ -3410,7 +3405,7 @@ function HitPayoutCard({ history }: { history: HistoricalPrediction }) {
                   {item.hit ? "🎯 的中" : item.payoutSource === "missing_official_payout" ? "払戻未取得" : "不的中"} / {publicBetTypeLabel(item.betType)}
                 </span>
                 <strong>{resultBetSummary(item)}</strong>
-                <em>投資比率 {formatPercent(stakeShare, 0)} / 100円払戻 {resultPayoutPer100Label(item)}</em>
+                <em>投資比率 {formatPercent(stakeShare, 0)} / 払戻 {resultPayoutPer100Label(item)}</em>
                 <b className={recommendationProfit(item) >= 0 ? "positive" : "negative"}>
                   {item.hit ? formatYen(item.payout) : "払戻なし"}
                 </b>
@@ -3516,7 +3511,7 @@ function RacePayoutGrid({
       <section className="race-payout-grid empty">
         <div className="section-heading compact">
           <h2>払戻一覧</h2>
-          <span>公式払戻未取得</span>
+          <span>払戻未取得</span>
         </div>
         <div className="empty-inline">払戻データを再取得中</div>
       </section>

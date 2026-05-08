@@ -1168,7 +1168,7 @@ h1 {
 
 .ticket-data {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
   gap: 7px;
 }
 
@@ -1225,7 +1225,7 @@ h1 {
 
 .settled-ticket-list article {
   display: grid;
-  grid-template-columns: minmax(88px, 0.26fr) minmax(0, 0.74fr) minmax(0, 1.05fr);
+  grid-template-columns: minmax(88px, 0.28fr) minmax(0, 0.86fr) minmax(0, 0.86fr);
   gap: 9px;
   align-items: center;
   min-width: 0;
@@ -1276,7 +1276,7 @@ h1 {
 
 .settled-ticket-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
   min-width: 0;
 }
@@ -1299,9 +1299,10 @@ h1 {
 .settled-ticket-foot span,
 .settled-ticket-foot b {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .settled-ticket-foot b {
@@ -1587,8 +1588,10 @@ h1 {
 .runner-table em {
   display: block;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .runner-table b {
@@ -1608,7 +1611,6 @@ h1 {
   color: var(--ink);
   font-size: 0.86rem;
   font-weight: 920;
-  white-space: nowrap;
 }
 
 .runner-table span {
@@ -3323,6 +3325,38 @@ h1 {
   .history-list article > div:last-child {
     justify-items: start;
     text-align: left;
+  }
+
+  .runner-table th,
+  .runner-table td {
+    padding: 8px 6px;
+  }
+
+  .runner-table th:nth-child(1) {
+    width: 34px;
+  }
+
+  .runner-table th:nth-child(3),
+  .runner-table th:nth-child(4) {
+    width: 72px;
+  }
+
+  .runner-table th:nth-child(5),
+  .runner-table td:nth-child(5) {
+    display: none;
+  }
+
+  .runner-table b {
+    font-size: 0.88rem;
+  }
+
+  .runner-table strong {
+    font-size: 0.74rem;
+    line-height: 1.24;
+  }
+
+  .runner-table span {
+    font-size: 0.62rem;
   }
 
   .month-grid {
