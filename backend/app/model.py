@@ -599,10 +599,41 @@ def fixed_type_recommendations(
 ) -> list[BetRecommendation]:
     enabled = set(request.enabled_bet_types) & RECOMMENDABLE_BET_TYPES
     by_type: dict[BetType, BetRecommendation] = {}
-    # Public UI predictions must preserve the model's own ranking.
-    # Recommendations are generated in AI-score order, so the first candidate
-    # for each type is the clearest "AI評価どおり" ticket.
-    for item in recommendations:
+    strategy_priority: dict[BetType, tuple[str, ...]] = {
+        "trio": (
+            "3連複1頭軸流し",
+            "3連複2頭軸流し",
+            "3連複フォーメーション",
+            "3連複5頭ボックス",
+        ),
+        "trifecta": (
+            "3連単1着軸流し",
+            "3連単フォーメーション",
+            "3連単1頭軸マルチ",
+            "3連単2頭軸マルチ",
+            "3連単4頭ボックス",
+            "3連単2着軸流し",
+            "3連単3着軸流し",
+        ),
+    }
+
+    def candidate_score(item: BetRecommendation) -> tuple[int, float, float]:
+        priorities = strategy_priority.get(item.bet_type)
+        if priorities:
+            try:
+                priority = priorities.index(item.strategy)
+            except ValueError:
+                # A single 3連複/3連単 point should be a fallback only.
+                priority = 99
+        else:
+            priority = 0
+        return (
+            -priority,
+            risk_adjusted_score(item, request.risk_level),
+            item.probability,
+        )
+
+    for item in sorted(recommendations, key=candidate_score, reverse=True):
         if item.bet_type not in PUBLIC_FIXED_BET_TYPES or item.bet_type not in enabled:
             continue
         if item.bet_type not in by_type:

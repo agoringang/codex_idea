@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from datetime import date, timedelta
@@ -26,6 +27,24 @@ FIXED_PUBLIC_BET_TYPES = {
     "trio",
     "trifecta",
 }
+
+
+def selection_numbers(value: object) -> list[int]:
+    return [int(match.group(0)) for match in re.finditer(r"\d+", str(value or ""))]
+
+
+def covers_ai_top3(item: object, ai_top3: list[int], *, ordered: bool) -> bool:
+    covered = getattr(item, "covered_selections", None)
+    selections = covered if isinstance(covered, list) and covered else [getattr(item, "selection", "")]
+    expected = ai_top3 if ordered else sorted(ai_top3)
+    for selection in selections:
+        numbers = selection_numbers(selection)
+        if len(numbers) < 3:
+            continue
+        actual = numbers[:3] if ordered else sorted(numbers[:3])
+        if actual == expected:
+            return True
+    return False
 
 
 def flatten_history(history: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -134,12 +153,10 @@ def main() -> None:
             item = recommendation_by_type.get(triple_type)
             if item is None:
                 continue
-            try:
-                selected = [int(value) for value in str(item.selection).replace("→", "-").split("-") if value.strip()]
-            except ValueError:
-                selected = []
-            if selected[:3] != ai_top3:
-                errors.append(f"{race.id}: {triple_type} does not follow AI top3 order: {item.selection} != {ai_top3}")
+            if int(getattr(item, "tickets", 1)) <= 1:
+                errors.append(f"{race.id}: {triple_type} must use multi-ticket strategy, got {item.selection}")
+            if not covers_ai_top3(item, ai_top3, ordered=triple_type == "trifecta"):
+                errors.append(f"{race.id}: {triple_type} does not cover AI top3 core: {item.selection} / top3={ai_top3}")
         if "support" in generated_types:
             errors.append(f"{race.id}: prediction generated unsupported support bet")
         if "place" in generated_types:
