@@ -9,7 +9,6 @@ from .trained_model import predict_probabilities
 
 PAYOUT_RATES: dict[BetType, float] = {
     "win": 0.80,
-    "place": 0.80,
     "bracket_quinella": 0.775,
     "quinella": 0.775,
     "wide": 0.775,
@@ -22,7 +21,7 @@ PAYOUT_RATES: dict[BetType, float] = {
 RunnerCombo = tuple[RunnerPrediction, ...]
 RECOMMENDABLE_BET_TYPES: set[BetType] = {
     "win",
-    "place",
+    "bracket_quinella",
     "quinella",
     "wide",
     "exacta",
@@ -31,7 +30,6 @@ RECOMMENDABLE_BET_TYPES: set[BetType] = {
 }
 
 BET_TYPE_RISK: dict[BetType, float] = {
-    "place": 0.12,
     "wide": 0.22,
     "bracket_quinella": 0.28,
     "win": 0.44,
@@ -44,7 +42,6 @@ BET_TYPE_RISK: dict[BetType, float] = {
 
 BET_TYPE_UTILITY: dict[BetType, float] = {
     "win": 0.10,
-    "place": 0.04,
     "bracket_quinella": 0.12,
     "quinella": 0.16,
     "wide": 0.18,
@@ -56,7 +53,6 @@ BET_TYPE_UTILITY: dict[BetType, float] = {
 
 BET_TYPE_MIN_PROBABILITY: dict[BetType, float] = {
     "win": 0.035,
-    "place": 0.14,
     "bracket_quinella": 0.045,
     "quinella": 0.035,
     "wide": 0.10,
@@ -68,7 +64,6 @@ BET_TYPE_MIN_PROBABILITY: dict[BetType, float] = {
 
 BET_TYPE_MAX_ODDS: dict[BetType, float] = {
     "win": 25,
-    "place": 12,
     "bracket_quinella": 80,
     "quinella": 120,
     "wide": 70,
@@ -147,12 +142,20 @@ def selection(runners: Iterable[RunnerPrediction]) -> str:
     return "-".join(str(runner.number) for runner in runners)
 
 
+def gate_selection(runners: Iterable[RunnerPrediction]) -> str:
+    return "-".join(str(runner.gate) for runner in runners)
+
+
 def note(runners: Iterable[RunnerPrediction]) -> str:
     return " / ".join(f"{runner.number} {runner.name}" for runner in runners)
 
 
 def leg(label: str, runners: Iterable[RunnerPrediction]) -> dict[str, object]:
     return {"label": label, "numbers": [runner.number for runner in runners]}
+
+
+def gate_leg(label: str, runners: Iterable[RunnerPrediction]) -> dict[str, object]:
+    return {"label": label, "numbers": [runner.gate for runner in runners]}
 
 
 def unique_combos(combos: Iterable[RunnerCombo], *, unordered: bool = False) -> list[RunnerCombo]:
@@ -264,6 +267,7 @@ def add_candidate(
     covered_selections: list[str] | None = None,
     legs: list[dict[str, object]] | None = None,
     edge_floor: float | None = None,
+    force_display: bool = False,
 ) -> None:
     if bet_type not in RECOMMENDABLE_BET_TYPES:
         return
@@ -274,22 +278,26 @@ def add_candidate(
 
     edge = probability * odds - 1
     minimum_probability = max(request.min_probability, BET_TYPE_MIN_PROBABILITY.get(bet_type, 0.0))
-    if probability < minimum_probability:
+    if not force_display and probability < minimum_probability:
         return
-    if odds > request.max_candidate_odds:
+    if not force_display and odds > request.max_candidate_odds:
         return
-    if odds > BET_TYPE_MAX_ODDS.get(bet_type, request.max_candidate_odds):
+    if not force_display and odds > BET_TYPE_MAX_ODDS.get(bet_type, request.max_candidate_odds):
         return
-    if request.max_edge is not None and edge > request.max_edge:
+    if not force_display and request.max_edge is not None and edge > request.max_edge:
         return
 
     kelly = kelly_fraction(probability, odds)
-    stake_budget = stake_size(request.bankroll, request.risk_level, request.max_exposure, kelly)
-    unit_stake = round_to_ticket_unit(stake_budget / tickets)
-    stake = unit_stake * tickets
+    if force_display:
+        unit_stake = 100
+        stake = unit_stake * tickets
+    else:
+        stake_budget = stake_size(request.bankroll, request.risk_level, request.max_exposure, kelly)
+        unit_stake = round_to_ticket_unit(stake_budget / tickets)
+        stake = unit_stake * tickets
 
     minimum_edge = request.min_edge if edge_floor is None else edge_floor
-    if edge < minimum_edge or stake < 100:
+    if not force_display and (edge < minimum_edge or stake < 100):
         return
 
     recommendations.append(
@@ -325,6 +333,7 @@ def add_combo_strategy(
     unordered: bool,
     max_odds: float = 220,
     legs: list[dict[str, object]] | None = None,
+    force_display: bool = False,
 ) -> None:
     if bet_type not in RECOMMENDABLE_BET_TYPES:
         return
@@ -364,6 +373,7 @@ def add_combo_strategy(
         tickets=len(combo_list),
         covered_selections=[selection(combo) for combo in combo_list],
         legs=legs,
+        force_display=force_display,
     )
 
 
@@ -386,6 +396,7 @@ def add_trifecta_strategy(
     combos: Iterable[tuple[RunnerPrediction, RunnerPrediction, RunnerPrediction]],
     bonus: float,
     legs: list[dict[str, object]] | None = None,
+    force_display: bool = False,
 ) -> None:
     if "trifecta" not in request.enabled_bet_types:
         return
@@ -431,6 +442,7 @@ def add_trifecta_strategy(
         tickets=len(combos),
         covered_selections=[selection(combo) for combo in combos],
         legs=legs,
+        force_display=force_display,
     )
 
 
@@ -487,7 +499,7 @@ def bet_type_cap(bet_type: BetType, risk_level: float) -> int:
     if band == "low":
         return 2
     if band == "middle":
-        return 2 if bet_type in {"win", "place"} else 3
+        return 2 if bet_type == "win" else 3
     return 4 if bet_type in {"exacta", "trio", "trifecta"} else 2
 
 
@@ -553,6 +565,35 @@ def diversify_recommendations(
             return selected
 
     return selected
+
+
+PUBLIC_FIXED_BET_TYPES: tuple[BetType, ...] = (
+    "win",
+    "bracket_quinella",
+    "quinella",
+    "wide",
+    "exacta",
+    "trio",
+    "trifecta",
+)
+
+
+def fixed_type_recommendations(
+    recommendations: list[BetRecommendation], request: RaceRequest
+) -> list[BetRecommendation]:
+    enabled = set(request.enabled_bet_types) & RECOMMENDABLE_BET_TYPES
+    ranked = sorted(
+        recommendations,
+        key=lambda item: risk_adjusted_score(item, request.risk_level),
+        reverse=True,
+    )
+    by_type: dict[BetType, BetRecommendation] = {}
+    for item in ranked:
+        if item.bet_type not in PUBLIC_FIXED_BET_TYPES or item.bet_type not in enabled:
+            continue
+        if item.bet_type not in by_type:
+            by_type[item.bet_type] = item
+    return [by_type[bet_type] for bet_type in PUBLIC_FIXED_BET_TYPES if bet_type in by_type]
 
 
 def predict_race(request: RaceRequest) -> RacePrediction:
@@ -667,7 +708,6 @@ def predict_race(request: RaceRequest) -> RacePrediction:
     runner_predictions.sort(key=lambda item: item.score, reverse=True)
     recommendations: list[BetRecommendation] = []
     top_candidates = runner_predictions[:6]
-    input_by_id = {runner.id: runner for runner in request.runners}
     enabled_bet_types = set(request.enabled_bet_types) & RECOMMENDABLE_BET_TYPES
 
     if "win" in enabled_bet_types:
@@ -683,28 +723,34 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                 strategy="単勝",
                 legs=[leg("単勝", [runner])],
                 edge_floor=0.0,
-            )
-
-    if "place" in enabled_bet_types:
-        for runner in top_candidates:
-            place_odds = input_by_id.get(runner.id).place_odds if input_by_id.get(runner.id) else None
-            if place_odds is None or place_odds <= 1.01:
-                continue
-            add_candidate(
-                recommendations,
-                request=request,
-                bet_type="place",
-                selection_text=str(runner.number),
-                note_text=f"{runner.number} {runner.name}",
-                probability=runner.place_probability,
-                odds=place_odds,
-                strategy="複勝",
-                legs=[leg("複勝", [runner])],
-                edge_floor=0.0,
+                force_display=True,
             )
 
     if len(top_candidates) >= 2:
         pair_candidates = top_candidates[:6]
+        if "bracket_quinella" in enabled_bet_types:
+            seen_gates: set[str] = set()
+            for pair in combinations(pair_candidates, 2):
+                gate_text = gate_selection(pair)
+                gate_key = "-".join(sorted(gate_text.split("-")))
+                if gate_key in seen_gates:
+                    continue
+                seen_gates.add(gate_key)
+                probability = clamp(quinella_probability(pair) * 1.12, 0.006, 0.42)
+                add_candidate(
+                    recommendations,
+                    request=request,
+                    bet_type="bracket_quinella",
+                    selection_text=gate_text,
+                    note_text=f"枠 {gate_text} / {note(pair)}",
+                    probability=probability,
+                    odds=synthetic_odds("bracket_quinella", probability, pair, 0.08),
+                    strategy="枠連",
+                    legs=[gate_leg("枠", pair)],
+                    edge_floor=0.0,
+                    force_display=True,
+                )
+
         if "wide" in enabled_bet_types:
             for pair in combinations(pair_candidates, 2):
                 probability = wide_probability(pair)
@@ -719,6 +765,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                     strategy="ワイド",
                     legs=[leg("組み合わせ", pair)],
                     edge_floor=0.01,
+                    force_display=True,
                 )
 
         if "quinella" in enabled_bet_types:
@@ -735,6 +782,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                     strategy="馬連",
                     legs=[leg("組み合わせ", pair)],
                     edge_floor=0.012,
+                    force_display=True,
                 )
 
         if "exacta" in enabled_bet_types:
@@ -751,6 +799,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                     strategy="馬単",
                     legs=[leg("1着", [ordered_pair[0]]), leg("2着", [ordered_pair[1]])],
                     edge_floor=0.012,
+                    force_display=True,
                 )
 
     if "trio" in enabled_bet_types:
@@ -765,6 +814,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                 probability=probability,
                 odds=synthetic_odds("trio", probability, trio, 0.20),
                 legs=[leg("組み合わせ", trio)],
+                force_display=True,
             )
 
     if len(top_candidates) >= 3:
@@ -783,6 +833,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             unordered=True,
             max_odds=160,
             legs=[leg("軸", [axis]), leg("相手", trio_opponents)],
+            force_display=True,
         )
         add_combo_strategy(
             recommendations,
@@ -801,6 +852,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                 leg("軸2", [top_candidates[1]]),
                 leg("相手", top_candidates[2:6]),
             ],
+            force_display=True,
         )
         if len(top_candidates) >= 5:
             add_combo_strategy(
@@ -816,6 +868,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                 unordered=True,
                 max_odds=140,
                 legs=[leg("BOX", top_candidates[:5])],
+                force_display=True,
             )
             formation = [
                 (first, second, third)
@@ -839,6 +892,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                 unordered=True,
                 max_odds=150,
                 legs=[leg("軸候補", top_candidates[:2]), leg("相手", top_candidates[1:6])],
+                force_display=True,
             )
 
     if "trifecta" in enabled_bet_types:
@@ -853,6 +907,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                 probability=probability,
                 odds=synthetic_odds("trifecta", probability, trio, 0.24),
                 legs=[leg("1着", [trio[0]]), leg("2着", [trio[1]]), leg("3着", [trio[2]])],
+                force_display=True,
             )
 
     if len(top_candidates) >= 3:
@@ -866,6 +921,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             combos=trifecta_fixed_axis_flow(axis, trifecta_opponents, 0),
             bonus=0.22,
             legs=[leg("1着", [axis]), leg("2着", trifecta_opponents), leg("3着", trifecta_opponents)],
+            force_display=True,
         )
         add_trifecta_strategy(
             recommendations,
@@ -875,6 +931,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             combos=trifecta_fixed_axis_flow(axis, trifecta_opponents, 1),
             bonus=0.18,
             legs=[leg("1着", trifecta_opponents), leg("2着", [axis]), leg("3着", trifecta_opponents)],
+            force_display=True,
         )
         add_trifecta_strategy(
             recommendations,
@@ -884,6 +941,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             combos=trifecta_fixed_axis_flow(axis, trifecta_opponents, 2),
             bonus=0.16,
             legs=[leg("1着", trifecta_opponents), leg("2着", trifecta_opponents), leg("3着", [axis])],
+            force_display=True,
         )
 
     if len(top_candidates) >= 5:
@@ -898,6 +956,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             combos=formation_combos(top[:2], top[:4], top[:6]),
             bonus=0.19,
             legs=[leg("1着", top[:2]), leg("2着", top[:4]), leg("3着", top[:6])],
+            force_display=True,
         )
         add_trifecta_strategy(
             recommendations,
@@ -907,6 +966,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             combos=one_axis_multi_combos(top[0], top[1:5]),
             bonus=0.16,
             legs=[leg("軸", [top[0]]), leg("相手", top[1:5])],
+            force_display=True,
         )
         add_trifecta_strategy(
             recommendations,
@@ -916,6 +976,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             combos=two_axis_multi_combos(top[0], top[1], top[2:6]),
             bonus=0.18,
             legs=[leg("軸1", [top[0]]), leg("軸2", [top[1]]), leg("相手", top[2:6])],
+            force_display=True,
         )
         add_trifecta_strategy(
             recommendations,
@@ -925,10 +986,11 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             combos=permutations(top[:4], 3),
             bonus=0.14,
             legs=[leg("BOX", top[:4])],
+            force_display=True,
         )
 
     recommendations.sort(key=lambda item: risk_adjusted_score(item, request.risk_level), reverse=True)
-    recommendations = diversify_recommendations(recommendations, request)
+    recommendations = fixed_type_recommendations(recommendations, request)
 
     total_stake = sum(item.stake for item in recommendations)
     expected_return = sum(item.stake * item.odds * item.probability for item in recommendations)

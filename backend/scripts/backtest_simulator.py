@@ -21,7 +21,6 @@ from app.schemas import BetRecommendation, BetType, RaceRequest, RunnerInput
 
 OFFICIAL_BET_TYPES: tuple[BetType, ...] = (
     "win",
-    "place",
     "bracket_quinella",
     "quinella",
     "wide",
@@ -400,7 +399,7 @@ def payout_odds(
 
 def parse_bet_types(text: str | None, synthetic_exotics: bool) -> list[BetType]:
     if not text:
-        return list(OFFICIAL_BET_TYPES if synthetic_exotics else ("win", "place"))
+        return list(OFFICIAL_BET_TYPES if synthetic_exotics else ("win",))
     requested = [item.strip() for item in text.split(",") if item.strip()]
     allowed = set(OFFICIAL_BET_TYPES)
     unknown = sorted(set(requested) - allowed)
@@ -643,7 +642,7 @@ def main() -> None:
     parser.add_argument(
         "--bet-types",
         default=None,
-        help="Comma-separated official bet types. Default: win,place",
+        help="Comma-separated official bet types. Default excludes place betting.",
     )
     parser.add_argument(
         "--synthetic-exotics",

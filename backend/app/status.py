@@ -90,7 +90,7 @@ def get_backend_status() -> BackendStatus:
         )
     elif backtest:
         backtest_note = (
-            "単勝・複勝・馬連・ワイド・馬単・三連系を対象に検証。"
+            "単勝・枠連・馬連・ワイド・馬単・三連系を対象に検証。"
             "公式払戻がないレースは回収率に加算しない"
         )
     else:

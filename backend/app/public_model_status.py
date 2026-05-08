@@ -60,7 +60,7 @@ PUBLIC_HOLDOUT_METRICS = {
     },
     "risk_router": {
         "stable_on_2026": True,
-        "low": {"target": "is_place", "bet_types": ["place", "wide"]},
+        "low": {"target": "is_top2", "bet_types": ["win", "bracket_quinella", "wide"]},
         "middle": {"target": "is_top2", "bet_types": ["wide", "quinella", "trio"]},
         "high": {"target": "is_win", "bet_types": ["exacta", "trio", "trifecta"]},
     },
@@ -75,7 +75,8 @@ PUBLIC_HOLDOUT_BACKTEST = {
     "hit_rate": 0.2591,
     "max_drawdown": 68_876.0,
     "note": (
-        "2026 holdout win/place simulation. Exotic payout columns are not used "
+        "2026 holdout fixed seven-bet simulation. Place betting is excluded; "
+        "official exotic payout columns are required "
         "for public ROI yet."
     ),
 }

@@ -360,15 +360,23 @@ const ticketTemplates: TicketTemplate[] = [
     model: "勝ち切り評価",
   },
   {
-    type: "複勝",
-    selection: (top) => `${top[0].number}`,
-    legs: (top) => [{ label: "複勝", numbers: [top[0].number] }],
-    method: "1頭指定",
+    type: "枠連",
+    selection: (top) => {
+      const firstGate = top[0].gate ?? Math.ceil(top[0].number / 2);
+      const secondGate = top[1]?.gate ?? Math.ceil((top[1]?.number ?? top[0].number) / 2);
+      return `${firstGate}-${secondGate}`;
+    },
+    legs: (top) => {
+      const firstGate = top[0].gate ?? Math.ceil(top[0].number / 2);
+      const secondGate = top[1]?.gate ?? Math.ceil((top[1]?.number ?? top[0].number) / 2);
+      return [{ label: "枠", numbers: [firstGate, secondGate] }];
+    },
+    method: "枠指定",
     tickets: () => 1,
-    risk: 24,
-    probability: 0.46,
-    odds: 1.9,
-    model: "安定評価",
+    risk: 34,
+    probability: 0.13,
+    odds: 6.8,
+    model: "枠順評価",
   },
   {
     type: "ワイド",
@@ -512,7 +520,6 @@ const tabs: { id: ViewTab; label: string; icon: TabIconId }[] = [
 const PORTFOLIO_RISK_LEVEL = 72;
 const PUBLIC_BET_TYPE_GUIDES = [
   { id: "win", label: "単勝", summary: "1着を当てる", method: "1頭指定" },
-  { id: "place", label: "複勝", summary: "3着以内を当てる", method: "1頭指定" },
   { id: "bracket_quinella", label: "枠連", summary: "1・2着の枠", method: "枠指定 / 流し" },
   { id: "quinella", label: "馬連", summary: "1・2着を順不同", method: "流し / BOX" },
   { id: "wide", label: "ワイド", summary: "2頭が3着以内", method: "流し / BOX" },
@@ -664,9 +671,6 @@ function isPublicBetType(value: string | undefined) {
     "win",
     "tansho",
     "単勝",
-    "place",
-    "fukusho",
-    "複勝",
     "bracket_quinella",
     "wakuren",
     "枠連",
@@ -942,13 +946,21 @@ function buildRaceRequest(race: Race, riskLevel: number, bankroll: number) {
     model_mode: "ensemble",
     risk_level: riskLevel,
     bankroll,
-    min_edge: 0.03,
+    min_edge: 0.0,
     min_probability: 0.0,
-    max_candidate_odds: 160,
-    max_edge: 0.9,
-    max_exposure: 0.08,
+    max_candidate_odds: 999,
+    max_edge: null,
+    max_exposure: 0.1,
     recommendation_limit: 7,
-    enabled_bet_types: ["win", "place", "quinella", "wide", "exacta", "trio", "trifecta"],
+    enabled_bet_types: [
+      "win",
+      "bracket_quinella",
+      "quinella",
+      "wide",
+      "exacta",
+      "trio",
+      "trifecta",
+    ],
     runners: race.runners.map((runner) => {
       const odds = Math.max(hasRunnerWinOdds(runner) ? runner.odds : 1.1, 1.1);
       const form = Math.max(1, Math.min(100, runner.form));
@@ -1247,7 +1259,7 @@ function mergeApiProjections(prediction: ApiRacePrediction | null, race: Race) {
         number: runner.number,
         name: runner.name,
         jockey: source?.jockey ?? "-",
-        odds: hasWinOddsValue(runner.market_odds)
+        odds: source && hasRunnerWinOdds(source) && hasWinOddsValue(runner.market_odds)
           ? safeNumber(runner.market_odds, source?.odds ?? 0)
           : source?.odds ?? 0,
         baseWin: source?.baseWin ?? runner.win_probability,
@@ -1418,10 +1430,8 @@ function buildRaceOnlyProjections(race: Race, riskRatio = 0.52) {
 }
 
 function displayAiIndex(runner: RunnerProjection, race: Race) {
-  if (!raceHasUsableWinOdds(race)) {
-    return "保留";
-  }
-  return String(Math.max(1, Math.round(predictionDisplayScore(runner, race))));
+  const score = Math.max(1, Math.round(predictionDisplayScore(runner, race)));
+  return raceHasUsableWinOdds(race) ? String(score) : `暫定${score}`;
 }
 
 function raceResultOrder(race: Race) {
@@ -1875,7 +1885,7 @@ function evaluateBettingHeat({
     return {
       tone: "pass" as const,
       label: "オッズ待ち",
-      action: "単勝・複勝オッズ公開後に券種別予想",
+      action: "単勝オッズ公開後に7券種を固定予想",
       score: 0,
       profile: "買い目未生成",
       volatilityLabel: "未判定",
@@ -1940,11 +1950,11 @@ function evaluateBettingHeat({
 
   if (tickets.length === 0 || positiveTickets === 0) {
     return {
-      tone: "pass" as const,
-      label: "買い目なし",
-      action: "期待値不足",
+      tone: "standard" as const,
+      label: "予想確認",
+      action: "7券種の候補を表示",
       score,
-      profile: "見送り",
+      profile: "券種別予想",
       volatilityLabel: volatility.label,
       volatilityScore: volatility.score,
       dataDepth,
@@ -2206,11 +2216,6 @@ export default function Home() {
         setApiPrediction(null);
         return;
       }
-      if (!raceHasUsableWinOdds(modelingRace)) {
-        setApiPrediction(null);
-        setApiState("ready");
-        return;
-      }
       try {
         const response = await fetch(`${apiBaseUrl()}/predict`, {
           method: "POST",
@@ -2348,7 +2353,7 @@ export default function Home() {
           <div className="race-status-main">
             <span>{visibleRace ? `${visibleRace.date} / ${raceStartLabel(visibleRace)}` : selectedDate}</span>
             <h1>{visibleRace ? displayRaceTitle(visibleRace) : "今日のAI競馬予想"}</h1>
-            <p>{visibleRace ? raceStatusLead(visibleRace) : "買うレース、見送るレース、買い目と投資比率を先に表示します"}</p>
+            <p>{visibleRace ? raceStatusLead(visibleRace) : "単勝・枠連・馬連・ワイド・馬単・3連複・3連単の予想を固定表示します"}</p>
           </div>
           <div className="race-pills">
             <span>{publicMarketLabel(visibleRace?.market)}</span>
@@ -2514,6 +2519,7 @@ function PredictPanel({
   const resultOrder = raceResultOrder(race);
   const isFinished = race.status === "finished";
   const primaryTicket = tickets[0];
+  const oddsReady = raceHasUsableWinOdds(race);
   const bettingHeat = evaluateBettingHeat({
     activeBankroll,
     expectedRoi,
@@ -2527,12 +2533,10 @@ function PredictPanel({
     <section className={`tab-panel ${marketClass(race.market)}`}>
       {!isFinished && (
         <DecisionCard
-          activeBankroll={activeBankroll}
           heat={bettingHeat}
           projections={projections}
           race={race}
           tickets={tickets}
-          totalStake={totalStake}
         />
       )}
 
@@ -2567,9 +2571,7 @@ function PredictPanel({
       <RaceInfoChips race={race} />
 
       {!isFinished && (
-        raceHasUsableWinOdds(race)
-          ? <PredictionOrderCard projections={projections} race={race} />
-          : <MarketPendingCard race={race} />
+        <PredictionOrderCard projections={projections} race={race} />
       )}
       {!isFinished && <BettingHeatCard heat={bettingHeat} />}
 
@@ -2592,17 +2594,17 @@ function PredictPanel({
       {!isFinished && (
         <section className="bet-plan-card">
           <div className="section-heading">
-            <h2>買うべき馬券</h2>
-            <span>券種ごとに最良候補を比較</span>
+            <h2>券種別予想</h2>
+            <span>期待値で隠さず7券種を固定表示</span>
           </div>
           <div className="summary-strip compact">
             <Metric label="券種" value={`${PUBLIC_BET_TYPE_GUIDES.length}種`} />
-            <Metric label="投資比率" value={formatPercent(totalStake / activeBankroll, 2)} />
-            <Metric label="券オッズ" value={primaryTicket ? formatOdds(primaryTicket.odds) : "-"} />
-            <Metric label="100円払戻" value={primaryTicket ? ticketPayoutPer100(primaryTicket) : "-"} />
+            <Metric label="予想点数" value={`${tickets.reduce((sum, ticket) => sum + ticket.tickets, 0)}点`} />
+            <Metric label="券オッズ" value={primaryTicket ? (oddsReady ? formatOdds(primaryTicket.odds) : "暫定") : "-"} />
+            <Metric label="100円払戻" value={primaryTicket && oddsReady ? ticketPayoutPer100(primaryTicket) : "-"} />
             <Metric label="表示" value="券種別" />
           </div>
-          <TicketList activeBankroll={activeBankroll} projections={projections} race={race} tickets={tickets} />
+          <TicketList projections={projections} race={race} tickets={tickets} />
         </section>
       )}
 
@@ -2664,26 +2666,22 @@ function BettingHeatCard({ heat }: { heat: BettingHeat }) {
 }
 
 function DecisionCard({
-  activeBankroll,
   heat,
   projections,
   race,
   tickets,
-  totalStake,
 }: {
-  activeBankroll: number;
   heat: BettingHeat;
   projections: RunnerProjection[];
   race: Race;
   tickets: TicketProjection[];
-  totalStake: number;
 }) {
   const topTicket = tickets[0];
   const oddsReady = raceHasUsableWinOdds(race);
-  const shouldPass = !oddsReady || !topTicket || (heat.tone === "pass" && topTicket.edge <= 0);
-  const isPendingOdds = !oddsReady;
+  const shouldPass = !topTicket;
+  const isPendingOdds = !oddsReady && !topTicket;
+  const isTentative = !oddsReady && !!topTicket;
   const topRunner = projections[0];
-  const exposure = activeBankroll > 0 ? totalStake / activeBankroll : 0;
   const confidence = Math.max(0, Math.min(100, Math.round(heat.score)));
   const displayRunners = isPendingOdds
     ? [...projections].sort((a, b) => a.number - b.number).slice(0, 3)
@@ -2692,14 +2690,14 @@ function DecisionCard({
   return (
     <section className={`decision-card ${shouldPass ? "pass" : heat.tone} ${marketClass(race.market)}`}>
       <div className="decision-main">
-        <span>{isPendingOdds ? "オッズ公開待ち" : shouldPass ? "買わない方がいいレース" : "今日の勝負レース"}</span>
-        <h2>{isPendingOdds ? "AI評価は取得待ち" : shouldPass ? "見送り優先" : `${topTicket.type} ${topTicket.selection}`}</h2>
+        <span>{isPendingOdds ? "オッズ公開待ち" : isTentative ? "オッズ未取得の暫定予想" : shouldPass ? "予想準備中" : "今日の券種別予想"}</span>
+        <h2>{isPendingOdds ? "AI評価は取得待ち" : shouldPass ? "予想生成待ち" : `${topTicket.type} ${topTicket.selection}`}</h2>
         <p>
           {isPendingOdds
-            ? "出馬表は取得済み。単勝・複勝オッズ公開後に券種別の買い候補を自動生成します。"
+            ? "出馬表は取得済み。単勝オッズ公開後に7券種の予想を自動生成します。"
             : shouldPass
             ? heat.action
-            : `推奨投資比率は${formatPercent(topTicket.stake / activeBankroll, 2)}。${ticketCompactMethod(topTicket)}`}
+            : `${ticketCompactMethod(topTicket)}。${isTentative ? "オッズ未取得のため払戻は未確定です。" : "各券種の予想を下に固定表示します。"}`}
         </p>
       </div>
 
@@ -2709,20 +2707,20 @@ function DecisionCard({
           value={shouldPass ? "見送り" : `${confidence}/100`}
           tone={shouldPass ? "negative" : confidence >= 62 ? "positive" : confidence < 38 ? "negative" : undefined}
         />
-        <Value label="投資比率" value={shouldPass ? "0.00%" : formatPercent(exposure, 2)} />
-        <Value label="券オッズ" value={shouldPass || !topTicket ? "-" : formatOdds(topTicket.odds)} />
-        <Value label="買い方" value={isPendingOdds ? "オッズ待ち" : shouldPass ? "見送り" : topTicket.type} />
+        <Value label="予想点数" value={shouldPass ? "-" : `${tickets.reduce((sum, ticket) => sum + ticket.tickets, 0)}点`} />
+        <Value label="券オッズ" value={shouldPass || !topTicket ? "-" : isTentative ? "暫定" : formatOdds(topTicket.odds)} />
+        <Value label="券種" value={isPendingOdds ? "オッズ待ち" : shouldPass ? "生成待ち" : `${tickets.length}種`} />
       </div>
 
       <div className="decision-examples">
         {!shouldPass && topTicket ? (
           <>
-            <span>100円あたり払戻 {ticketPayoutPer100(topTicket)}</span>
+            <span>100円あたり払戻 {isTentative ? "未確定" : ticketPayoutPer100(topTicket)}</span>
             <span>的中率 {formatPercent(topTicket.probability)} / {topTicket.tickets}通り</span>
           </>
         ) : (
           <>
-            <span>買い目なし</span>
+            <span>予想生成待ち</span>
             <span>{isPendingOdds ? "オッズ未取得 / AI評価未生成" : heat.reasons.slice(0, 2).join(" / ")}</span>
           </>
         )}
@@ -2820,6 +2818,7 @@ function ticketAnchorRunner(ticket: TicketProjection, projections: RunnerProject
 
 function ticketReasonRows(ticket: TicketProjection, race: Race, projections: RunnerProjection[]) {
   const anchor = ticketAnchorRunner(ticket, projections);
+  const oddsReady = raceHasUsableWinOdds(race);
   if (!anchor) {
     return [
       { label: "AI評価", value: "出走馬情報不足" },
@@ -2836,7 +2835,7 @@ function ticketReasonRows(ticket: TicketProjection, race: Race, projections: Run
     Math.abs(anchor.oddsDelta ?? 0) >= 0.12
       ? `直前オッズ変動 ${anchor.oddsDelta! > 0 ? "+" : ""}${formatPercent(anchor.oddsDelta!, 0)}`
       : "";
-  const concern = weightConcern || oddsConcern || (ticket.edge < 0 ? "期待値が不足" : "大きな不安なし");
+  const concern = weightConcern || oddsConcern || (ticket.edge < 0 ? "オッズ妙味は低め" : "大きな不安なし");
   const recommendation =
     ticket.edge >= 0.12 && anchor.placeProbability >= 0.45
       ? "強め"
@@ -2846,9 +2845,9 @@ function ticketReasonRows(ticket: TicketProjection, race: Race, projections: Run
           ? "保険寄り"
           : "控えめ";
   return [
-    { label: "買い方", value: ticketCompactMethod(ticket) },
+    { label: "予想形", value: ticketCompactMethod(ticket) },
     { label: "AI評価", value: `${anchor.number} ${anchor.name} / AI指数 ${displayAiIndex(anchor, race)}` },
-    { label: "券オッズ", value: formatOdds(ticket.odds) },
+    { label: "券オッズ", value: oddsReady ? formatOdds(ticket.odds) : "暫定" },
     { label: "中心馬オッズ", value: `${anchor.number} ${formatOdds(anchor.odds)}` },
     { label: "AI平均との差", value: `${marketGap >= 0 ? "+" : ""}${formatPercent(marketGap, 1)}` },
     { label: "人気との差", value: popularity ? `${popularity}人気をAI上位評価` : "人気不明" },
@@ -2858,12 +2857,10 @@ function ticketReasonRows(ticket: TicketProjection, race: Race, projections: Run
 }
 
 function TicketList({
-  activeBankroll,
   projections,
   race,
   tickets,
 }: {
-  activeBankroll: number;
   projections: RunnerProjection[];
   race: Race;
   tickets: TicketProjection[];
@@ -2886,46 +2883,47 @@ function TicketList({
               <div className="ticket-name">
                 <span>{guide.summary}</span>
                 <strong>{guide.label}</strong>
-                <small>見送り</small>
+                <small>予想待ち</small>
               </div>
               <div className="ticket-body">
                 <div className="ticket-meta">
                   <span>{guide.method}</span>
-                  <strong>{oddsReady ? "期待値不足" : "オッズ未取得"}</strong>
+                  <strong>{oddsReady ? "予想生成待ち" : "オッズ未取得"}</strong>
                 </div>
                 <div className="ticket-data">
                   <Value label="券オッズ" value="-" />
                   <Value label="100円払戻" value="-" />
-                  <Value label="投資比率" value="0.00%" />
-                  <Value label="判断" value={oddsReady ? "買わない" : "取得待ち"} />
+                  <Value label="予想点数" value="-" />
+                  <Value label="状態" value={oddsReady ? "生成待ち" : "取得待ち"} />
                 </div>
               </div>
             </article>
           );
         }
         const reasons = ticketReasonRows(ticket, race, projections);
-        const stakeShare = safeRatio(ticket.stake, activeBankroll);
-        const unitShare = safeRatio(ticket.unitStake, activeBankroll);
+        const oddsReady = raceHasUsableWinOdds(race);
+        const oddsLabel = oddsReady ? formatOdds(ticket.odds) : "暫定";
+        const payoutLabel = oddsReady ? ticketPayoutPer100(ticket) : "-";
         const isPrimary = tickets[0]?.type === ticket.type && tickets[0]?.selection === ticket.selection;
         return (
           <article className={isPrimary ? "primary" : ""} key={`${guide.id}-${ticket.selection}`}>
             <div className="ticket-name">
               <span>{isPrimary ? "最優先" : guide.summary}</span>
               <strong>{ticket.type}</strong>
-              <small>{ticket.method}</small>
+              <small>{ticket.tickets}点予想</small>
             </div>
             <div className="ticket-body">
               <TicketLegs legs={ticket.legs} />
               <div className="ticket-meta">
                 <span>{ticket.tickets}通り</span>
-                <span>1点 {formatPercent(unitShare, 3)}</span>
-                <strong>合計 {formatPercent(stakeShare, 2)}</strong>
+                <span>{oddsLabel}</span>
+                <strong>100円払戻 {payoutLabel}</strong>
               </div>
               <div className="ticket-data">
                 <Value label="的中率" value={formatPercent(ticket.probability)} />
-                <Value label="券オッズ" value={formatOdds(ticket.odds)} />
-                <Value label="100円払戻" value={ticketPayoutPer100(ticket)} />
-                <Value label="投資比率" value={formatPercent(stakeShare, 2)} />
+                <Value label="券オッズ" value={oddsLabel} />
+                <Value label="100円払戻" value={payoutLabel} />
+                <Value label="予想点数" value={`${ticket.tickets}点`} />
               </div>
               <div className="ticket-reasons">
                 {reasons.map((reason) => (
@@ -3407,9 +3405,7 @@ function CalendarRaceDetail({
         </>
       ) : (
         <>
-          {raceHasUsableWinOdds(race)
-            ? <PredictionOrderCard projections={projections} race={race} />
-            : <MarketPendingCard race={race} />}
+          <PredictionOrderCard projections={projections} race={race} />
           <div className="result-strip">
             <strong>出馬表取得済み</strong>
             <span>発走前の自動予想対象</span>

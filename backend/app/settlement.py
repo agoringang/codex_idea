@@ -8,7 +8,15 @@ from .schemas import Race
 
 
 NUMBER_PATTERN = re.compile(r"\d+")
-SUPPORTED_BET_TYPES = {"win", "place", "quinella", "wide", "exacta", "trio", "trifecta"}
+SUPPORTED_BET_TYPES = {
+    "win",
+    "bracket_quinella",
+    "quinella",
+    "wide",
+    "exacta",
+    "trio",
+    "trifecta",
+}
 
 
 def _numbers(value: Any) -> list[int]:
@@ -92,7 +100,7 @@ def _official_payout_for_entries(
     return None
 
 
-def _entry_is_hit(bet_type: str, entry: list[int], order: list[int]) -> bool:
+def _entry_is_hit(bet_type: str, entry: list[int], order: list[int], race: Race) -> bool:
     if not order:
         return False
     first = order[0]
@@ -103,7 +111,15 @@ def _entry_is_hit(bet_type: str, entry: list[int], order: list[int]) -> bool:
         return True
     if bet_type == "place" and entry[0] in top3:
         return True
-    if bet_type in {"quinella", "bracket_quinella"} and len(entry) >= 2 and set(entry[:2]) == set(top2):
+    if bet_type == "bracket_quinella" and len(entry) >= 2:
+        runners = _runner_by_number(race)
+        top2_gates = [
+            int(getattr(runners[number], "gate"))
+            for number in top2
+            if number in runners and getattr(runners[number], "gate", None) is not None
+        ]
+        return len(top2_gates) >= 2 and sorted(entry[:2]) == sorted(top2_gates[:2])
+    if bet_type == "quinella" and len(entry) >= 2 and set(entry[:2]) == set(top2):
         return True
     if bet_type == "wide" and len(entry) >= 2 and len(set(entry[:2]) & set(top3)) >= 2:
         return True
@@ -116,12 +132,12 @@ def _entry_is_hit(bet_type: str, entry: list[int], order: list[int]) -> bool:
     return False
 
 
-def _winning_entries(recommendation: dict[str, Any], order: list[int]) -> list[list[int]]:
+def _winning_entries(recommendation: dict[str, Any], order: list[int], race: Race) -> list[list[int]]:
     bet_type = str(recommendation.get("bet_type") or "")
     return [
         entry
         for entry in _recommendation_entries(recommendation)
-        if _entry_is_hit(bet_type, entry, order)
+        if _entry_is_hit(bet_type, entry, order, race)
     ]
 
 
@@ -168,7 +184,7 @@ def settle_prediction_entry(entry: dict[str, Any], race: Race | None) -> dict[st
         odds = float(recommendation.get("odds") or 0)
         tickets = max(int(float(recommendation.get("tickets") or 1)), 1)
         unit_stake = float(recommendation.get("unit_stake") or (stake / tickets if tickets else stake))
-        winning_entries = _winning_entries(recommendation, order)
+        winning_entries = _winning_entries(recommendation, order, race)
         recommendation_hit = bool(winning_entries)
         official_payouts = [
             _official_payout_for_entries(recommendation, race, order, [entry])

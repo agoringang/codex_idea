@@ -16,6 +16,16 @@ from app.ingestion import _race_request_from_dict
 from app.model import predict_race
 from app.settlement import settle_history
 
+FIXED_PUBLIC_BET_TYPES = {
+    "win",
+    "bracket_quinella",
+    "quinella",
+    "wide",
+    "exacta",
+    "trio",
+    "trifecta",
+}
+
 
 def flatten_history(history: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -72,6 +82,8 @@ def main() -> None:
             bet_types[bet_type] += 1
             if bet_type == "support":
                 errors.append(f"{entry.get('race_id')}: unsupported support bet leaked into result UI")
+            if bet_type == "place":
+                errors.append(f"{entry.get('race_id')}: place bet leaked into result UI")
             hit = bool(item.get("hit"))
             payout = float(item.get("payout") or 0)
             official = float(item.get("official_payout_yen") or 0)
@@ -94,24 +106,26 @@ def main() -> None:
         if len(payload.get("runners") or []) < 2:
             continue
         request = _race_request_from_dict(payload)
-        request.enabled_bet_types = ["trio", "trifecta"]
-        request.min_edge = 0.08
+        request.enabled_bet_types = list(FIXED_PUBLIC_BET_TYPES)
+        request.min_edge = 0.0
         request.min_probability = 0.0
-        request.max_edge = 0.2
-        request.max_candidate_odds = 160
-        request.max_exposure = 0.035
-        request.recommendation_limit = 3
+        request.max_edge = None
+        request.max_candidate_odds = 999
+        request.max_exposure = 0.1
+        request.recommendation_limit = 7
         prediction = predict_race(request)
         sampled += 1
         generated_types = {item.bet_type for item in prediction.recommendations}
         sample_bet_types.update(generated_types)
         if "support" in generated_types:
             errors.append(f"{race.id}: prediction generated unsupported support bet")
-        if generated_types - {"trio", "trifecta"}:
+        if "place" in generated_types:
+            errors.append(f"{race.id}: prediction generated place bet")
+        if generated_types != FIXED_PUBLIC_BET_TYPES:
             non_triple_predictions += 1
 
     if non_triple_predictions > 0:
-        errors.append(f"sample predictions contain non-triple bet types: {non_triple_predictions}/{sampled}")
+        errors.append(f"sample predictions did not contain the fixed seven bet types: {non_triple_predictions}/{sampled}")
 
     summary = {
         "status": "ok" if not errors else "failed",

@@ -25,7 +25,7 @@ def plan_sync_job(request: SyncJobRequest) -> SyncJobResponse:
 
 
 def plan_training_job(request: TrainingJobRequest) -> TrainingJobResponse:
-    targets = ["win_probability", "place_probability", "finish_rank_distribution"]
+    targets = ["win_probability", "top2_probability", "finish_rank_distribution"]
     if request.include_odds_snapshots:
         targets.extend(["ticket_expected_value", "closing_odds_calibration"])
 
@@ -35,7 +35,7 @@ def plan_training_job(request: TrainingJobRequest) -> TrainingJobResponse:
         targets=targets,
         next_steps=[
             "時系列分割でtrain/validation/testを作成し、未来情報リークを防ぐ",
-            "単勝・複勝の確率モデルを学習し、Platt/Isotonicで確率校正",
+            "単勝・連対・着順分布モデルを学習し、Platt/Isotonicで確率校正",
             "順位分布から馬連・馬単・ワイド・3連複・3連単の結合確率へ展開",
             "オッズ時点別のバックテストで回収率、最大ドローダウン、購入点数を評価",
             "本番モデルをmodel registryへ保存し、開催後に増分再学習する",
