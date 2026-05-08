@@ -3021,6 +3021,17 @@ function RacePicker({
 }
 
 function ResultStrip({ history }: { history: HistoricalPrediction }) {
+  if (!history.settled) {
+    return (
+      <div className="result-strip pending">
+        <strong>結果待ち</strong>
+        <span>公式払戻取得後に回収率を表示</span>
+        <span>投資比率 {formatPercent(safeRatio(history.stake, 100_000), 2)}</span>
+        <em>{history.betCount}点</em>
+      </div>
+    );
+  }
+
   const settledLabel = history.generatedAfterResult
     ? history.hit
       ? "🎯 参考的中"
@@ -3046,15 +3057,16 @@ function HitPayoutCard({ history }: { history: HistoricalPrediction }) {
   const resultItems = [...(history.recommendationResults ?? [])].sort((a, b) => Number(b.hit) - Number(a.hit));
   const profit = historyProfit(history);
   const profitRate = safeRatio(profit, history.stake);
+  const pending = !history.settled;
 
   return (
     <section className={`hit-payout-card ${history.hit ? "hit" : history.settled ? "miss" : "pending"}`}>
       <div className="hit-payout-main">
         <span>{history.hit ? "🎯 的中払戻" : history.settled ? "購入結果" : "結果待ち"}</span>
         <strong className={profit >= 0 ? "positive" : "negative"}>
-          {formatSignedPercent(profitRate, 1)}
+          {pending ? "照合待ち" : formatSignedPercent(profitRate, 1)}
         </strong>
-        <em>回収率 {formatPercent(history.roi, 1)} / 的中 {history.hitCount}/{history.betCount}点</em>
+        <em>{pending ? "公式結果取得後に回収率を表示" : `回収率 ${formatPercent(history.roi, 1)} / 的中 ${history.hitCount}/${history.betCount}点`}</em>
       </div>
       <div className="hit-ticket-grid">
         {resultItems.length > 0 ? (
