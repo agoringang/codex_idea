@@ -370,10 +370,10 @@ def jra_shutuba_frame_from_html(text: str) -> pd.DataFrame | None:
         text,
         flags=re.IGNORECASE | re.DOTALL,
     ):
-        runner_number = match.group(1)
         row_html = match.group(2)
         cells = list(re.finditer(r"<td\b([^>]*)>(.*?)</td>", row_html, flags=re.IGNORECASE | re.DOTALL))
         cell_texts = [text_from_html_fragment(cell.group(2)) for cell in cells]
+        runner_number = cell_texts[1] if len(cell_texts) > 1 and re.fullmatch(r"\d{1,2}", cell_texts[1]) else match.group(1)
 
         horse_name = first_regex_group(
             [

@@ -34,7 +34,7 @@ JRA_ODDS_TANFUKU_URL = "https://race.netkeiba.com/odds/index.html?race_id={race_
 JRA_ODDS_API_URL = (
     "https://race.netkeiba.com/api/api_get_jra_odds.html"
     "?pid=api_get_jra_odds&input=UTF-8&output=jsonp"
-    "&race_id={race_id}&type=1&action=init&sort=odds&compress=0"
+    "&race_id={race_id}&type=1&action=update&sort=odds&compress=0"
 )
 RACE_ID_RE = re.compile(r"/race/(20\d{10})/?|race_id=(20\d{10})")
 JRA_COURSE_CODES = {"01", "02", "03", "04", "05", "06", "07", "08", "09", "10"}
@@ -633,6 +633,51 @@ def parse_jsonp_payload(text: str) -> dict[str, Any]:
 
 def parse_jra_odds_api_file(path: Path) -> list[dict[str, Any]]:
     race_id_match = re.search(r"(20\d{10})", path.stem)
+    html_path = path.with_name(f"{race_id_match.group(1)}_b1.html") if race_id_match else None
+    return parse_jra_odds_api_file_with_mapping(path, html_path)
+
+
+def parse_jra_odds_row_map(path: Path | None) -> dict[str, dict[str, Any]]:
+    if path is None or not path.exists():
+        return {}
+    text = read_html(path)
+    table = extract_odds_table(text, "odds_tan_block")
+    if not table:
+        return {}
+
+    mapped: dict[str, dict[str, Any]] = {}
+    for row_match in re.finditer(r"<tr\b[^>]*>(.*?)</tr>", table, flags=re.IGNORECASE | re.DOTALL):
+        row_html = row_match.group(1)
+        key_match = re.search(r"id=[\"']odds-1_(\d{2})[\"']", row_html)
+        if not key_match:
+            continue
+
+        cells = re.findall(r"<td\b([^>]*)>(.*?)</td>", row_html, flags=re.IGNORECASE | re.DOTALL)
+        cell_texts = [strip_html_fragment(cell_html) for _attrs, cell_html in cells]
+        numeric_cells = [
+            int(match.group(0))
+            for text_value in cell_texts[:3]
+            for match in [re.fullmatch(r"\d{1,2}", text_value)]
+            if match
+        ]
+        if not numeric_cells:
+            continue
+
+        horse_name_match = re.search(
+            r"class=[\"'][^\"']*Horse_Name[^\"']*[\"'][^>]*>(.*?)</td>",
+            row_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        horse_name = strip_html_fragment(horse_name_match.group(1)) if horse_name_match else ""
+        mapped[key_match.group(1)] = {
+            "runner_number": numeric_cells[1] if len(numeric_cells) >= 2 else numeric_cells[0],
+            "horse_name": horse_name,
+        }
+    return mapped
+
+
+def parse_jra_odds_api_file_with_mapping(path: Path, html_path: Path | None = None) -> list[dict[str, Any]]:
+    race_id_match = re.search(r"(20\d{10})", path.stem)
     if not race_id_match:
         return []
     race_id = race_id_match.group(1)
@@ -645,15 +690,23 @@ def parse_jra_odds_api_file(path: Path) -> list[dict[str, Any]]:
     win_rows = odds.get("1") if isinstance(odds.get("1"), dict) else {}
     if not win_rows:
         return []
+    place_rows = odds.get("2") if isinstance(odds.get("2"), dict) else {}
+    row_map = parse_jra_odds_row_map(html_path)
 
     snapshot_at = datetime.now(timezone.utc).isoformat()
     official_datetime = data.get("official_datetime")
     rows: list[dict[str, Any]] = []
     for runner_key, values in win_rows.items():
-        try:
-            runner_number = int(runner_key)
-        except (TypeError, ValueError):
-            continue
+        mapped = row_map.get(str(runner_key).zfill(2))
+        if mapped:
+            runner_number = int(mapped["runner_number"])
+            horse_name = str(mapped.get("horse_name") or "")
+        else:
+            try:
+                runner_number = int(runner_key)
+            except (TypeError, ValueError):
+                continue
+            horse_name = ""
         if not isinstance(values, list) or not values:
             continue
         odds_value = parse_odds_number(str(values[0]))
@@ -665,8 +718,15 @@ def parse_jra_odds_api_file(path: Path) -> list[dict[str, Any]]:
             "runner_number": runner_number,
             "odds_snapshot_at": official_datetime or snapshot_at,
         }
+        if horse_name:
+            row["horse_name"] = horse_name
         if odds_value is not None:
             row["market_odds"] = odds_value
+        place_values = place_rows.get(runner_key) if isinstance(place_rows, dict) else None
+        if isinstance(place_values, list) and place_values:
+            place_low = parse_odds_number(str(place_values[0]))
+            if place_low is not None:
+                row["place_odds"] = place_low
         if len(values) >= 3:
             try:
                 row["odds_rank"] = int(float(values[2]))
