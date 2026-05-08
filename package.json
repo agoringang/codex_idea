@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
+    "upload:data": "node scripts/upload-data-blob.mjs",
     "upload:model": "node scripts/upload-model-blob.mjs"
   },
   "dependencies": {

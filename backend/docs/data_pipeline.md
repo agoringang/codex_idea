@@ -65,7 +65,6 @@ Single-race tickets:
 
 - win
 - place
-- support
 - bracket_quinella
 - quinella
 - wide

@@ -38,6 +38,8 @@ rate-limited pages.
 
 If you choose to collect public netkeiba DB pages directly, use the conservative
 scraper. It caches raw HTML first, then writes the normalized and combined CSVs.
+The scraper now also refreshes the enriched 2026 files unless `--skip-enrich`
+is passed.
 
 ```bash
 uv run python scripts/scrape_netkeiba_2026.py \
@@ -46,6 +48,21 @@ uv run python scripts/scrape_netkeiba_2026.py \
   --delay 1.5
 ```
 
+If you already have `data/netkeiba_2026_normalized.csv`, regenerate the
+history-enriched files without scraping:
+
+```bash
+uv run python scripts/enrich_netkeiba_2026_features.py
+```
+
+This produces:
+
+- `data/netkeiba_2026_enriched.csv`
+- `data/keiba_history_with_2026_enriched.csv`
+
+The enrichment uses `data/keiba_history_normalized.csv` only as prior history,
+so 2026 validation rows do not learn from later 2026 results.
+
 The generated `*.csv` files are ignored by git.
 
 Current model validation expects:
@@ -53,6 +70,12 @@ Current model validation expects:
 - `data/keiba_history_normalized.csv`: central-racing archive through 2025
 - `data/netkeiba_2026_normalized.csv`: 2026 holdout data
 - `data/keiba_history_with_2026.csv`: combined archive for analysis only
+- `data/netkeiba_2026_enriched.csv`: 2026 holdout with prior-history features
+- `data/keiba_history_with_2026_enriched.csv`: combined archive for app display/analysis
+
+Fields that cannot be recovered from `keiba_history_normalized.csv` alone:
+true odds snapshots, exotic pool shares, raw workout tables, paddock observations,
+stable horse/jockey/trainer IDs, scratches, and refund timing.
 
 Do not commit those files. Deploy the trained artifact through Blob and
 `RACEQUANT_MODEL_URL` instead of placing it in the repository.

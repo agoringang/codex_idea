@@ -10,7 +10,6 @@ from .trained_model import predict_probabilities
 PAYOUT_RATES: dict[BetType, float] = {
     "win": 0.80,
     "place": 0.80,
-    "support": 0.80,
     "bracket_quinella": 0.775,
     "quinella": 0.775,
     "wide": 0.775,
@@ -21,12 +20,12 @@ PAYOUT_RATES: dict[BetType, float] = {
 }
 
 RunnerCombo = tuple[RunnerPrediction, ...]
+TRIPLE_ONLY_BET_TYPES: set[BetType] = {"trio", "trifecta"}
 
 BET_TYPE_RISK: dict[BetType, float] = {
     "place": 0.12,
     "wide": 0.22,
     "bracket_quinella": 0.28,
-    "support": 0.34,
     "win": 0.44,
     "quinella": 0.54,
     "exacta": 0.68,
@@ -36,16 +35,39 @@ BET_TYPE_RISK: dict[BetType, float] = {
 }
 
 BET_TYPE_UTILITY: dict[BetType, float] = {
-    "win": 0.02,
-    "place": 0.22,
-    "support": -2.20,
+    "win": 0.10,
+    "place": 0.04,
     "bracket_quinella": 0.12,
-    "quinella": 0.10,
-    "wide": 0.24,
-    "exacta": 0.16,
-    "trio": 0.18,
-    "trifecta": 0.22,
+    "quinella": 0.16,
+    "wide": 0.18,
+    "exacta": 0.20,
+    "trio": 0.24,
+    "trifecta": 0.28,
     "win5": -0.15,
+}
+
+BET_TYPE_MIN_PROBABILITY: dict[BetType, float] = {
+    "win": 0.035,
+    "place": 0.14,
+    "bracket_quinella": 0.045,
+    "quinella": 0.035,
+    "wide": 0.10,
+    "exacta": 0.018,
+    "trio": 0.018,
+    "trifecta": 0.004,
+    "win5": 0.0,
+}
+
+BET_TYPE_MAX_ODDS: dict[BetType, float] = {
+    "win": 25,
+    "place": 12,
+    "bracket_quinella": 80,
+    "quinella": 120,
+    "wide": 70,
+    "exacta": 160,
+    "trio": 180,
+    "trifecta": 240,
+    "win5": 999,
 }
 
 
@@ -102,8 +124,8 @@ def value_bias(runners: Iterable[RunnerPrediction], bonus: float = 0) -> float:
         return 1
 
     base = sum(runner.market_odds / runner.fair_odds for runner in runners) / len(runners)
-    longshot = max(0, sum(runner.market_odds for runner in runners) / len(runners) - 8) / 24
-    return clamp(base + longshot + bonus, 0.68, 1.85)
+    longshot = max(0, sum(runner.market_odds for runner in runners) / len(runners) - 8) / 90
+    return clamp(base + longshot + bonus, 0.42, 2.85)
 
 
 def synthetic_odds(
@@ -200,12 +222,7 @@ def trio_probability(combo: RunnerCombo) -> float:
 
 
 def bet_type_matches_risk(bet_type: BetType, risk_level: float) -> bool:
-    band = str(risk_profile(risk_level)["band"])
-    if band == "low":
-        return bet_type in {"place", "wide"}
-    if band == "middle":
-        return bet_type in {"place", "wide", "win", "bracket_quinella", "quinella", "exacta", "trio"}
-    return bet_type in {"win", "place", "wide", "quinella", "exacta", "trio", "trifecta"}
+    return bet_type != "win5"
 
 
 def round_to_ticket_unit(value: float) -> float:
@@ -240,15 +257,20 @@ def add_candidate(
     legs: list[dict[str, object]] | None = None,
     edge_floor: float | None = None,
 ) -> None:
+    if bet_type not in TRIPLE_ONLY_BET_TYPES:
+        return
     if bet_type not in request.enabled_bet_types:
         return
     if not bet_type_matches_risk(bet_type, request.risk_level):
         return
 
     edge = probability * odds - 1
-    if probability < request.min_probability:
+    minimum_probability = max(request.min_probability, BET_TYPE_MIN_PROBABILITY.get(bet_type, 0.0))
+    if probability < minimum_probability:
         return
     if odds > request.max_candidate_odds:
+        return
+    if odds > BET_TYPE_MAX_ODDS.get(bet_type, request.max_candidate_odds):
         return
     if request.max_edge is not None and edge > request.max_edge:
         return
@@ -296,6 +318,8 @@ def add_combo_strategy(
     max_odds: float = 220,
     legs: list[dict[str, object]] | None = None,
 ) -> None:
+    if bet_type not in TRIPLE_ONLY_BET_TYPES:
+        return
     if bet_type not in request.enabled_bet_types:
         return
     if not bet_type_matches_risk(bet_type, request.risk_level):
@@ -427,33 +451,24 @@ def two_axis_multi_combos(
 
 
 def risk_adjusted_score(recommendation: BetRecommendation, risk_level: float) -> float:
-    normalized = clamp(risk_level, 0, 100) / 100
-    band = str(risk_profile(risk_level)["band"])
-    bet_risk = BET_TYPE_RISK[recommendation.bet_type]
-    risk_fit = 1 - abs(bet_risk - normalized)
-    hit_rate_weight = (1 - normalized) * recommendation.probability * 3.6
-    return_weight = normalized * min(recommendation.odds / 80, 1.5) * 1.3
+    hit_rate_weight = recommendation.probability * 2.4
+    return_weight = min(recommendation.odds / 55, 1.25) * 0.34
     if recommendation.strategy == "single":
         strategy_bonus = 0
     elif recommendation.bet_type == "trifecta":
-        strategy_bonus = 2.4
+        strategy_bonus = 1.0
     elif recommendation.bet_type in {"exacta", "trio"}:
-        strategy_bonus = 1.3
+        strategy_bonus = 0.72
     elif recommendation.bet_type in {"quinella", "wide"}:
-        strategy_bonus = 0.8
+        strategy_bonus = 0.45
     else:
         strategy_bonus = 0
-    if band == "low" and recommendation.bet_type in {"place", "wide"}:
-        strategy_bonus += 1.2
-    if band == "high" and recommendation.bet_type == "trifecta":
-        strategy_bonus += 1.1
 
     return (
-        recommendation.edge * 0.9
+        recommendation.edge * 1.35
         + hit_rate_weight
         + return_weight
-        + risk_fit * 2.1
-        + recommendation.kelly_fraction * 0.4
+        + recommendation.kelly_fraction * 0.9
         + BET_TYPE_UTILITY[recommendation.bet_type]
         + strategy_bonus
     )
@@ -472,12 +487,10 @@ def diversify_recommendations(
     recommendations: list[BetRecommendation], request: RaceRequest, limit: int = 12
 ) -> list[BetRecommendation]:
     risk_level = request.risk_level
-    profile = risk_profile(risk_level)
-    band = str(profile["band"])
     portfolio_budget = round_to_ticket_unit(
-        request.bankroll * min(request.max_exposure, float(profile["portfolio_exposure"]))
+        request.bankroll * request.max_exposure
     )
-    target_limit = min(limit, 3 if band == "low" else 5 if band == "middle" else 7)
+    target_limit = min(limit, request.recommendation_limit, 9)
     selected: list[BetRecommendation] = []
     selected_keys: set[tuple[str, str, str]] = set()
     counts: dict[str, int] = {}
@@ -514,33 +527,28 @@ def diversify_recommendations(
         spent += candidate.stake
         return True
 
-    if band == "low":
-        anchor_types: tuple[BetType, ...] = ("place", "wide")
-    elif band == "middle":
-        anchor_types = ("place", "win", "wide")
-    else:
-        anchor_types = ("win", "trifecta", "trio", "wide")
+    ranked = sorted(
+        recommendations,
+        key=lambda item: risk_adjusted_score(item, risk_level),
+        reverse=True,
+    )
+    seen_bet_types: set[BetType] = set()
+    first_pass: list[BetRecommendation] = []
+    for item in ranked:
+        if item.bet_type in seen_bet_types:
+            continue
+        seen_bet_types.add(item.bet_type)
+        first_pass.append(item)
 
-    for bet_type in anchor_types:
-        anchor = next((item for item in recommendations if item.bet_type == bet_type), None)
-        if anchor:
-            add_item(anchor)
-        if len(selected) == target_limit:
-            return selected
-
-    for item in recommendations:
+    for item in [*first_pass, *ranked]:
         if add_item(item) and len(selected) == target_limit:
             return selected
-
-    for item in recommendations:
-        if add_item(item) and len(selected) == target_limit:
-            break
 
     return selected
 
 
 def predict_race(request: RaceRequest) -> RacePrediction:
-    trained_probabilities = predict_probabilities(request.runners)
+    trained_probabilities = predict_probabilities(request.runners, market=request.market)
     if trained_probabilities is None:
         raw_scores = [raw_probability_score(runner, request.model_mode) for runner in request.runners]
         trained_place_probabilities: list[float] | None = None
@@ -564,7 +572,15 @@ def predict_race(request: RaceRequest) -> RacePrediction:
         total = sum(raw_scores)
 
     runner_predictions: list[RunnerPrediction] = []
-    normalized_risk = clamp(request.risk_level, 0, 100) / 100
+    implied_market = [
+        (1 / max(runner.market_odds, 1.01)) if math.isfinite(runner.market_odds) else 0
+        for runner in request.runners
+    ]
+    implied_total = sum(implied_market)
+    market_probabilities = [
+        (value / implied_total) if implied_total > 0 else 1 / len(request.runners)
+        for value in implied_market
+    ]
 
     for index, (runner, raw_score) in enumerate(zip(request.runners, raw_scores, strict=True)):
         win_probability = raw_score / total
@@ -592,15 +608,34 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             out_probability = clamp(1 - place_probability, 0, 1)
         fair_odds = 1 / win_probability
         edge = win_probability * runner.market_odds - 1
-        if normalized_risk < 0.34:
-            score = place_probability * 72 + win_probability * 14 + edge * 7
-        elif normalized_risk < 0.67:
-            top2_score = top2_probability if top2_probability is not None else place_probability
-            score = top2_score * 48 + place_probability * 24 + win_probability * 18 + edge * 10
-        else:
-            top2_score = top2_probability if top2_probability is not None else win_probability * 1.8
-            score = win_probability * 64 + top2_score * 16 + place_probability * 10 + edge * 18
-        score += runner.condition / 10 + runner.speed / 16
+        market_probability = market_probabilities[index]
+        market_gap = win_probability - market_probability
+        place_gap = place_probability - min(market_probability * min(len(request.runners), 3), 0.95)
+        capped_market_gap = clamp(market_gap, -0.05, 0.055)
+        capped_place_gap = clamp(place_gap, -0.08, 0.08)
+        capped_edge = clamp(edge, -0.25, 0.45)
+        non_market_features = (
+            (runner.jockey_win_rate or 0) * 9
+            + (runner.trainer_win_rate or 0) * 7
+            + (runner.horse_recent_win_rate or 0) * 8
+            + (runner.horse_recent_place_rate or 0) * 7
+            + (runner.horse_distance_place_rate or 0) * 4
+            + (runner.horse_surface_place_rate or 0) * 4
+            + (runner.draw_bias or 0) * 3
+        )
+        top2_score = top2_probability if top2_probability is not None else place_probability
+        score = (
+            market_probability * 16
+            + win_probability * 92
+            + top2_score * 44
+            + place_probability * 18
+            + capped_market_gap * 126
+            + capped_place_gap * 30
+            + capped_edge * 10
+            + runner.condition / 12
+            + runner.speed / 20
+            + non_market_features * 1.35
+        )
 
         runner_predictions.append(
             RunnerPrediction(
@@ -624,152 +659,7 @@ def predict_race(request: RaceRequest) -> RacePrediction:
     runner_predictions.sort(key=lambda item: item.score, reverse=True)
     recommendations: list[BetRecommendation] = []
     top_candidates = runner_predictions[:6]
-    enabled_bet_types = set(request.enabled_bet_types)
-
-    for runner in runner_predictions:
-        add_candidate(
-            recommendations,
-            request=request,
-            bet_type="win",
-            selection_text=f"{runner.number}",
-            note_text=runner.name,
-            probability=runner.win_probability,
-            odds=runner.market_odds,
-            legs=[leg("馬番", [runner])],
-        )
-        place_odds = next(item.place_odds for item in request.runners if item.id == runner.id)
-        add_candidate(
-            recommendations,
-            request=request,
-            bet_type="place",
-            selection_text=f"{runner.number}",
-            note_text=runner.name,
-            probability=runner.place_probability,
-            odds=place_odds,
-            legs=[leg("馬番", [runner])],
-        )
-        add_candidate(
-            recommendations,
-            request=request,
-            bet_type="support",
-            selection_text=f"{runner.number}",
-            note_text=f"{runner.name} 単勝+複勝",
-            probability=runner.place_probability,
-            odds=(runner.market_odds + place_odds) / 2,
-            legs=[leg("馬番", [runner])],
-        )
-
-    if enabled_bet_types & {"quinella", "wide", "bracket_quinella"}:
-        for pair in combinations(top_candidates, 2):
-            quinella_pair_probability = quinella_probability(pair)
-            wide_pair_probability = wide_probability(pair)
-            bracket_probability = clamp(quinella_pair_probability * 1.08, 0.004, 0.42)
-
-            add_candidate(
-                recommendations,
-                request=request,
-                bet_type="quinella",
-                selection_text=selection(pair),
-                note_text=note(pair),
-                probability=quinella_pair_probability,
-                odds=synthetic_odds("quinella", quinella_pair_probability, pair, 0.11),
-                legs=[leg("組み合わせ", pair)],
-            )
-            add_candidate(
-                recommendations,
-                request=request,
-                bet_type="wide",
-                selection_text=selection(pair),
-                note_text=note(pair),
-                probability=wide_pair_probability,
-                odds=synthetic_odds("wide", wide_pair_probability, pair, 0.05),
-                legs=[leg("組み合わせ", pair)],
-            )
-            add_candidate(
-                recommendations,
-                request=request,
-                bet_type="bracket_quinella",
-                selection_text="-".join(str(runner.gate) for runner in pair),
-                note_text=f"枠 {'-'.join(str(runner.gate) for runner in pair)} / {note(pair)}",
-                probability=bracket_probability,
-                odds=synthetic_odds("bracket_quinella", bracket_probability, pair, 0.04),
-                legs=[{"label": "枠", "numbers": [runner.gate for runner in pair]}],
-            )
-
-    if len(top_candidates) >= 2:
-        axis = top_candidates[0]
-        pair_opponents = top_candidates[1:6]
-        add_combo_strategy(
-            recommendations,
-            request=request,
-            bet_type="quinella",
-            strategy="馬連1頭軸流し",
-            selection_text=f"軸 {axis.number} / 相手 {selection(pair_opponents)}",
-            combos=pair_axis_flow(axis, pair_opponents),
-            probability_fn=quinella_probability,
-            bonus=0.11,
-            max_probability=0.66,
-            unordered=True,
-            legs=[leg("軸", [axis]), leg("相手", pair_opponents)],
-        )
-        add_combo_strategy(
-            recommendations,
-            request=request,
-            bet_type="wide",
-            strategy="ワイド1頭軸流し",
-            selection_text=f"軸 {axis.number} / 相手 {selection(pair_opponents)}",
-            combos=pair_axis_flow(axis, pair_opponents),
-            probability_fn=wide_probability,
-            bonus=0.05,
-            max_probability=0.82,
-            unordered=True,
-            max_odds=80,
-            legs=[leg("軸", [axis]), leg("相手", pair_opponents)],
-        )
-
-    if "exacta" in enabled_bet_types:
-        for pair in permutations(top_candidates, 2):
-            probability = exacta_probability(pair)
-            add_candidate(
-                recommendations,
-                request=request,
-                bet_type="exacta",
-                selection_text=selection(pair),
-                note_text=note(pair),
-                probability=probability,
-                odds=synthetic_odds("exacta", probability, pair, 0.16),
-                legs=[leg("1着", [pair[0]]), leg("2着", [pair[1]])],
-            )
-
-    if len(top_candidates) >= 2:
-        axis = top_candidates[0]
-        exacta_opponents = top_candidates[1:5]
-        add_combo_strategy(
-            recommendations,
-            request=request,
-            bet_type="exacta",
-            strategy="馬単1着軸流し",
-            selection_text=f"1着 {axis.number} / 2着 {selection(exacta_opponents)}",
-            combos=exacta_axis_flow(axis, exacta_opponents, 0),
-            probability_fn=exacta_probability,
-            bonus=0.16,
-            max_probability=0.58,
-            unordered=False,
-            legs=[leg("1着", [axis]), leg("2着", exacta_opponents)],
-        )
-        add_combo_strategy(
-            recommendations,
-            request=request,
-            bet_type="exacta",
-            strategy="馬単2着軸流し",
-            selection_text=f"1着 {selection(exacta_opponents)} / 2着 {axis.number}",
-            combos=exacta_axis_flow(axis, exacta_opponents, 1),
-            probability_fn=exacta_probability,
-            bonus=0.18,
-            max_probability=0.50,
-            unordered=False,
-            legs=[leg("1着", exacta_opponents), leg("2着", [axis])],
-        )
+    enabled_bet_types = set(request.enabled_bet_types) & TRIPLE_ONLY_BET_TYPES
 
     if "trio" in enabled_bet_types:
         for trio in combinations(top_candidates, 3):
@@ -820,6 +710,44 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                 leg("相手", top_candidates[2:6]),
             ],
         )
+        if len(top_candidates) >= 5:
+            add_combo_strategy(
+                recommendations,
+                request=request,
+                bet_type="trio",
+                strategy="3連複5頭ボックス",
+                selection_text=f"BOX {selection(top_candidates[:5])}",
+                combos=combinations(top_candidates[:5], 3),
+                probability_fn=trio_probability,
+                bonus=0.14,
+                max_probability=0.62,
+                unordered=True,
+                max_odds=140,
+                legs=[leg("BOX", top_candidates[:5])],
+            )
+            formation = [
+                (first, second, third)
+                for first in top_candidates[:2]
+                for second in top_candidates[1:5]
+                for third in top_candidates[2:6]
+                if len({first.id, second.id, third.id}) == 3
+            ]
+            add_combo_strategy(
+                recommendations,
+                request=request,
+                bet_type="trio",
+                strategy="3連複フォーメーション",
+                selection_text=(
+                    f"軸候補 {selection(top_candidates[:2])} / 相手 {selection(top_candidates[1:6])}"
+                ),
+                combos=formation,
+                probability_fn=trio_probability,
+                bonus=0.16,
+                max_probability=0.58,
+                unordered=True,
+                max_odds=150,
+                legs=[leg("軸候補", top_candidates[:2]), leg("相手", top_candidates[1:6])],
+            )
 
     if "trifecta" in enabled_bet_types:
         for trio in permutations(top_candidates[:5], 3):

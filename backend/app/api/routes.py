@@ -1,7 +1,7 @@
 import os
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Response
 
 from app import schemas as strategy_schemas
 from app.core.schemas import (
@@ -43,9 +43,11 @@ def product_status() -> strategy_schemas.BackendStatus:
 
 @router.get("/races", response_model=list[strategy_schemas.Race])
 def races(
+    response: Response,
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> list[strategy_schemas.Race]:
+    response.headers["Cache-Control"] = "s-maxage=15, stale-while-revalidate=30"
     return get_races(start_date=start_date, end_date=end_date)
 
 
@@ -74,9 +76,11 @@ def live_snapshot(race_id: str) -> strategy_schemas.LiveSnapshot:
 
 @router.get("/history")
 def prediction_history(
+    response: Response,
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "s-maxage=15, stale-while-revalidate=30"
     today = date.today()
     start = start_date or (today - timedelta(days=30)).isoformat()
     end = end_date or today.isoformat()
@@ -158,10 +162,10 @@ def training_job(request: strategy_schemas.TrainingJobRequest) -> strategy_schem
     return plan_training_job(request)
 
 
-def _authorize_ingest_job(authorization: str | None) -> None:
+def _authorize_ingest_job(authorization: str | None, x_cron_secret: str | None = None) -> None:
     secret = os.getenv("CRON_SECRET")
     if secret:
-        if authorization != f"Bearer {secret}":
+        if authorization != f"Bearer {secret}" and x_cron_secret != secret:
             raise HTTPException(status_code=401, detail="invalid cron secret")
         return
     if os.getenv("VERCEL"):
@@ -171,23 +175,28 @@ def _authorize_ingest_job(authorization: str | None) -> None:
 @router.get("/jobs/ingest/netkeiba", response_model=strategy_schemas.NetkeibaIngestResponse)
 def netkeiba_ingest_job(
     authorization: str | None = Header(default=None),
+    x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
     start_date: str | None = None,
     end_date: str | None = None,
-    days: int = 2,
+    days: int = 1,
+    days_ahead: int = 2,
     max_requests: int | None = None,
     delay: float | None = None,
     refresh: bool = False,
     prefer_results: bool = False,
+    backfill_finished_predictions: bool = False,
 ) -> strategy_schemas.NetkeibaIngestResponse:
-    _authorize_ingest_job(authorization)
+    _authorize_ingest_job(authorization, x_cron_secret)
     summary = ingest_netkeiba_window(
         start_date=start_date,
         end_date=end_date,
         days=days,
-        max_requests=max_requests,
-        delay=delay,
+        days_ahead=days_ahead,
+        max_requests=max_requests if max_requests is not None else 220,
+        delay=delay if delay is not None else 0.35,
         refresh=refresh,
         prefer_results=prefer_results,
+        backfill_finished_predictions=backfill_finished_predictions,
     )
     return strategy_schemas.NetkeibaIngestResponse(
         status=summary.get("status", "error"),
@@ -206,17 +215,21 @@ def netkeiba_ingest_job(
 @router.get("/jobs/ingest/netkeiba/results", response_model=strategy_schemas.NetkeibaIngestResponse)
 def netkeiba_result_ingest_job(
     authorization: str | None = Header(default=None),
+    x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
     days: int = 2,
     max_requests: int | None = None,
     delay: float | None = None,
+    backfill_finished_predictions: bool = False,
 ) -> strategy_schemas.NetkeibaIngestResponse:
-    _authorize_ingest_job(authorization)
+    _authorize_ingest_job(authorization, x_cron_secret)
     summary = ingest_netkeiba_window(
         days=days,
-        max_requests=max_requests if max_requests is not None else 180,
-        delay=delay if delay is not None else 0.4,
+        days_ahead=0,
+        max_requests=max_requests if max_requests is not None else 260,
+        delay=delay if delay is not None else 0.25,
         refresh=True,
         prefer_results=True,
+        backfill_finished_predictions=backfill_finished_predictions,
     )
     return strategy_schemas.NetkeibaIngestResponse(
         status=summary.get("status", "error"),
@@ -236,8 +249,9 @@ def netkeiba_result_ingest_job(
 def netkeiba_import_job(
     request: strategy_schemas.NetkeibaRaceImportRequest,
     authorization: str | None = Header(default=None),
+    x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
 ) -> strategy_schemas.NetkeibaIngestResponse:
-    _authorize_ingest_job(authorization)
+    _authorize_ingest_job(authorization, x_cron_secret)
     summary = import_netkeiba_race_cards(
         [race.model_dump(mode="json") for race in request.races],
         source=request.source,
@@ -255,6 +269,59 @@ def netkeiba_import_job(
         backfilled_predictions=summary.get("backfilled_predictions", 0),
         message=summary.get("message", ""),
     )
+
+
+@router.get("/jobs/backfill/history")
+def history_backfill_job(
+    authorization: str | None = Header(default=None),
+    x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
+    start_date: str | None = None,
+    end_date: str | None = None,
+    market: str = "JRA",
+    limit: int = 80,
+    include_existing: bool = False,
+) -> dict:
+    _authorize_ingest_job(authorization, x_cron_secret)
+    if not start_date or not end_date:
+        raise HTTPException(status_code=400, detail="start_date and end_date are required")
+
+    from app.ingestion import _existing_prediction_ids, _record_prediction_for_race
+
+    existing = set() if include_existing else _existing_prediction_ids(start_date, end_date)
+    races = get_races(start_date=start_date, end_date=end_date)
+    candidates: list[dict] = []
+    for race in races:
+        if race.status != "finished":
+            continue
+        if market != "all" and race.market != market:
+            continue
+        if not include_existing and race.id in existing:
+            continue
+        candidates.append(race.model_dump(mode="json"))
+
+    if limit > 0:
+        candidates = candidates[:limit]
+
+    saved = 0
+    failed: list[str] = []
+    for race in candidates:
+        race_id = str(race.get("id") or "")
+        if _record_prediction_for_race(race, generated_after_result=True):
+            saved += 1
+            existing.add(race_id)
+        else:
+            failed.append(race_id)
+
+    return {
+        "status": "ok" if not failed else "partial",
+        "start_date": start_date,
+        "end_date": end_date,
+        "market": market,
+        "candidate_races": len(candidates),
+        "saved": saved,
+        "failed": len(failed),
+        "failed_sample": failed[:10],
+    }
 
 
 @router.post("/jobs/live-polling", response_model=strategy_schemas.LivePollingJobResponse)

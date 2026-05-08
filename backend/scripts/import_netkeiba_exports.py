@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import json
 import re
 from dataclasses import dataclass
@@ -84,6 +85,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "trainer": ("trainer", "調教師", "厩舎", "所属"),
     "horse_weight": ("horse_weight", "馬体重", "馬体重(増減)", "馬体重（増減）"),
     "horse_weight_diff": ("horse_weight_diff", "増減", "馬体重増減"),
+    "body_weight_announced_at": ("body_weight_announced_at", "馬体重発表", "馬体重発表時刻"),
     "market_odds": ("market_odds", "単勝", "オッズ", "単勝オッズ"),
     "place_odds": ("place_odds", "複勝", "複勝オッズ"),
     "odds_rank": ("odds_rank", "人気", "単勝人気"),
@@ -91,6 +93,24 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "surface": ("surface", "馬場", "コース", "種別"),
     "going": ("going", "馬場状態", "馬場状態(芝)", "馬場状態(ダ)"),
     "weather": ("weather", "天候"),
+    "start_time": ("start_time", "post_time", "race_time", "発走", "発走時刻", "発走予定"),
+    "running_style": ("running_style", "脚質"),
+    "sire": ("sire", "父", "父名"),
+    "sire_id": ("sire_id", "父ID", "種牡馬ID"),
+    "dam_sire": ("dam_sire", "母父", "母の父"),
+    "dam_sire_id": ("dam_sire_id", "母父ID", "母の父ID"),
+    "training_score": ("training_score", "調教", "調教評価", "追い切り"),
+    "bloodline_score": ("bloodline_score", "血統", "血統評価"),
+    "paddock_score": ("paddock_score", "パドック", "気配"),
+    "odds_delta": ("odds_delta", "オッズ変動", "変動", "前回比"),
+    "odds_delta_5m": ("odds_delta_5m", "5分オッズ変動", "直前5分変動"),
+    "odds_delta_15m": ("odds_delta_15m", "15分オッズ変動", "直前15分変動"),
+    "odds_volatility": ("odds_volatility", "オッズ変動率", "オッズボラ"),
+    "odds_snapshot_at": ("odds_snapshot_at", "オッズ取得時刻", "オッズ更新時刻"),
+    "ticket_pool_share": ("ticket_pool_share", "票数シェア", "支持率"),
+    "last600m": ("last600m", "上り", "上がり", "後3F", "3F"),
+    "lap_3f": ("lap_3f", "ラップ3F", "前半3F", "3F"),
+    "lap_4f": ("lap_4f", "ラップ4F", "前半4F", "4F"),
 }
 
 PAYOUT_BET_TYPES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
@@ -108,6 +128,17 @@ PAYOUT_COLUMNS_BY_TYPE = {
     bet_type: column for bet_type, column, _aliases in PAYOUT_BET_TYPES
 }
 
+PAYOUT_ROW_CLASS_TYPES = {
+    "Tansho": "win",
+    "Fukusho": "place",
+    "Wakuren": "bracket_quinella",
+    "Umaren": "quinella",
+    "Wide": "wide",
+    "Umatan": "exacta",
+    "Fuku3": "trio",
+    "Tan3": "trifecta",
+}
+
 OUTPUT_COLUMNS = [
     "race_id",
     "race_date",
@@ -123,10 +154,19 @@ OUTPUT_COLUMNS = [
     "going",
     "surface",
     "weather",
+    "start_time",
+    "post_time",
+    "body_weight_announced_at",
+    "odds_snapshot_at",
     "sex",
     "age",
     "jockey",
     "trainer",
+    "running_style",
+    "sire",
+    "sire_id",
+    "dam_sire",
+    "dam_sire_id",
     "carried_weight",
     "horse_weight",
     "horse_weight_diff",
@@ -137,6 +177,17 @@ OUTPUT_COLUMNS = [
     "market_odds",
     "place_odds",
     "odds_rank",
+    "odds_delta",
+    "odds_delta_5m",
+    "odds_delta_15m",
+    "odds_volatility",
+    "ticket_pool_share",
+    "training_score",
+    "bloodline_score",
+    "paddock_score",
+    "last600m",
+    "lap_3f",
+    "lap_4f",
     "payout_win",
     "payout_place",
     "payout_bracket_quinella",
@@ -145,6 +196,7 @@ OUTPUT_COLUMNS = [
     "payout_exacta",
     "payout_trio",
     "payout_trifecta",
+    "payouts_json",
     "source_file",
     "source_table",
     "source_runner_id",
@@ -199,7 +251,8 @@ class SimpleTableParser(HTMLParser):
 def clean_text(value: Any) -> str:
     if value is None or pd.isna(value):
         return ""
-    return re.sub(r"\s+", " ", str(value).replace("\u3000", " ")).strip()
+    text = html.unescape(str(value)).replace("\u3000", " ").replace("\xa0", " ")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def normalized_name(value: Any) -> str:
@@ -289,6 +342,75 @@ def read_text_file(path: Path, encoding: str) -> str:
     return best_text
 
 
+def text_from_html_fragment(fragment: str) -> str:
+    text = html.unescape(fragment)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return clean_text(text)
+
+
+def first_regex_group(patterns: Iterable[str], text: str) -> str:
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return text_from_html_fragment(match.group(1))
+    return ""
+
+
+def jra_shutuba_frame_from_html(text: str) -> pd.DataFrame | None:
+    if "Shutuba_Table" not in text or "HorseList" not in text:
+        return None
+
+    rows: list[dict[str, str]] = []
+    for match in re.finditer(
+        r"<tr\b[^>]*class=[\"'][^\"']*HorseList[^\"']*[\"'][^>]*id=[\"']tr_(\d+)[\"'][^>]*>(.*?)</tr>",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        runner_number = match.group(1)
+        row_html = match.group(2)
+        cells = list(re.finditer(r"<td\b([^>]*)>(.*?)</td>", row_html, flags=re.IGNORECASE | re.DOTALL))
+        cell_texts = [text_from_html_fragment(cell.group(2)) for cell in cells]
+
+        horse_name = first_regex_group(
+            [
+                r"class=[\"'][^\"']*HorseName[^\"']*[\"'][^>]*>\s*<a\b[^>]*title=[\"']([^\"']+)[\"']",
+                r"class=[\"'][^\"']*HorseName[^\"']*[\"'][^>]*>(.*?)</span>",
+            ],
+            row_html,
+        )
+        if not horse_name:
+            continue
+
+        bracket = cell_texts[0] if len(cell_texts) > 0 else ""
+        sex_age = cell_texts[4] if len(cell_texts) > 4 else ""
+        carried_weight = cell_texts[5] if len(cell_texts) > 5 else ""
+        jockey = first_regex_group([r"<td\b[^>]*class=[\"'][^\"']*Jockey[^\"']*[\"'][^>]*>(.*?)</td>"], row_html)
+        trainer = first_regex_group([r"<td\b[^>]*class=[\"'][^\"']*Trainer[^\"']*[\"'][^>]*>(.*?)</td>"], row_html)
+        horse_weight = first_regex_group([r"<td\b[^>]*class=[\"'][^\"']*Weight[^\"']*[\"'][^>]*>(.*?)</td>"], row_html)
+        odds = first_regex_group([r"id=[\"']odds-[^\"']+_[^\"']+[\"'][^>]*>(.*?)</span>"], row_html)
+        odds_rank = first_regex_group([r"id=[\"']ninki-[^\"']+_[^\"']+[\"'][^>]*>(.*?)</span>"], row_html)
+
+        rows.append(
+            {
+                "枠": bracket,
+                "馬番": runner_number,
+                "馬名": horse_name,
+                "性齢": sex_age,
+                "斤量": carried_weight,
+                "騎手": jockey,
+                "厩舎": trainer,
+                "馬体重(増減)": horse_weight,
+                "単勝": odds,
+                "人気": odds_rank,
+            }
+        )
+
+    if not rows:
+        return None
+    return pd.DataFrame(rows)
+
+
 def read_source_tables(path: Path, encoding: str) -> list[SourceTable]:
     suffix = path.suffix.lower()
     if suffix in {".csv", ".txt"}:
@@ -301,6 +423,10 @@ def read_source_tables(path: Path, encoding: str) -> list[SourceTable]:
         return [SourceTable(frame=frame, index=0, text="")]
     if suffix in {".html", ".htm"}:
         text = read_text_file(path, encoding)
+        custom_jra_frame = jra_shutuba_frame_from_html(text)
+        if custom_jra_frame is not None:
+            return [SourceTable(frame=custom_jra_frame.astype(str), index=0, text=text)]
+
         tables: list[SourceTable] = []
         try:
             parsed_frames = pd.read_html(text)
@@ -395,6 +521,12 @@ def parse_horse_weight(value: Any) -> tuple[int | None, int | None]:
     weight = to_int(text.split("(")[0].split("（")[0])
     diff_match = re.search(r"[(（]\s*([+-]?\d+)\s*[)）]", text)
     diff = int(diff_match.group(1)) if diff_match else None
+    if weight is not None and not 250 <= weight <= 700:
+        weight = None
+    if diff is not None and abs(diff) > 80:
+        diff = None
+    if weight is None:
+        diff = None
     return weight, diff
 
 
@@ -403,8 +535,8 @@ def parse_date_text(value: Any) -> str:
     if not text:
         return ""
     for pattern in [
-        r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})",
         r"(20\d{2})年(\d{1,2})月(\d{1,2})日",
+        r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})",
     ]:
         match = re.search(pattern, text)
         if not match:
@@ -494,10 +626,31 @@ def infer_going(text: str, default_going: str) -> str:
     return match.group(1) if match else default_going
 
 
-def estimated_place_odds(win_odds: float | None) -> float | None:
-    if win_odds is None or win_odds <= 1:
-        return None
-    return round(max(1.1, min(win_odds, win_odds / 4.0)), 2)
+def infer_start_time(text: str, default_start_time: str = "") -> str:
+    target = normalize_digits(text[:30000])
+    patterns = [
+        r"(\d{1,2}:\d{2})\s*発走",
+        r"発走\s*[:：]?\s*(\d{1,2}:\d{2})",
+        r"発走予定\s*[:：]?\s*(\d{1,2}:\d{2})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, target)
+        if match:
+            return match.group(1)
+    return default_start_time
+
+
+def infer_lap_metric(text: str, label: str) -> float | None:
+    target = normalize_digits(text[:50000])
+    if label == "lap_3f":
+        patterns = [r"(?:前半3F|3F)\s*[:：]?\s*(\d{2}\.\d)", r"上(?:り|がり)\s*[:：]?\s*(\d{2}\.\d)"]
+    else:
+        patterns = [r"(?:前半4F|4F)\s*[:：]?\s*(\d{2}\.\d)"]
+    for pattern in patterns:
+        match = re.search(pattern, target)
+        if match:
+            return to_float(match.group(1))
+    return None
 
 
 def bracket_from_runner_number(number: int | None) -> int | None:
@@ -523,6 +676,8 @@ def table_looks_like_race(frame: pd.DataFrame) -> bool:
 def payout_type_from_cells(cells: list[str]) -> str | None:
     joined = " ".join(cells)
     normalized = normalize_digits(joined).replace("３連", "3連")
+    if normalized in PAYOUT_COLUMNS_BY_TYPE:
+        return normalized
     for bet_type, _column, aliases in PAYOUT_BET_TYPES:
         if any(alias in normalized for alias in aliases):
             return bet_type
@@ -542,6 +697,76 @@ def payout_yen_from_cells(cells: list[str]) -> int | None:
     return None
 
 
+def split_cell_lines(value: Any) -> list[str]:
+    text = html.unescape(str(value or "")).replace("\xa0", " ")
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return [clean_text(line) for line in text.splitlines() if clean_text(line)]
+
+
+def html_selection_lines(cell_html: str) -> list[str]:
+    groups = re.findall(r"<ul\b[^>]*>(.*?)</ul>", cell_html, flags=re.IGNORECASE | re.DOTALL)
+    if groups:
+        selections: list[str] = []
+        for group in groups:
+            spans = [
+                clean_text(re.sub(r"<[^>]+>", " ", html.unescape(match)))
+                for match in re.findall(r"<span\b[^>]*>(.*?)</span>", group, flags=re.IGNORECASE | re.DOTALL)
+            ]
+            numbers = [item for item in spans if item]
+            if numbers:
+                selections.append(" - ".join(numbers))
+        return selections
+
+    spans = [
+        clean_text(re.sub(r"<[^>]+>", " ", html.unescape(match)))
+        for match in re.findall(r"<span\b[^>]*>(.*?)</span>", cell_html, flags=re.IGNORECASE | re.DOTALL)
+    ]
+    return [item for item in spans if item]
+
+
+def html_cells_from_row(row_html: str) -> list[str]:
+    cells: list[str] = []
+    for match in re.finditer(r"<(?:th|td)\b([^>]*)>(.*?)</(?:th|td)>", row_html, flags=re.IGNORECASE | re.DOTALL):
+        attrs = match.group(1)
+        body = match.group(2)
+        if re.search(r'class=["\'][^"\']*Result[^"\']*["\']', attrs, flags=re.IGNORECASE):
+            lines = html_selection_lines(body)
+        else:
+            lines = split_cell_lines(body)
+        cells.append("\n".join(lines) if lines else clean_text(body))
+    return cells
+
+
+def payout_rows_from_html(text: str) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for table_match in re.finditer(
+        r"<table\b[^>]*class=[\"'][^\"']*(?:pay_table_01|Payout_Detail_Table)[^\"']*[\"'][^>]*>(.*?)</table>",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        table_html = table_match.group(1)
+        for row_match in re.finditer(r"<tr\b([^>]*)>(.*?)</tr>", table_html, flags=re.IGNORECASE | re.DOTALL):
+            attrs = row_match.group(1)
+            row_class_match = re.search(r'class=["\']([^"\']+)["\']', attrs, flags=re.IGNORECASE)
+            row_class = row_class_match.group(1).split()[0] if row_class_match else ""
+            cells = html_cells_from_row(row_match.group(2))
+            if cells and row_class in PAYOUT_ROW_CLASS_TYPES:
+                cells[0] = PAYOUT_ROW_CLASS_TYPES[row_class]
+            if cells:
+                rows.append(cells)
+    return rows
+
+
+def payout_item(bet_type: str, selection: str, payout_yen: int, popularity: int | None = None) -> dict[str, Any]:
+    return {
+        "bet_type": bet_type,
+        "selection": selection,
+        "payout_yen": payout_yen,
+        "popularity": popularity,
+    }
+
+
 def selection_numbers_from_cells(cells: list[str]) -> list[int]:
     for cell in cells:
         normalized = normalize_digits(cell)
@@ -555,12 +780,60 @@ def selection_numbers_from_cells(cells: list[str]) -> list[int]:
     return []
 
 
+def apply_payout_row(payouts: dict[str, Any], cells: list[str]) -> None:
+    if len(cells) < 3:
+        return
+    bet_type = payout_type_from_cells([cells[0]])
+    if not bet_type:
+        return
+
+    selections = split_cell_lines(cells[1]) or [cells[1]]
+    payout_values = split_cell_lines(cells[2]) or [cells[2]]
+    popularity_values = split_cell_lines(cells[3]) if len(cells) > 3 else []
+
+    for index, selection in enumerate(selections):
+        payout_yen = payout_yen_from_cells([payout_values[min(index, len(payout_values) - 1)]])
+        if payout_yen is None:
+            continue
+        popularity = (
+            to_int(popularity_values[min(index, len(popularity_values) - 1)])
+            if popularity_values
+            else None
+        )
+        numbers = selection_numbers_from_cells([selection])
+        payouts["items"].append(payout_item(bet_type, selection, payout_yen, popularity))
+        if bet_type == "win" and numbers:
+            payouts["win_by_runner"][numbers[0]] = payout_yen
+        elif bet_type == "place" and numbers:
+            payouts["place_by_runner"][numbers[0]] = payout_yen
+        else:
+            column = PAYOUT_COLUMNS_BY_TYPE[bet_type]
+            payouts["race"].setdefault(column, payout_yen)
+
+
 def extract_payouts(source_tables: list[SourceTable]) -> dict[str, Any]:
     payouts: dict[str, Any] = {
         "win_by_runner": {},
         "place_by_runner": {},
         "race": {},
+        "items": [],
     }
+
+    seen_texts: set[int] = set()
+    html_extracted = False
+    for source in source_tables:
+        if not source.text:
+            continue
+        text_id = id(source.text)
+        if text_id in seen_texts:
+            continue
+        seen_texts.add(text_id)
+        for cells in payout_rows_from_html(source.text):
+            apply_payout_row(payouts, cells)
+            html_extracted = True
+
+    if html_extracted:
+        return payouts
 
     for source in source_tables:
         if table_looks_like_race(source.frame):
@@ -586,11 +859,15 @@ def extract_payouts(source_tables: list[SourceTable]) -> dict[str, Any]:
             numbers = selection_numbers_from_cells(cells)
             if bet_type == "win" and numbers:
                 payouts["win_by_runner"][numbers[0]] = payout_yen
+                payouts["items"].append(payout_item(bet_type, str(numbers[0]), payout_yen))
             elif bet_type == "place" and numbers:
                 payouts["place_by_runner"][numbers[0]] = payout_yen
+                payouts["items"].append(payout_item(bet_type, str(numbers[0]), payout_yen))
             else:
                 column = PAYOUT_COLUMNS_BY_TYPE[bet_type]
                 payouts["race"].setdefault(column, payout_yen)
+                if numbers:
+                    payouts["items"].append(payout_item(bet_type, " - ".join(map(str, numbers)), payout_yen))
 
     return payouts
 
@@ -599,6 +876,8 @@ def apply_payouts(records: list[dict[str, Any]], payouts: dict[str, Any]) -> Non
     win_by_runner: dict[int, int] = payouts.get("win_by_runner", {})
     place_by_runner: dict[int, int] = payouts.get("place_by_runner", {})
     race_payouts: dict[str, int] = payouts.get("race", {})
+    payout_items = payouts.get("items") if isinstance(payouts.get("items"), list) else []
+    payouts_json = json.dumps(payout_items, ensure_ascii=False) if payout_items else ""
 
     for record in records:
         runner_number = record.get("runner_number")
@@ -608,6 +887,8 @@ def apply_payouts(records: list[dict[str, Any]], payouts: dict[str, Any]) -> Non
             record["payout_place"] = place_by_runner[runner_number]
         for column, value in race_payouts.items():
             record[column] = value
+        if payouts_json:
+            record["payouts_json"] = payouts_json
 
 
 def normalize_table(
@@ -632,6 +913,9 @@ def normalize_table(
     surface, distance = infer_course(source.text, args.default_surface, args.default_distance)
     weather = infer_weather(source.text, args.default_weather)
     going = infer_going(source.text, args.default_going)
+    start_time = infer_start_time(source.text)
+    lap_3f = infer_lap_metric(source.text, "lap_3f")
+    lap_4f = infer_lap_metric(source.text, "lap_4f")
 
     records: list[dict[str, Any]] = []
     for _, row in frame.iterrows():
@@ -650,13 +934,14 @@ def normalize_table(
 
         finish_position = parse_finish_position(first_value(row, frame, "finish_position"))
         market_odds = to_float(first_value(row, frame, "market_odds"))
-        place_odds = to_float(first_value(row, frame, "place_odds")) or estimated_place_odds(
-            market_odds
-        )
+        place_odds = to_float(first_value(row, frame, "place_odds"))
         raw_horse_weight = first_value(row, frame, "horse_weight")
         horse_weight, horse_weight_diff = parse_horse_weight(raw_horse_weight)
         explicit_diff = to_int(first_value(row, frame, "horse_weight_diff"))
-        horse_weight_diff = explicit_diff if explicit_diff is not None else horse_weight_diff
+        if explicit_diff is not None and abs(explicit_diff) <= 80:
+            horse_weight_diff = explicit_diff
+        if horse_weight is None:
+            horse_weight_diff = None
         odds_rank = to_int(first_value(row, frame, "odds_rank"))
 
         predicted_odds_column = next(
@@ -693,10 +978,19 @@ def normalize_table(
             "going": first_value(row, frame, "going") or going,
             "surface": first_value(row, frame, "surface") or surface,
             "weather": first_value(row, frame, "weather") or weather,
+            "start_time": first_value(row, frame, "start_time") or start_time,
+            "post_time": first_value(row, frame, "start_time") or start_time,
+            "body_weight_announced_at": first_value(row, frame, "body_weight_announced_at"),
+            "odds_snapshot_at": first_value(row, frame, "odds_snapshot_at"),
             "sex": sex,
             "age": age,
             "jockey": first_value(row, frame, "jockey"),
             "trainer": first_value(row, frame, "trainer"),
+            "running_style": first_value(row, frame, "running_style"),
+            "sire": first_value(row, frame, "sire"),
+            "sire_id": first_value(row, frame, "sire_id"),
+            "dam_sire": first_value(row, frame, "dam_sire"),
+            "dam_sire_id": first_value(row, frame, "dam_sire_id"),
             "carried_weight": to_float(first_value(row, frame, "carried_weight")),
             "horse_weight": horse_weight,
             "horse_weight_diff": horse_weight_diff,
@@ -711,6 +1005,17 @@ def normalize_table(
             "market_odds": market_odds,
             "place_odds": place_odds,
             "odds_rank": odds_rank,
+            "odds_delta": to_float(first_value(row, frame, "odds_delta")),
+            "odds_delta_5m": to_float(first_value(row, frame, "odds_delta_5m")),
+            "odds_delta_15m": to_float(first_value(row, frame, "odds_delta_15m")),
+            "odds_volatility": to_float(first_value(row, frame, "odds_volatility")),
+            "ticket_pool_share": to_float(first_value(row, frame, "ticket_pool_share")),
+            "training_score": to_float(first_value(row, frame, "training_score")),
+            "bloodline_score": to_float(first_value(row, frame, "bloodline_score")),
+            "paddock_score": to_float(first_value(row, frame, "paddock_score")),
+            "last600m": to_float(first_value(row, frame, "last600m")) or lap_3f,
+            "lap_3f": to_float(first_value(row, frame, "lap_3f")) or lap_3f,
+            "lap_4f": to_float(first_value(row, frame, "lap_4f")) or lap_4f,
             "source_file": path.name,
             "source_table": source.index,
             "source_runner_id": f"{race_id}-{runner_number:02d}",

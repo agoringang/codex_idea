@@ -90,8 +90,8 @@ def get_backend_status() -> BackendStatus:
         )
     elif backtest:
         backtest_note = (
-            "単勝・複勝のみの検証。"
-            "3連系などは公式払戻列の取り込み後に公開用ROIとして扱う"
+            "三連複・三連単だけを対象に検証。"
+            "公式払戻がないレースは回収率に加算しない"
         )
     else:
         backtest_note = "実データバックテストは未実行"
@@ -149,8 +149,8 @@ def get_backend_status() -> BackendStatus:
                 label="モデル学習",
                 status=model_status if metrics else "idle",
                 detail=(
-                    "win/placeモデルを時系列寄りのレース単位分割で評価。"
-                    "品質ゲート通過時のみ公開用として扱う"
+                    "着順確率モデルを時系列寄りのレース単位分割で評価。"
+                    "三連複・三連単の買い目生成だけに利用する"
                     if metrics
                     else "学習用CSV作成後にモデルを学習"
                 ),
@@ -162,9 +162,8 @@ def get_backend_status() -> BackendStatus:
                 label="推論",
                 status="running" if publishable else ("partial" if metrics else "idle"),
                 detail=(
-                    "市場確率と学習モデルのアンサンブルで"
-                    "単勝確率・複勝圏確率を計算。"
-                    "券種EVは公式払戻とオッズ時系列の追加待ち"
+                    "市場確率に寄りすぎない着順分布を作り、"
+                    "三連複・三連単の軸流し、BOX、フォーメーションを比較"
                     if metrics
                     else "モデル未作成のためサンプル推論のみ"
                 ),

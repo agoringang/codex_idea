@@ -1,27 +1,53 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import html
 import json
+import math
+import os
+import re
 from collections import defaultdict
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from .schemas import LiveSnapshot, Race
 
 
 DATA_ROOT = Path(__file__).resolve().parents[1] / "data"
 HISTORY_PATHS = (
+    DATA_ROOT / "netkeiba_2026_enriched.csv",
+    DATA_ROOT / "keiba_history_with_2026_enriched.csv",
     DATA_ROOT / "netkeiba_2026_normalized.csv",
     DATA_ROOT / "keiba_history_with_2026.csv",
     DATA_ROOT / "keiba_history_normalized.csv",
 )
+HISTORY_READ_ORDER = tuple(reversed(HISTORY_PATHS))
+REMOTE_HISTORY_URLS_ENV = "UMALAB_HISTORY_CSV_URLS"
+REMOTE_HISTORY_SHA_ENV = "UMALAB_HISTORY_CSV_SHA256S"
+REMOTE_HISTORY_CACHE_DIR_ENV = "UMALAB_HISTORY_CACHE_DIR"
 PUBLIC_RACE_WINDOW_PATH = Path(__file__).with_name("public_race_window_2026.json")
 DAY_NAMES = ["月", "火", "水", "木", "金", "土", "日"]
 TAIL_BYTES = 32 * 1024 * 1024
+FULL_READ_MAX_BYTES = 160 * 1024 * 1024
 JRA_VENUES = {"札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉"}
+JRA_COURSE_CODE_VENUES = {
+    "01": "札幌",
+    "02": "函館",
+    "03": "福島",
+    "04": "新潟",
+    "05": "東京",
+    "06": "中山",
+    "07": "中京",
+    "08": "京都",
+    "09": "阪神",
+    "10": "小倉",
+}
 
 
 def _surface_label(surface: str | None) -> str:
@@ -32,19 +58,208 @@ def _surface_label(surface: str | None) -> str:
     return surface or "不明"
 
 
-def _rating_from_odds(market_odds: float | None, finish_position: int | None) -> int:
-    if market_odds is not None and market_odds > 0:
-        return max(1, int(round(120 - min(market_odds, 100.0) * 3)))
-    if finish_position is not None:
-        return max(1, 120 - finish_position * 3)
-    return 60
+def _clean_text(value: str | None) -> str:
+    text = html.unescape(str(value or "")).replace("\xa0", " ")
+    text = re.sub(r"<[^>]*>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
-def _active_history_path() -> Path | None:
-    for path in HISTORY_PATHS:
-        if path.exists():
-            return path
-    return None
+def _estimated_start_time(race_no: int, market: str) -> str | None:
+    if race_no <= 0:
+        return None
+    jra_times = {
+        1: "09:50",
+        2: "10:20",
+        3: "10:50",
+        4: "11:20",
+        5: "12:10",
+        6: "12:40",
+        7: "13:10",
+        8: "13:40",
+        9: "14:15",
+        10: "14:50",
+        11: "15:30",
+        12: "16:10",
+    }
+    nar_times = {
+        1: "10:30",
+        2: "11:00",
+        3: "11:30",
+        4: "12:05",
+        5: "12:40",
+        6: "13:15",
+        7: "13:50",
+        8: "14:25",
+        9: "15:05",
+        10: "15:45",
+        11: "16:25",
+        12: "17:05",
+    }
+    return (jra_times if market == "JRA" else nar_times).get(race_no)
+
+
+def _start_label(row: dict[str, Any], is_finished: bool, race_no: int, market: str) -> str:
+    for column in ("start_time", "post_time", "race_time", "発走時刻"):
+        value = _clean_text(row.get(column))
+        if value:
+            match = re.search(r"\d{1,2}:\d{2}", value)
+            return match.group(0) if match else value
+    estimated = _estimated_start_time(race_no, market)
+    if estimated:
+        return f"推定 {estimated}"
+    return "結果確定" if is_finished else "時刻確認中"
+
+
+def _trusted_place_odds(row: dict[str, Any], win_odds: float | None) -> float | None:
+    place_odds = _float_value(row, "place_odds")
+    if place_odds is None or place_odds <= 1 or win_odds is None or win_odds <= 1:
+        return None
+    if place_odds > win_odds:
+        return None
+
+    legacy_estimate = round(max(1.1, min(win_odds, win_odds / 4.0)), 2)
+    conservative_estimate = round(max(1.1, min(8.0, 1.05 + max(win_odds - 1.0, 0.0) * 0.09)), 2)
+    rounded = round(place_odds, 2)
+    if abs(rounded - legacy_estimate) < 0.015:
+        return None
+    if abs(rounded - conservative_estimate) < 0.015:
+        return None
+    return place_odds
+
+
+def _row_float(row: dict[str, Any], column: str) -> float | None:
+    try:
+        value = float(str(row.get(column, "")).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _rating_from_runner_features(row: dict[str, Any]) -> int:
+    scores: list[float] = []
+    for column in (
+        "speed",
+        "condition",
+        "pace",
+        "stamina",
+        "avg_last3_speed",
+        "training_score",
+        "bloodline_score",
+        "paddock_score",
+    ):
+        value = _row_float(row, column)
+        if value is not None and value > 0:
+            scores.append(max(1.0, min(100.0, value)))
+
+    for column in (
+        "jockey_win_rate",
+        "trainer_win_rate",
+        "horse_recent_win_rate",
+        "horse_recent_place_rate",
+        "horse_distance_place_rate",
+        "horse_surface_place_rate",
+    ):
+        value = _row_float(row, column)
+        if value is not None:
+            scores.append(max(35.0, min(92.0, 48.0 + value * 58.0)))
+
+    draw_bias = _row_float(row, "draw_bias")
+    if draw_bias is not None:
+        scores.append(max(42.0, min(78.0, 58.0 + draw_bias * 9.0)))
+
+    weight_diff = _row_float(row, "horse_weight_diff")
+    if weight_diff is not None:
+        if abs(weight_diff) <= 4:
+            scores.append(66.0)
+        elif abs(weight_diff) >= 18:
+            scores.append(46.0)
+
+    if not scores:
+        return 60
+    return max(1, min(100, int(round(sum(scores) / len(scores)))))
+
+
+def _split_env_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in re.split(r"[\n,]+", value) if item.strip()]
+
+
+def _history_cache_dir() -> Path:
+    configured = os.getenv(REMOTE_HISTORY_CACHE_DIR_ENV)
+    if configured:
+        return Path(configured)
+    if os.getenv("VERCEL"):
+        return Path("/tmp/umalab-history-csv")
+    return DATA_ROOT / ".remote"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _cache_path_for_history_url(url: str) -> Path:
+    parsed = urlparse(url)
+    filename = Path(parsed.path).name or "umalab_history.csv"
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+    return _history_cache_dir() / f"{digest}-{filename}"
+
+
+def _download_history_csv(url: str, expected_sha256: str | None = None) -> Path:
+    cache_path = _cache_path_for_history_url(url)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if cache_path.exists() and cache_path.stat().st_size > 0:
+        if expected_sha256 and _sha256_file(cache_path).lower() != expected_sha256.lower():
+            cache_path.unlink(missing_ok=True)
+        else:
+            return cache_path
+
+    tmp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp")
+    request = Request(url, headers={"User-Agent": "UmaLab/0.2 history-loader"})
+    with urlopen(request, timeout=180) as response, tmp_path.open("wb") as handle:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            handle.write(chunk)
+
+    if expected_sha256:
+        actual = _sha256_file(tmp_path)
+        if actual.lower() != expected_sha256.lower():
+            tmp_path.unlink(missing_ok=True)
+            raise ValueError(f"{REMOTE_HISTORY_SHA_ENV} mismatch for {url}: expected {expected_sha256}, got {actual}")
+
+    tmp_path.replace(cache_path)
+    return cache_path
+
+
+@lru_cache(maxsize=4)
+def _remote_history_paths_from_env(urls_text: str, shas_text: str) -> tuple[Path, ...]:
+    urls = _split_env_list(urls_text)
+    shas = _split_env_list(shas_text)
+    paths: list[Path] = []
+    for index, url in enumerate(urls):
+        expected_sha = shas[index] if index < len(shas) else None
+        paths.append(_download_history_csv(url, expected_sha))
+    return tuple(paths)
+
+
+def _remote_history_paths() -> list[Path]:
+    urls_text = os.getenv(REMOTE_HISTORY_URLS_ENV, "")
+    if not urls_text.strip():
+        return []
+    return list(_remote_history_paths_from_env(urls_text, os.getenv(REMOTE_HISTORY_SHA_ENV, "")))
+
+
+def _existing_history_paths() -> list[Path]:
+    local_paths = [path for path in HISTORY_READ_ORDER if path.exists()]
+    remote_paths = _remote_history_paths()
+    return [*local_paths, *remote_paths]
 
 
 def _read_csv_header(path: Path) -> str:
@@ -63,6 +278,14 @@ def _read_tail_lines(path: Path) -> list[str]:
     if start > 0 and lines:
         lines = lines[1:]
     return lines
+
+
+def _read_data_lines(path: Path) -> list[str]:
+    if path.stat().st_size <= FULL_READ_MAX_BYTES:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            lines = handle.read().splitlines()
+        return [line for line in lines[1:] if line.strip()]
+    return _read_tail_lines(path)
 
 
 def _read_latest_date(path: Path) -> str:
@@ -90,16 +313,21 @@ def _parse_date(value: str | None) -> date | None:
         return None
 
 
-def _window_from_latest(path: Path) -> tuple[date, date] | None:
-    latest = _parse_date(_read_latest_date(path))
-    if latest is None:
+def _window_from_latest(paths: list[Path]) -> tuple[date, date] | None:
+    latest_dates = [
+        parsed
+        for parsed in (_parse_date(_read_latest_date(path)) for path in paths)
+        if parsed is not None
+    ]
+    if not latest_dates:
         return None
+    latest = max(latest_dates)
     return latest - timedelta(days=15), latest + timedelta(days=16)
 
 
 def _read_window_rows(path: Path, start_date: date, end_date: date) -> list[dict[str, Any]]:
     header = _read_csv_header(path)
-    lines = _read_tail_lines(path)
+    lines = _read_data_lines(path)
     if not header or not lines:
         return []
 
@@ -132,6 +360,63 @@ def _float_value(row: dict[str, Any], column: str, default: float | None = None)
         return default
 
 
+def _horse_weight_value(row: dict[str, Any]) -> int | None:
+    value = _int_value(row, "horse_weight", 0)
+    if not 250 <= value <= 700:
+        return None
+    return value
+
+
+def _horse_weight_diff_value(row: dict[str, Any], horse_weight: int | None) -> int | None:
+    if horse_weight is None:
+        return None
+    value = _int_value(row, "horse_weight_diff", 0)
+    if value == 0:
+        return 0
+    if abs(value) > 80:
+        return None
+    return value
+
+
+def _race_payout_items(row: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = row.get("payouts_json")
+    if not raw:
+        return []
+    try:
+        payload = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, float]] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        bet_type = str(item.get("bet_type") or item.get("betType") or "").strip()
+        selection = _clean_text(item.get("selection"))
+        payout = _float_value(
+            {"payout": item.get("payout_yen") or item.get("payoutYen")},
+            "payout",
+        )
+        if not bet_type or not selection or not payout:
+            continue
+        key = (bet_type, selection, float(payout))
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(
+            {
+                "betType": bet_type,
+                "selection": selection,
+                "payoutYen": float(payout),
+                "popularity": _int_value({"popularity": item.get("popularity")}, "popularity", 0) or None,
+            }
+        )
+    return items
+
+
 def _runner_number(row: dict[str, Any], fallback: int) -> int:
     for column in ("runner_number", "horse_number", "number", "gate"):
         value = _int_value(row, column, 0)
@@ -161,6 +446,14 @@ def _race_group_sort(item: tuple[str, list[dict[str, Any]]]) -> tuple[str, str, 
     )
 
 
+def _venue_from_race_id(race_id: str, fallback: str) -> str:
+    if len(race_id) >= 6 and race_id[:4].isdigit():
+        venue = JRA_COURSE_CODE_VENUES.get(race_id[4:6])
+        if venue:
+            return venue
+    return fallback
+
+
 def build_race_dicts_from_rows(
     rows: list[dict[str, Any]],
     *,
@@ -169,7 +462,7 @@ def build_race_dicts_from_rows(
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     grouped_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        grouped_rows[(row.get("race_id") or "").strip()].append(row)
+        grouped_rows[str(row.get("race_id") or "").strip()].append(row)
 
     races: list[dict[str, Any]] = []
     snapshots: dict[str, dict[str, Any]] = {}
@@ -186,18 +479,22 @@ def build_race_dicts_from_rows(
         if parsed_race_date is None:
             continue
         weekday = DAY_NAMES[parsed_race_date.weekday()]
-        venue = (first_row.get("venue") or "").strip() or "不明"
+        venue = _venue_from_race_id(race_id, (first_row.get("venue") or "").strip() or "不明")
         distance = first_row.get("distance") or ""
         surface = _surface_label((first_row.get("surface") or "").strip())
-        going = (first_row.get("going") or "").strip()
-        weather = (first_row.get("weather") or "").strip()
+        going = _clean_text(first_row.get("going"))
+        weather = _clean_text(first_row.get("weather"))
         race_no = f"{int(race_id[-2:])}R" if race_id[-2:].isdigit() else "--R"
+        race_no_value = _int_value(first_row, "race_no", 0)
+        if race_no_value <= 0 and race_id[-2:].isdigit():
+            race_no_value = int(race_id[-2:])
         course_parts = [f"{surface} {distance}m".strip()]
         if going:
             course_parts.append(going)
         if weather:
             course_parts.append(weather)
         course = " / ".join(part for part in course_parts if part)
+        market = "JRA" if venue in JRA_VENUES else "NAR"
 
         runners: list[dict[str, Any]] = []
         result_order: list[int] = []
@@ -206,8 +503,9 @@ def build_race_dicts_from_rows(
             gate = _gate_number(row, number)
             finish_position = _int_value(row, "finish_position", 0) or None
             market_odds = _float_value(row, "market_odds")
-            horse_weight = _int_value(row, "horse_weight", 0) or None
-            horse_weight_diff = _int_value(row, "horse_weight_diff", 0)
+            place_odds = _trusted_place_odds(row, market_odds)
+            horse_weight = _horse_weight_value(row)
+            horse_weight_diff = _horse_weight_diff_value(row, horse_weight)
             carried_weight = _float_value(row, "carried_weight")
             if finish_position is not None:
                 result_order.append(number)
@@ -222,21 +520,53 @@ def build_race_dicts_from_rows(
                 {
                     "number": number,
                     "gate": gate,
-                    "name": (row.get("horse_name") or "").strip() or f"{number}番",
-                    "jockey": (row.get("jockey") or "").strip() or "-",
+                    "name": _clean_text(row.get("horse_name")) or f"{number}番",
+                    "jockey": _clean_text(row.get("jockey")) or "-",
                     "weight": f"{carried_weight:.1f}" if carried_weight else None,
                     "carriedWeight": carried_weight,
                     "horseWeight": horse_weight,
                     "horseWeightDiff": horse_weight_diff if horse_weight is not None else None,
                     "age": _int_value(row, "age", 0) or None,
-                    "sex": (row.get("sex") or "").strip() or None,
-                    "trainer": (row.get("trainer") or "").strip() or None,
-                    "runningStyle": (row.get("running_style") or "").strip() or None,
+                    "sex": _clean_text(row.get("sex")) or None,
+                    "trainer": _clean_text(row.get("trainer")) or None,
+                    "runningStyle": _clean_text(row.get("running_style")) or None,
                     "recentRecord": _recent_record(row),
-                    "sire": (row.get("sire") or "").strip() or None,
-                    "damSire": (row.get("dam_sire") or "").strip() or None,
-                    "rating": _rating_from_odds(market_odds, finish_position),
-                    "odds": float(market_odds or 1.0),
+                    "daysSinceLastRun": _int_value(row, "days_since_last_run", 0) or None,
+                    "avgLast3Speed": _float_value(row, "avg_last3_speed"),
+                    "bestTime": _float_value(row, "best_time"),
+                    "last600m": _float_value(row, "last600m"),
+                    "jockeyWinRate": _float_value(row, "jockey_win_rate"),
+                    "trainerWinRate": _float_value(row, "trainer_win_rate"),
+                    "horseRecentWinRate": _float_value(row, "horse_recent_win_rate"),
+                    "horseRecentPlaceRate": _float_value(row, "horse_recent_place_rate"),
+                    "horseDistancePlaceRate": _float_value(row, "horse_distance_place_rate"),
+                    "horseSurfacePlaceRate": _float_value(row, "horse_surface_place_rate"),
+                    "trainingScore": _float_value(row, "training_score"),
+                    "bloodlineScore": _float_value(row, "bloodline_score"),
+                    "paddockScore": _float_value(row, "paddock_score"),
+                    "oddsDelta": _float_value(row, "odds_delta"),
+                    "oddsDelta5m": _float_value(row, "odds_delta_5m"),
+                    "oddsDelta15m": _float_value(row, "odds_delta_15m"),
+                    "oddsVolatility": _float_value(row, "odds_volatility"),
+                    "ticketPoolShare": _float_value(row, "ticket_pool_share"),
+                    "lap3f": _float_value(row, "lap_3f"),
+                    "lap4f": _float_value(row, "lap_4f"),
+                    "bodyWeightAnnouncedAt": _clean_text(row.get("body_weight_announced_at")) or None,
+                    "payoutWin": _float_value(row, "payout_win"),
+                    "payoutPlace": _float_value(row, "payout_place"),
+                    "payoutQuinella": _float_value(row, "payout_quinella"),
+                    "payoutWide": _float_value(row, "payout_wide"),
+                    "payoutExacta": _float_value(row, "payout_exacta"),
+                    "payoutTrio": _float_value(row, "payout_trio"),
+                    "payoutTrifecta": _float_value(row, "payout_trifecta"),
+                    "drawBias": _float_value(row, "draw_bias"),
+                    "sireId": _clean_text(row.get("sire_id")) or None,
+                    "sire": _clean_text(row.get("sire")) or None,
+                    "damSireId": _clean_text(row.get("dam_sire_id")) or None,
+                    "damSire": _clean_text(row.get("dam_sire")) or None,
+                    "rating": _rating_from_runner_features(row),
+                    "odds": float(market_odds) if market_odds and market_odds > 1 else 0.0,
+                    "placeOdds": place_odds,
                     "tags": tags,
                 }
             )
@@ -253,7 +583,6 @@ def build_race_dicts_from_rows(
             if _runner_number(row, 0) > 0
         ]
         is_finished = bool(result_order)
-        market = "JRA" if venue in JRA_VENUES else "NAR"
         source_url = f"https://db.netkeiba.com/race/{race_id}/"
         if not is_finished:
             host = "race.netkeiba.com" if market == "JRA" else "nar.netkeiba.com"
@@ -266,7 +595,7 @@ def build_race_dicts_from_rows(
             "venue": venue,
             "meeting": f"{venue} 実データ",
             "raceNo": race_no,
-            "start": "結果確定" if is_finished else "出走表",
+            "start": _start_label(first_row, is_finished, race_no_value, market),
             "title": f"{venue}{race_no} 実データ",
             "grade": market,
             "market": market,
@@ -277,6 +606,7 @@ def build_race_dicts_from_rows(
             "sourceUrl": source_url,
             "sourceCheckedAt": checked_at,
             "verificationStatus": "verified",
+            "payouts": _race_payout_items(first_row),
             "runners": runners,
         }
         snapshot_dict = {
@@ -319,6 +649,39 @@ def _load_real_race_state(
         _read_window_rows(path, start_date, end_date),
         source_name=path.name,
     )
+
+
+def _merge_race_states(
+    states: list[tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    merged_races: dict[str, dict[str, Any]] = {}
+    merged_snapshots: dict[str, dict[str, Any]] = {}
+    for races, snapshots in states:
+        for race in races:
+            race_id = str(race.get("id") or "")
+            if race_id:
+                merged_races[race_id] = race
+        merged_snapshots.update(snapshots)
+    return _collapse_duplicate_races(list(merged_races.values())), merged_snapshots
+
+
+def _load_history_sources(
+    paths: list[Path],
+    start: date,
+    end: date,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    states: list[tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]] = []
+    for path in paths:
+        file_mtime_ns = path.stat().st_mtime_ns
+        states.append(
+            _load_real_race_state(
+                str(path),
+                file_mtime_ns,
+                start.isoformat(),
+                end.isoformat(),
+            )
+        )
+    return _merge_race_states(states)
 
 
 def _recent_record(row: dict[str, Any]) -> str | None:
@@ -391,7 +754,7 @@ def _resolve_window(start_date: str | None, end_date: str | None, path: Path) ->
     end = _parse_date(end_date)
     if start is not None and end is not None:
         return start, end
-    return _window_from_latest(path)
+    return _window_from_latest([path])
 
 
 def _sort_race_dict(race: dict[str, Any]) -> tuple[str, str, int, str]:
@@ -404,17 +767,156 @@ def _sort_race_dict(race: dict[str, Any]) -> tuple[str, str, int, str]:
     )
 
 
+def _race_display_key(race: dict[str, Any]) -> tuple[str, str, int]:
+    date_text = str(race.get("date") or "")
+    venue = str(race.get("venue") or "")
+    race_no = _int_value({"race_no": str(race.get("raceNo") or "").replace("R", "")}, "race_no", 999)
+    return date_text, venue, race_no
+
+
+def _race_feature_count(race: dict[str, Any]) -> int:
+    feature_keys = {
+        "horseWeight",
+        "horseWeightDiff",
+        "daysSinceLastRun",
+        "avgLast3Speed",
+        "last600m",
+        "jockeyWinRate",
+        "trainerWinRate",
+        "horseRecentWinRate",
+        "horseRecentPlaceRate",
+        "horseDistancePlaceRate",
+        "horseSurfacePlaceRate",
+        "trainingScore",
+        "bloodlineScore",
+        "paddockScore",
+        "oddsDelta",
+        "ticketPoolShare",
+        "drawBias",
+        "sire",
+        "damSire",
+    }
+    runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+    count = 0
+    for runner in runners:
+        if not isinstance(runner, dict):
+            continue
+        count += sum(1 for key in feature_keys if runner.get(key) not in (None, "", []))
+    return count
+
+
+def _race_quality_score(race: dict[str, Any]) -> tuple[int, int, int, int, str]:
+    source = str(race.get("source") or "")
+    source_score = 0
+    if "live scrape" in source:
+        source_score = 4
+    elif "netkeiba_2026" in source:
+        source_score = 3
+    elif "with_2026" in source:
+        source_score = 2
+    elif "normalized" in source:
+        source_score = 1
+    runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+    result_score = 1 if str(race.get("status") or "") == "finished" else 0
+    start = str(race.get("start") or "")
+    start_score = 1 if re.search(r"\d{1,2}:\d{2}", start) and not start.startswith("推定") else 0
+    return (
+        source_score,
+        result_score,
+        start_score,
+        len(runners) + _race_feature_count(race),
+        str(race.get("sourceCheckedAt") or ""),
+    )
+
+
+def _sanitize_race_payload(race: dict[str, Any]) -> dict[str, Any]:
+    race = deepcopy(race)
+    course = race.get("course")
+    if isinstance(course, str):
+        race["course"] = _clean_text(course)
+
+    runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+    for runner in runners:
+        if not isinstance(runner, dict):
+            continue
+
+        try:
+            horse_weight = int(float(str(runner.get("horseWeight"))))
+        except (TypeError, ValueError):
+            horse_weight = 0
+        if not 250 <= horse_weight <= 700:
+            runner["horseWeight"] = None
+            runner["horseWeightDiff"] = None
+        else:
+            runner["horseWeight"] = horse_weight
+            try:
+                horse_weight_diff = int(float(str(runner.get("horseWeightDiff"))))
+            except (TypeError, ValueError):
+                horse_weight_diff = 0
+            runner["horseWeightDiff"] = horse_weight_diff if abs(horse_weight_diff) <= 80 else None
+
+        try:
+            win_odds = float(str(runner.get("odds")))
+        except (TypeError, ValueError):
+            win_odds = 0.0
+        if not math.isfinite(win_odds) or win_odds <= 1:
+            runner["odds"] = 0.0
+            runner["placeOdds"] = None
+            continue
+        runner["odds"] = win_odds
+
+        try:
+            place_odds = float(str(runner.get("placeOdds")))
+        except (TypeError, ValueError):
+            place_odds = 0.0
+        if not math.isfinite(place_odds) or place_odds <= 1 or place_odds > win_odds:
+            runner["placeOdds"] = None
+        else:
+            runner["placeOdds"] = place_odds
+
+    return race
+
+
+def _repair_race_start_time(race: dict[str, Any]) -> dict[str, Any]:
+    start = str(race.get("start") or "")
+    if re.search(r"\d{1,2}:\d{2}", start):
+        return race
+
+    race_no = _int_value({"race_no": str(race.get("raceNo") or "").replace("R", "")}, "race_no", 0)
+    market = str(race.get("market") or "")
+    if market not in {"JRA", "NAR"}:
+        market = "JRA" if str(race.get("venue") or "") in JRA_VENUES else "NAR"
+    estimated = _estimated_start_time(race_no, market)
+    if estimated:
+        race = deepcopy(race)
+        race["start"] = f"推定 {estimated}"
+    return race
+
+
+def _collapse_duplicate_races(races: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    collapsed: dict[tuple[str, str, int], dict[str, Any]] = {}
+    for race in races:
+        race = _sanitize_race_payload(_repair_race_start_time(race))
+        key = _race_display_key(race)
+        if key[2] == 999:
+            key = (key[0], key[1], hash(str(race.get("id") or "")))
+        current = collapsed.get(key)
+        if current is None or _race_quality_score(race) >= _race_quality_score(current):
+            collapsed[key] = race
+    return sorted(collapsed.values(), key=_sort_race_dict)
+
+
 def _resolve_requested_window(
     start_date: str | None,
     end_date: str | None,
-    path: Path | None,
+    paths: list[Path],
 ) -> tuple[date, date] | None:
     start = _parse_date(start_date)
     end = _parse_date(end_date)
     if start is not None and end is not None:
         return start, end
-    if path is not None:
-        return _window_from_latest(path)
+    if paths:
+        return _window_from_latest(paths)
     fallback_latest = date(2026, 5, 5)
     return fallback_latest - timedelta(days=15), fallback_latest + timedelta(days=16)
 
@@ -422,18 +924,17 @@ def _resolve_requested_window(
 def get_races(start_date: str | None = None, end_date: str | None = None) -> list[Race]:
     """Return verified race cards built from normalized local history CSVs."""
 
-    path = _active_history_path()
-    window = _resolve_requested_window(start_date, end_date, path)
+    paths = _existing_history_paths()
+    window = _resolve_requested_window(start_date, end_date, paths)
     if window is None:
         return []
     start, end = window
 
     raw_races: list[dict[str, Any]]
-    if path is None:
+    if not paths:
         raw_races, _ = _load_public_window(start, end)
     else:
-        file_mtime_ns = path.stat().st_mtime_ns
-        raw_races, _ = _load_real_race_state(str(path), file_mtime_ns, start.isoformat(), end.isoformat())
+        raw_races, _ = _load_history_sources(paths, start, end)
 
     try:
         from .race_storage import fetch_race_cards
@@ -442,28 +943,21 @@ def get_races(start_date: str | None = None, end_date: str | None = None) -> lis
     except Exception:
         stored_races = []
 
-    merged = {str(race.get("id") or ""): race for race in raw_races}
-    for race in stored_races:
-        race_id = str(race.get("id") or "")
-        if race_id:
-            merged[race_id] = race
-
-    return [Race(**deepcopy(race)) for race in sorted(merged.values(), key=_sort_race_dict)]
+    return [Race(**deepcopy(race)) for race in _collapse_duplicate_races([*raw_races, *stored_races])]
 
 
 def get_snapshots() -> dict[str, LiveSnapshot]:
     """Return live snapshots derived from the same verified history source."""
 
-    path = _active_history_path()
-    if path is None:
+    paths = _existing_history_paths()
+    if not paths:
         start = date(2026, 4, 20)
         end = date(2026, 5, 20)
         _, raw_snapshots = _load_public_window(start, end)
         return {race_id: LiveSnapshot(**deepcopy(snapshot)) for race_id, snapshot in raw_snapshots.items()}
-    window = _window_from_latest(path)
+    window = _window_from_latest(paths)
     if window is None:
         return {}
     start, end = window
-    file_mtime_ns = path.stat().st_mtime_ns
-    _, raw_snapshots = _load_real_race_state(str(path), file_mtime_ns, start.isoformat(), end.isoformat())
+    _, raw_snapshots = _load_history_sources(paths, start, end)
     return {race_id: LiveSnapshot(**deepcopy(snapshot)) for race_id, snapshot in raw_snapshots.items()}

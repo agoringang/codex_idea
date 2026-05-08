@@ -34,6 +34,9 @@ from app.ml_pipeline import (
 from app.risk_model import CalibratedBlendModel, market_probability
 
 
+JRA_VENUES = {"札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉"}
+
+
 TARGETS = {
     "is_win": {
         "label": "win",
@@ -50,6 +53,15 @@ TARGETS = {
         "positive": "finish_position <= 3",
         "market_multiplier": 3.0,
     },
+}
+
+MARKET_DIRECT_FEATURES = {
+    "market_odds",
+    "market_win_probability",
+    "market_place_probability",
+    "odds_rank",
+    "odds_delta",
+    "ticket_pool_share",
 }
 
 
@@ -195,6 +207,23 @@ def race_time_split(
     return fit_index, calibration_index, holdout_index
 
 
+def inferred_market(frame: pd.DataFrame) -> pd.Series:
+    if "market" in frame.columns:
+        market = frame["market"].astype(str).str.upper()
+        return market.where(market.isin(["JRA", "NAR"]), "NAR")
+    venue = frame.get("venue", pd.Series("", index=frame.index)).astype(str)
+    return pd.Series(np.where(venue.isin(JRA_VENUES), "JRA", "NAR"), index=frame.index)
+
+
+def filter_index_by_market(frame: pd.DataFrame, index: pd.Index, market: str) -> pd.Index:
+    market = market.upper()
+    if market not in {"JRA", "NAR"}:
+        return index
+    subset = frame.loc[index]
+    mask = inferred_market(subset) == market
+    return subset.index[mask]
+
+
 def calibrate_and_blend(
     base_model: Pipeline,
     calibration: pd.DataFrame,
@@ -202,6 +231,8 @@ def calibrate_and_blend(
     features: list[str],
     fallback_rate: float,
     seed: int,
+    market_weight_cap: float,
+    market_weight_step: float,
 ) -> tuple[CalibratedBlendModel, str, float]:
     y_cal = calibration[target].astype(int)
     raw = base_model.predict_proba(calibration[features])[:, 1]
@@ -225,7 +256,19 @@ def calibrate_and_blend(
     )
     calibrated = base.predict_positive(calibration)
     market = market_probability(calibration, target)
-    candidates = [round(value, 2) for value in np.linspace(0.0, 1.0, 11)]
+    cap = float(np.clip(market_weight_cap, 0, 1))
+    step = max(0.01, min(float(market_weight_step), 1.0))
+    candidates = sorted(
+        {
+            0.0,
+            round(cap, 2),
+            *[
+                round(value, 2)
+                for value in np.arange(0.0, cap + step / 2, step)
+                if value <= cap + 1e-9
+            ],
+        }
+    )
     best_weight = min(
         candidates,
         key=lambda weight: brier_score_loss(y_cal, (1 - weight) * calibrated + weight * market),
@@ -274,6 +317,8 @@ def train_candidate(
     features: list[str],
     seed: int,
     max_iter: int,
+    market_weight_cap: float,
+    market_weight_step: float,
 ) -> tuple[CalibratedBlendModel, dict[str, Any]]:
     fit = frame.loc[fit_index]
     calibration = frame.loc[calibration_index]
@@ -302,6 +347,8 @@ def train_candidate(
         active_features,
         train_positive_rate,
         seed,
+        market_weight_cap,
+        market_weight_step,
     )
     metrics = {
         "model": spec.name,
@@ -335,6 +382,46 @@ def choose_best(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
+def market_dependency_metrics(holdout: pd.DataFrame, score_column: str) -> dict[str, Any]:
+    rows: list[dict[str, float | int]] = []
+    for _, race in holdout.groupby("race_id", sort=False):
+        if race.empty:
+            continue
+        predicted = race.sort_values(score_column, ascending=False).iloc[0]
+        odds = pd.to_numeric(race.get("market_odds"), errors="coerce")
+        if odds.isna().all():
+            continue
+        favorite_index = odds.idxmin()
+        favorite = race.loc[favorite_index]
+        winner = race.loc[race["finish_position"] == 1]
+        predicted_number = int(predicted["runner_number"])
+        favorite_number = int(favorite["runner_number"])
+        rows.append(
+            {
+                "predicted_is_favorite": int(predicted_number == favorite_number),
+                "favorite_won": int(
+                    not winner.empty and favorite_number == int(winner.iloc[0]["runner_number"])
+                ),
+                "predicted_odds": float(predicted.get("market_odds") or np.nan),
+                "favorite_odds": float(favorite.get("market_odds") or np.nan),
+            }
+        )
+    if not rows:
+        return {
+            "races_with_odds": 0,
+            "predicted_top1_favorite_rate": None,
+            "market_favorite_win_rate": None,
+        }
+    metrics = pd.DataFrame(rows)
+    return {
+        "races_with_odds": int(len(metrics)),
+        "predicted_top1_favorite_rate": float(metrics["predicted_is_favorite"].mean()),
+        "market_favorite_win_rate": float(metrics["favorite_won"].mean()),
+        "predicted_top1_mean_odds": float(metrics["predicted_odds"].mean()),
+        "market_favorite_mean_odds": float(metrics["favorite_odds"].mean()),
+    }
+
+
 def rank_holdout_metrics(
     frame: pd.DataFrame,
     holdout_index: pd.Index,
@@ -350,10 +437,15 @@ def rank_holdout_metrics(
     holdout["p_second"] = np.clip(p_top2 - p_win, 0, 1)
     holdout["p_third"] = np.clip(p_top3 - p_top2, 0, 1)
     holdout["p_out"] = np.clip(1 - p_top3, 0, 1)
+    holdout["rank_score"] = (
+        holdout["p_win"] * 1.0
+        + holdout["p_second"] * 0.42
+        + holdout["p_third"] * 0.18
+    )
 
     race_rows: list[dict[str, Any]] = []
     for race_id, race in holdout.groupby("race_id", sort=False):
-        ordered_win = race.sort_values("p_win", ascending=False)
+        ordered_win = race.sort_values("rank_score", ascending=False)
         ordered_place = race.sort_values("p_third", ascending=False)
         winner = race.loc[race["finish_position"] == 1]
         top3 = set(race.loc[race["finish_position"] <= 3, "runner_number"].astype(int).tolist())
@@ -381,8 +473,25 @@ def rank_holdout_metrics(
         "winner_top1_rate": float(race_metrics["winner_top1"].mean()),
         "winner_in_top3_rate": float(race_metrics["winner_in_top3"].mean()),
         "top3_exact_set_rate": float(race_metrics["top3_exact_set"].mean()),
+        "market_dependency": market_dependency_metrics(holdout, "rank_score"),
         "rank_probability_columns": ["p_win", "p_second", "p_third", "p_out"],
     }
+
+
+def apply_feature_mode(
+    features: list[str],
+    numeric_features: list[str],
+    categorical_features: list[str],
+    feature_mode: str,
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    if feature_mode == "anti_market":
+        removed = [feature for feature in features if feature in MARKET_DIRECT_FEATURES]
+        numeric_features = [
+            feature for feature in numeric_features if feature not in MARKET_DIRECT_FEATURES
+        ]
+        features = [feature for feature in features if feature not in MARKET_DIRECT_FEATURES]
+        return features, numeric_features, categorical_features, removed
+    return features, numeric_features, categorical_features, []
 
 
 def risk_router(best_metrics: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -418,6 +527,61 @@ def risk_router(best_metrics: dict[str, dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def train_best_bundle(
+    frame: pd.DataFrame,
+    fit_index: pd.Index,
+    calibration_index: pd.Index,
+    holdout_index: pd.Index,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    features, numeric_features, categorical_features = select_training_features(frame, fit_index)
+    features, numeric_features, categorical_features, removed_features = apply_feature_mode(
+        features,
+        numeric_features,
+        categorical_features,
+        args.feature_mode,
+    )
+
+    all_metrics: dict[str, list[dict[str, Any]]] = {target: [] for target in TARGETS}
+    trained_models: dict[str, dict[str, CalibratedBlendModel]] = {target: {} for target in TARGETS}
+    for target in TARGETS:
+        for spec in model_specs(args.include_hgb):
+            model, metrics = train_candidate(
+                spec,
+                frame,
+                target,
+                fit_index,
+                calibration_index,
+                holdout_index,
+                numeric_features,
+                categorical_features,
+                features,
+                args.seed,
+                args.max_iter,
+                args.market_weight_cap,
+                args.market_weight_step,
+            )
+            all_metrics[target].append(metrics)
+            trained_models[target][spec.name] = model
+
+    best_metrics = {target: choose_best(metrics) for target, metrics in all_metrics.items()}
+    best_models = {
+        target: trained_models[target][metrics["model"]]
+        for target, metrics in best_metrics.items()
+    }
+    return {
+        "targets": all_metrics,
+        "best": best_metrics,
+        "models": best_models,
+        "rank_holdout_2026": rank_holdout_metrics(frame, holdout_index, best_models),
+        "risk_router": risk_router(best_metrics),
+        "numeric_features": numeric_features,
+        "categorical_features": categorical_features,
+        "features": features,
+        "removed_market_features": removed_features,
+    }
+
+
 def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
     best = {}
     for target, metrics in payload["best"].items():
@@ -437,6 +601,10 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "best": best,
         "rank_holdout_2026": payload["rank_holdout_2026"],
         "risk_router": payload["risk_router"],
+        "segment_metrics": {
+            market: metrics.get("rank_holdout_2026", {})
+            for market, metrics in payload.get("segment_metrics", {}).items()
+        },
         "metrics_path": payload["metrics_path"],
         "artifact_path": payload["artifact_path"],
     }
@@ -456,11 +624,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-end-date", default="2025-12-31")
     parser.add_argument("--holdout-start-date", default="2026-01-01")
     parser.add_argument("--holdout-end-date", default="")
+    parser.add_argument("--train-market", choices=["", "JRA", "NAR"], default="")
+    parser.add_argument("--holdout-market", choices=["", "JRA", "NAR"], default="")
+    parser.add_argument(
+        "--segment-by-market",
+        action="store_true",
+        help="Train additional JRA/NAR specialist models in the same artifact.",
+    )
     parser.add_argument("--calibration-fraction", type=float, default=0.15)
     parser.add_argument("--train-race-limit", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-iter", type=int, default=35)
     parser.add_argument("--include-hgb", action="store_true")
+    parser.add_argument(
+        "--feature-mode",
+        choices=["all", "anti_market"],
+        default="all",
+        help="anti_market removes direct odds/popularity features from the trained model.",
+    )
+    parser.add_argument(
+        "--market-weight-cap",
+        type=float,
+        default=1.0,
+        help="Upper limit for blending calibrated model probabilities with market probabilities.",
+    )
+    parser.add_argument("--market-weight-step", type=float, default=0.05)
     return parser
 
 
@@ -475,35 +663,29 @@ def main() -> None:
         calibration_fraction=args.calibration_fraction,
         train_race_limit=args.train_race_limit,
     )
-    features, numeric_features, categorical_features = select_training_features(frame, fit_index)
-
-    all_metrics: dict[str, list[dict[str, Any]]] = {target: [] for target in TARGETS}
-    trained_models: dict[str, dict[str, CalibratedBlendModel]] = {target: {} for target in TARGETS}
-    for target in TARGETS:
-        for spec in model_specs(args.include_hgb):
-            model, metrics = train_candidate(
-                spec,
+    if args.train_market:
+        fit_index = filter_index_by_market(frame, fit_index, args.train_market)
+        calibration_index = filter_index_by_market(frame, calibration_index, args.train_market)
+    if args.holdout_market:
+        holdout_index = filter_index_by_market(frame, holdout_index, args.holdout_market)
+    if len(fit_index) == 0 or len(calibration_index) == 0 or len(holdout_index) == 0:
+        raise ValueError("market filters produced an empty fit/calibration/holdout split")
+    bundle = train_best_bundle(frame, fit_index, calibration_index, holdout_index, args)
+    segment_bundles: dict[str, dict[str, Any]] = {}
+    if args.segment_by_market:
+        for market in ("JRA", "NAR"):
+            segment_fit = filter_index_by_market(frame, fit_index, market)
+            segment_calibration = filter_index_by_market(frame, calibration_index, market)
+            segment_holdout = filter_index_by_market(frame, holdout_index, market)
+            if len(segment_fit) == 0 or len(segment_calibration) == 0 or len(segment_holdout) == 0:
+                continue
+            segment_bundles[market] = train_best_bundle(
                 frame,
-                target,
-                fit_index,
-                calibration_index,
-                holdout_index,
-                numeric_features,
-                categorical_features,
-                features,
-                args.seed,
-                args.max_iter,
+                segment_fit,
+                segment_calibration,
+                segment_holdout,
+                args,
             )
-            all_metrics[target].append(metrics)
-            trained_models[target][spec.name] = model
-
-    best_metrics = {target: choose_best(metrics) for target, metrics in all_metrics.items()}
-    best_models = {
-        target: trained_models[target][metrics["model"]]
-        for target, metrics in best_metrics.items()
-    }
-    rank_metrics = rank_holdout_metrics(frame, holdout_index, best_models)
-    router = risk_router(best_metrics)
 
     payload = {
         "trained_at": datetime.now(timezone.utc).isoformat(),
@@ -519,22 +701,55 @@ def main() -> None:
             "train_end_date": args.train_end_date,
             "holdout_start_date": args.holdout_start_date,
             "holdout_end_date": args.holdout_end_date or None,
+            "train_market": args.train_market or "ALL",
+            "holdout_market": args.holdout_market or "ALL",
         },
-        "targets": all_metrics,
-        "best": best_metrics,
-        "rank_holdout_2026": rank_metrics,
-        "risk_router": router,
+        "feature_mode": args.feature_mode,
+        "segment_by_market": args.segment_by_market,
+        "removed_market_features": bundle["removed_market_features"],
+        "market_weight_cap": args.market_weight_cap,
+        "market_weight_step": args.market_weight_step,
+        "targets": bundle["targets"],
+        "best": bundle["best"],
+        "rank_holdout_2026": bundle["rank_holdout_2026"],
+        "risk_router": bundle["risk_router"],
+        "segment_metrics": {
+            market: {
+                "best": segment["best"],
+                "rank_holdout_2026": segment["rank_holdout_2026"],
+                "risk_router": segment["risk_router"],
+                "active_numeric_features": segment["numeric_features"],
+                "active_categorical_features": segment["categorical_features"],
+            }
+            for market, segment in segment_bundles.items()
+        },
         "feature_presence": feature_presence(frame),
-        "active_numeric_features": numeric_features,
-        "active_categorical_features": categorical_features,
+        "active_numeric_features": bundle["numeric_features"],
+        "active_categorical_features": bundle["categorical_features"],
     }
 
     artifact = {
-        "models": best_models,
+        "models": bundle["models"],
+        "segment_models": {
+            market: {
+                "models": segment["models"],
+                "metrics": {
+                    "best": segment["best"],
+                    "rank_holdout_2026": segment["rank_holdout_2026"],
+                    "risk_router": segment["risk_router"],
+                },
+                "numeric_features": segment["numeric_features"],
+                "categorical_features": segment["categorical_features"],
+            }
+            for market, segment in segment_bundles.items()
+        },
         "metrics": payload,
-        "numeric_features": numeric_features,
-        "categorical_features": categorical_features,
+        "numeric_features": bundle["numeric_features"],
+        "categorical_features": bundle["categorical_features"],
         "rank_probability_columns": ["p_win", "p_second", "p_third", "p_out"],
+        "feature_mode": args.feature_mode,
+        "removed_market_features": bundle["removed_market_features"],
+        "market_weight_cap": args.market_weight_cap,
     }
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

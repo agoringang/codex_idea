@@ -124,26 +124,34 @@ def _supabase_all_history(
 ) -> Dict[str, List[Dict[str, Any]]] | None:
     if _supabase_config() is None:
         return None
-    query_parts = [
-        ("select", "race_id,race_date,prediction,result,metadata,created_at"),
-        ("order", "race_date.desc"),
-        ("limit", "2000"),
-    ]
-    if start_date:
-        query_parts.append(("race_date", f"gte.{start_date}"))
-    if end_date:
-        query_parts.append(("race_date", f"lte.{end_date}"))
-    query = urlencode(query_parts, safe=".,")
-    try:
-        rows = _supabase_request(f"{SUPABASE_TABLE}?{query}")
-    except (RuntimeError, TimeoutError, URLError, OSError, ValueError):
-        return None
-    if not isinstance(rows, list):
-        return None
+    rows: list[dict[str, Any]] = []
+    page_size = 1000
+    offset = 0
+    while True:
+        query_parts = [
+            ("select", "race_id,race_date,prediction,result,metadata,created_at"),
+            ("order", "race_date.desc"),
+            ("limit", str(page_size)),
+            ("offset", str(offset)),
+        ]
+        if start_date:
+            query_parts.append(("race_date", f"gte.{start_date}"))
+        if end_date:
+            query_parts.append(("race_date", f"lte.{end_date}"))
+        query = urlencode(query_parts, safe=".,")
+        try:
+            page = _supabase_request(f"{SUPABASE_TABLE}?{query}")
+        except (RuntimeError, TimeoutError, URLError, OSError, ValueError):
+            return None
+        if not isinstance(page, list):
+            return None
+        rows.extend(row for row in page if isinstance(row, dict))
+        if len(page) < page_size:
+            break
+        offset += page_size
+
     history: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
-        if not isinstance(row, dict):
-            continue
         race_date = str(row.get("race_date") or "")
         if not race_date:
             continue

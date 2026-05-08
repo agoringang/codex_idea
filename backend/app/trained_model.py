@@ -20,6 +20,7 @@ from .schemas import RunnerInput
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_PATH = BACKEND_ROOT / "models/racequant/latest.joblib"
+ANTI_MARKET_MODEL_PATH = BACKEND_ROOT / "models/racequant_anti_market_full/holdout_artifact.joblib"
 HOLDOUT_MODEL_PATH = BACKEND_ROOT / "models/racequant_holdout_2026/holdout_artifact.joblib"
 MODEL_URL_ENV = "RACEQUANT_MODEL_URL"
 MODEL_SHA_ENV = "RACEQUANT_MODEL_SHA256"
@@ -123,6 +124,8 @@ def configured_model_path() -> Path:
         return Path(configured)
     if HOLDOUT_MODEL_PATH.exists():
         return HOLDOUT_MODEL_PATH
+    if ANTI_MARKET_MODEL_PATH.exists():
+        return ANTI_MARKET_MODEL_PATH
     return DEFAULT_MODEL_PATH
 
 
@@ -176,7 +179,23 @@ def _load_configured_artifact(model_path: str) -> dict[str, Any] | None:
     return load_artifact(model_path)
 
 
-def predict_probabilities(runners: list[RunnerInput]) -> RunnerProbabilities | None:
+def _artifact_models(artifact: dict[str, Any], market: str | None) -> tuple[dict[str, Any], str | None]:
+    market_key = str(market or "").upper()
+    segments = artifact.get("segment_models") or artifact.get("segments")
+    if market_key and isinstance(segments, dict):
+        segment = segments.get(market_key) or segments.get(market_key.lower())
+        if isinstance(segment, dict):
+            models = segment.get("models", segment)
+            if isinstance(models, dict) and (models.get("is_win") or models.get("win")):
+                return models, market_key
+    models = artifact.get("models", {})
+    return models if isinstance(models, dict) else {}, None
+
+
+def predict_probabilities(
+    runners: list[RunnerInput],
+    market: str | None = None,
+) -> RunnerProbabilities | None:
     model_path = configured_model_path()
     try:
         artifact = _load_configured_artifact(str(model_path))
@@ -185,7 +204,7 @@ def predict_probabilities(runners: list[RunnerInput]) -> RunnerProbabilities | N
     if artifact is None:
         return None
 
-    models = artifact.get("models", {})
+    models, segment = _artifact_models(artifact, market)
     win_model = models.get("is_win") or models.get("win")
     top2_model = models.get("is_top2")
     place_model = models.get("is_place") or models.get("place")
@@ -236,5 +255,9 @@ def predict_probabilities(runners: list[RunnerInput]) -> RunnerProbabilities | N
         second=second_probabilities,
         third=third_probabilities,
         out=out_probabilities,
-        model_source=display_model_path(model_path),
+        model_source=(
+            f"{display_model_path(model_path)}#{segment}"
+            if segment
+            else display_model_path(model_path)
+        ),
     )

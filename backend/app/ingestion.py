@@ -13,7 +13,7 @@ from typing import Any
 from .data_sources import build_race_dicts_from_rows
 from .history import get_all_history, record_prediction
 from .model import predict_race
-from .race_storage import race_storage_available, record_ingest_run, upsert_race_cards
+from .race_storage import fetch_race_cards, race_storage_available, record_ingest_run, upsert_race_cards
 from .schemas import RaceRequest, RunnerInput
 
 
@@ -40,9 +40,10 @@ def _read_rows(path: Path) -> list[dict[str, Any]]:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
-def _date_range_for_days(days: int) -> tuple[str, str]:
-    end = datetime.now(JST).date()
-    start = end - timedelta(days=max(days - 1, 0))
+def _date_range_for_days(days: int, days_ahead: int = 0) -> tuple[str, str]:
+    today = datetime.now(JST).date()
+    start = today - timedelta(days=max(days - 1, 0))
+    end = today + timedelta(days=max(days_ahead, 0))
     return start.isoformat(), end.isoformat()
 
 
@@ -59,6 +60,29 @@ def _safe_int(value: Any, default: int) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _estimated_place_odds(win_odds: float) -> float:
+    # Do not manufacture huge place odds from a longshot win price. When live
+    # place odds are missing, keep the estimate conservative so EV cannot be
+    # inflated by synthetic data.
+    return max(1.1, min(8.0, 1.05 + max(win_odds - 1.0, 0.0) * 0.09))
+
+
+def _trusted_place_odds(win_odds: float, value: Any) -> float | None:
+    place_odds = _safe_float(value, 0.0)
+    if place_odds <= 1 or place_odds > max(win_odds, 1.1):
+        return None
+
+    # Older netkeiba imports filled missing place odds with win_odds / 4. Those
+    # synthetic values look plausible for longshots but must not drive staking.
+    legacy_estimate = round(max(1.1, min(win_odds, win_odds / 4.0)), 2)
+    conservative_estimate = round(_estimated_place_odds(win_odds), 2)
+    if abs(round(place_odds, 2) - legacy_estimate) < 0.015:
+        return None
+    if abs(round(place_odds, 2) - conservative_estimate) < 0.015:
+        return None
+    return place_odds
 
 
 def _race_request_from_dict(race: dict[str, Any]) -> RaceRequest:
@@ -83,6 +107,7 @@ def _race_request_from_dict(race: dict[str, Any]) -> RaceRequest:
         number = _safe_int(runner.get("number"), index)
         odds = max(_safe_float(runner.get("odds"), 1.1), 1.1)
         rating = max(1.0, min(100.0, _safe_float(runner.get("rating"), 60.0)))
+        trusted_place_odds = _trusted_place_odds(odds, runner.get("placeOdds") or runner.get("place_odds"))
         runner_inputs.append(
             RunnerInput(
                 id=f"{race.get('id')}-{number}",
@@ -90,7 +115,7 @@ def _race_request_from_dict(race: dict[str, Any]) -> RaceRequest:
                 number=number,
                 name=str(runner.get("name") or f"{number}番"),
                 market_odds=odds,
-                place_odds=max(1.1, odds * 0.32),
+                place_odds=trusted_place_odds or 1.1,
                 speed=rating,
                 stamina=rating,
                 pace=rating,
@@ -109,7 +134,25 @@ def _race_request_from_dict(race: dict[str, Any]) -> RaceRequest:
                 running_style=runner.get("runningStyle"),
                 sire=runner.get("sire"),
                 dam_sire=runner.get("damSire"),
+                days_since_last_run=runner.get("daysSinceLastRun"),
+                avg_last3_speed=runner.get("avgLast3Speed"),
+                best_time=runner.get("bestTime"),
+                last600m=runner.get("last600m"),
+                jockey_win_rate=runner.get("jockeyWinRate"),
+                trainer_win_rate=runner.get("trainerWinRate"),
+                horse_recent_win_rate=runner.get("horseRecentWinRate"),
+                horse_recent_place_rate=runner.get("horseRecentPlaceRate"),
+                horse_distance_place_rate=runner.get("horseDistancePlaceRate"),
+                horse_surface_place_rate=runner.get("horseSurfacePlaceRate"),
+                training_score=runner.get("trainingScore"),
+                bloodline_score=runner.get("bloodlineScore"),
+                paddock_score=runner.get("paddockScore"),
+                lap_3f=runner.get("lap3f"),
+                lap_4f=runner.get("lap4f"),
                 odds_rank=odds_rank.get(id(runner)),
+                odds_delta=runner.get("oddsDelta"),
+                ticket_pool_share=runner.get("ticketPoolShare"),
+                draw_bias=runner.get("drawBias"),
             )
         )
 
@@ -125,18 +168,36 @@ def _race_request_from_dict(race: dict[str, Any]) -> RaceRequest:
         model_mode="ensemble",
         risk_level=52,
         bankroll=100_000,
-        min_edge=0.06,
-        min_probability=0.05,
-        max_candidate_odds=45,
-        max_edge=1.1,
-        max_exposure=0.022,
+        min_edge=0.08,
+        min_probability=0.0,
+        max_candidate_odds=160,
+        max_edge=0.2,
+        max_exposure=0.035,
+        recommendation_limit=3,
+        enabled_bet_types=["trio", "trifecta"],
         runners=runner_inputs,
     )
+
+
+def _race_has_usable_market_odds(race: dict[str, Any]) -> bool:
+    runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+    if len(runners) < 2:
+        return False
+    usable = 0
+    for runner in runners:
+        if not isinstance(runner, dict):
+            continue
+        if _safe_float(runner.get("odds"), 0.0) > 1.01:
+            usable += 1
+    required = max(2, int(len(runners) * 0.7))
+    return usable >= required
 
 
 def _record_prediction_for_race(race: dict[str, Any], *, generated_after_result: bool = False) -> bool:
     runners = race.get("runners") if isinstance(race.get("runners"), list) else []
     if len(runners) < 2:
+        return False
+    if not _race_has_usable_market_odds(race):
         return False
     try:
         request = _race_request_from_dict(race)
@@ -212,19 +273,49 @@ def _auto_predict_missing_finished_races(races: list[dict[str, Any]], start_date
     return count
 
 
+def _attach_live_feature_deltas(races: list[dict[str, Any]], start_date: str, end_date: str) -> None:
+    try:
+        previous_races = fetch_race_cards(start_date, end_date)
+    except Exception:
+        return
+    previous_by_id = {str(race.get("id") or ""): race for race in previous_races if isinstance(race, dict)}
+    for race in races:
+        race_id = str(race.get("id") or "")
+        previous = previous_by_id.get(race_id)
+        if not previous:
+            continue
+        previous_runners = previous.get("runners") if isinstance(previous.get("runners"), list) else []
+        previous_odds = {
+            _safe_int(runner.get("number"), 0): _safe_float(runner.get("odds"), 0.0)
+            for runner in previous_runners
+            if isinstance(runner, dict)
+        }
+        runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+        for runner in runners:
+            if not isinstance(runner, dict):
+                continue
+            number = _safe_int(runner.get("number"), 0)
+            current = _safe_float(runner.get("odds"), 0.0)
+            prior = previous_odds.get(number, 0.0)
+            if current > 1 and prior > 1:
+                runner["oddsDelta"] = round((current - prior) / prior, 4)
+
+
 def ingest_netkeiba_window(
     *,
     start_date: str | None = None,
     end_date: str | None = None,
     days: int = 2,
+    days_ahead: int = 0,
     max_requests: int | None = None,
     delay: float | None = None,
     refresh: bool = False,
     prefer_results: bool = False,
+    backfill_finished_predictions: bool = False,
 ) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc).isoformat()
     if not start_date or not end_date:
-        start_date, end_date = _date_range_for_days(days)
+        start_date, end_date = _date_range_for_days(days, days_ahead)
 
     raw_dir = Path(os.getenv("NETKEIBA_RAW_DIR", "/tmp/umalab_netkeiba_raw")) / f"{start_date}_{end_date}"
     output = Path(os.getenv("NETKEIBA_INGEST_OUTPUT", "/tmp/umalab_netkeiba_normalized.csv"))
@@ -251,6 +342,9 @@ def ingest_netkeiba_window(
         no_calendar=False,
         list_only=False,
         skip_import=False,
+        skip_enrich=True,
+        enriched_output=None,
+        enriched_combined_output=None,
         user_agent=os.getenv(
             "NETKEIBA_USER_AGENT",
             "UmaLabResearch/0.2 (public pages only; rate-limited; contact: local-user)",
@@ -292,11 +386,12 @@ def ingest_netkeiba_window(
         source_name="netkeiba live scrape",
         source_checked_at=datetime.now(timezone.utc).isoformat(),
     )
+    _attach_live_feature_deltas(race_dicts, start_date, end_date)
     races_stored = upsert_race_cards(race_dicts)
     open_predictions = _auto_predict_open_races(race_dicts) if races_stored > 0 else 0
     backfilled_predictions = (
         _auto_predict_missing_finished_races(race_dicts, start_date, end_date)
-        if prefer_results and races_stored > 0
+        if prefer_results and backfill_finished_predictions and races_stored > 0
         else 0
     )
     auto_predictions = open_predictions + backfilled_predictions

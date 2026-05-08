@@ -18,11 +18,50 @@ class Runner(BaseModel):
     trainer: str | None = None
     runningStyle: str | None = None
     recentRecord: str | None = None
+    daysSinceLastRun: int | None = None
+    avgLast3Speed: float | None = None
+    bestTime: float | None = None
+    last600m: float | None = None
+    jockeyWinRate: float | None = None
+    trainerWinRate: float | None = None
+    horseRecentWinRate: float | None = None
+    horseRecentPlaceRate: float | None = None
+    horseDistancePlaceRate: float | None = None
+    horseSurfacePlaceRate: float | None = None
+    trainingScore: float | None = None
+    bloodlineScore: float | None = None
+    paddockScore: float | None = None
+    oddsDelta: float | None = None
+    oddsDelta5m: float | None = None
+    oddsDelta15m: float | None = None
+    oddsVolatility: float | None = None
+    ticketPoolShare: float | None = None
+    lap3f: float | None = None
+    lap4f: float | None = None
+    bodyWeightAnnouncedAt: str | None = None
+    payoutWin: float | None = None
+    payoutPlace: float | None = None
+    payoutQuinella: float | None = None
+    payoutWide: float | None = None
+    payoutExacta: float | None = None
+    payoutTrio: float | None = None
+    payoutTrifecta: float | None = None
+    drawBias: float | None = None
+    sireId: str | None = None
     sire: str | None = None
+    damSireId: str | None = None
     damSire: str | None = None
     rating: int
     odds: float
+    placeOdds: float | None = None
     tags: list[str]
+
+
+class RacePayout(BaseModel):
+    betType: str
+    selection: str
+    payoutYen: float
+    popularity: int | None = None
 
 
 class Race(BaseModel):
@@ -43,6 +82,7 @@ class Race(BaseModel):
     sourceUrl: str | None = None
     sourceCheckedAt: str | None = None
     verificationStatus: Literal["verified", "stale", "unverified"] = "unverified"
+    payouts: list[RacePayout] = Field(default_factory=list)
     runners: list[Runner]
 
 
@@ -50,7 +90,6 @@ ModelMode = Literal["ensemble", "deep", "value"]
 BetType = Literal[
     "win",
     "place",
-    "support",
     "bracket_quinella",
     "quinella",
     "wide",
@@ -61,13 +100,6 @@ BetType = Literal[
 ]
 
 DEFAULT_BET_TYPES: list[BetType] = [
-    "win",
-    "place",
-    "support",
-    "bracket_quinella",
-    "quinella",
-    "wide",
-    "exacta",
     "trio",
     "trifecta",
 ]
@@ -100,7 +132,9 @@ class RunnerInput(BaseModel):
     trainer: str | None = None
     owner: str | None = None
     breeder: str | None = None
+    sire_id: str | None = None
     sire: str | None = None
+    dam_sire_id: str | None = None
     dam_sire: str | None = None
     days_since_last_run: int | None = Field(default=None, ge=0)
     avg_last3_speed: float | None = Field(default=None, ge=0)
@@ -110,12 +144,21 @@ class RunnerInput(BaseModel):
     trainer_win_rate: float | None = Field(default=None, ge=0, le=1)
     horse_recent_win_rate: float | None = Field(default=None, ge=0, le=1)
     horse_recent_place_rate: float | None = Field(default=None, ge=0, le=1)
+    horse_distance_place_rate: float | None = Field(default=None, ge=0, le=1)
+    horse_surface_place_rate: float | None = Field(default=None, ge=0, le=1)
     training_score: float | None = Field(default=None, ge=0, le=100)
     bloodline_score: float | None = Field(default=None, ge=0, le=100)
+    paddock_score: float | None = Field(default=None, ge=0, le=100)
+    lap_3f: float | None = Field(default=None, ge=0)
+    lap_4f: float | None = Field(default=None, ge=0)
     odds_rank: int | None = Field(default=None, ge=1)
     odds_delta: float | None = None
+    odds_delta_5m: float | None = None
+    odds_delta_15m: float | None = None
+    odds_volatility: float | None = Field(default=None, ge=0)
     ticket_pool_share: float | None = Field(default=None, ge=0, le=1)
     draw_bias: float | None = Field(default=None, ge=-1, le=1)
+    body_weight_announced_minutes: float | None = Field(default=None, ge=0)
 
 
 class RaceRequest(BaseModel):
@@ -136,6 +179,7 @@ class RaceRequest(BaseModel):
     max_edge: float | None = Field(default=None, ge=0)
     min_portfolio_roi: float = Field(default=1.0, ge=0)
     max_exposure: float = Field(default=0.02, gt=0, le=0.1)
+    recommendation_limit: int = Field(default=3, ge=1, le=9)
     enabled_bet_types: list[BetType] = Field(default_factory=lambda: DEFAULT_BET_TYPES.copy())
     runners: list[RunnerInput] = Field(min_length=2)
 

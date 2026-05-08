@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -74,10 +75,6 @@ def decimal_from_payout(value_: Any) -> float | None:
     return payout / 100 if payout > 20 else payout
 
 
-def estimated_place_odds(win_odds: float, divisor: float) -> float:
-    return max(1.1, min(win_odds, win_odds / divisor))
-
-
 def prepare_frame(
     frame: pd.DataFrame,
     place_odds_divisor: float,
@@ -110,16 +107,16 @@ def prepare_frame(
 
     market_odds = pd.to_numeric(prepared.get("market_odds", 0), errors="coerce")
     raw_place_odds = pd.to_numeric(prepared.get("place_odds", 0), errors="coerce")
-    estimated_place = market_odds.map(
-        lambda odds: (
-            estimated_place_odds(float(odds), place_odds_divisor)
-            if pd.notna(odds) and odds > 1
-            else 1.1
-        )
-    )
+    legacy_estimate = (market_odds / place_odds_divisor).clip(lower=1.1)
+    legacy_estimate = legacy_estimate.where(legacy_estimate <= market_odds, market_odds)
+    conservative_estimate = (1.05 + (market_odds - 1).clip(lower=0) * 0.09).clip(lower=1.1, upper=8.0)
     credible_place = raw_place_odds.where(
-        (raw_place_odds > 1) & (market_odds > 1) & (raw_place_odds <= market_odds * 1.05),
-        estimated_place,
+        (raw_place_odds > 1)
+        & (market_odds > 1)
+        & (raw_place_odds <= market_odds)
+        & ((raw_place_odds.round(2) - legacy_estimate.round(2)).abs() >= 0.015)
+        & ((raw_place_odds.round(2) - conservative_estimate.round(2)).abs() >= 0.015),
+        1.1,
     )
     prepared["__place_odds"] = credible_place
 
@@ -143,7 +140,7 @@ def prepare_frame(
             if "runner_number" in frame or "horse_number" in frame
             else "number_or_gate"
         ),
-        "place_odds_source": "place_odds_when_credible_else_estimated_from_win_odds",
+        "place_odds_source": "credible_place_odds_only_else_1.1_no_estimated_roi",
     }
     return prepared, diagnostics
 
@@ -252,7 +249,6 @@ def winning_keys(frame: pd.DataFrame) -> dict[str, str | set[str]]:
     return {
         "win": str(top[0]),
         "place": {str(number) for number in top},
-        "support": {str(number) for number in top},
         "bracket_quinella": unordered_key(gates),
         "quinella": unordered_key(top[:2]),
         "wide": wide,
@@ -263,34 +259,93 @@ def winning_keys(frame: pd.DataFrame) -> dict[str, str | set[str]]:
 
 
 def normalized_selection(selection: str, unordered: bool = False) -> str:
-    parts = [part.strip() for part in selection.split("-") if part.strip().isdigit()]
+    parts = [match.group(0) for match in re.finditer(r"\d+", str(selection or ""))]
     if not parts:
-        return selection
+        return str(selection)
     if unordered:
         return "-".join(sorted(parts, key=int))
     return "-".join(parts)
 
 
-def winning_ticket_count(recommendation: BetRecommendation, keys: dict[str, str | set[str]]) -> int:
+def winning_selections(recommendation: BetRecommendation, keys: dict[str, str | set[str]]) -> list[str]:
     key = keys[recommendation.bet_type]
     covered = recommendation.covered_selections or [recommendation.selection]
 
-    if recommendation.bet_type in {"place", "support"}:
-        return int(any(normalized_selection(selection) in key for selection in covered))
+    if recommendation.bet_type == "place":
+        return [selection for selection in covered if normalized_selection(selection) in key]
     if recommendation.bet_type in {"bracket_quinella", "quinella", "trio"}:
-        covered_keys = {normalized_selection(selection, unordered=True) for selection in covered}
-        return int(key in covered_keys)
+        return [
+            selection
+            for selection in covered
+            if normalized_selection(selection, unordered=True) == key
+        ]
     if recommendation.bet_type == "wide":
-        covered_keys = {normalized_selection(selection, unordered=True) for selection in covered}
-        return sum(1 for selection in covered_keys if selection in key)
+        return [
+            selection
+            for selection in covered
+            if normalized_selection(selection, unordered=True) in key
+        ]
     if recommendation.bet_type in {"exacta", "trifecta"}:
-        covered_keys = {normalized_selection(selection) for selection in covered}
-        return int(key in covered_keys)
-    return int(normalized_selection(recommendation.selection) == key)
+        return [selection for selection in covered if normalized_selection(selection) == key]
+    return [recommendation.selection] if normalized_selection(recommendation.selection) == key else []
+
+
+def winning_ticket_count(recommendation: BetRecommendation, keys: dict[str, str | set[str]]) -> int:
+    return len(winning_selections(recommendation, keys))
 
 
 def is_hit(recommendation: BetRecommendation, keys: dict[str, str | set[str]]) -> bool:
     return winning_ticket_count(recommendation, keys) > 0
+
+
+def payout_items_map(race_frame: pd.DataFrame) -> dict[tuple[str, str], float]:
+    if "payouts_json" not in race_frame:
+        return {}
+    raw_values = race_frame["payouts_json"].dropna()
+    if raw_values.empty:
+        return {}
+    try:
+        payload = json.loads(str(raw_values.iloc[0]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, list):
+        return {}
+    items: dict[tuple[str, str], float] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        bet_type = str(item.get("bet_type") or item.get("betType") or "")
+        payout_yen = item.get("payout_yen") or item.get("payoutYen")
+        if not bet_type or payout_yen is None:
+            continue
+        unordered = bet_type in {"bracket_quinella", "quinella", "wide", "trio"}
+        key = normalized_selection(str(item.get("selection") or ""), unordered=unordered)
+        decimal = decimal_from_payout(payout_yen)
+        if key and decimal is not None:
+            items[(bet_type, key)] = decimal
+    return items
+
+
+def official_payout_price(
+    recommendation: BetRecommendation,
+    race_frame: pd.DataFrame,
+    selection: str,
+) -> tuple[float, str]:
+    unordered = recommendation.bet_type in {"bracket_quinella", "quinella", "wide", "trio"}
+    selection_key = normalized_selection(selection, unordered=unordered)
+    mapped = payout_items_map(race_frame).get((recommendation.bet_type, selection_key))
+    if mapped is not None:
+        return mapped, "official"
+
+    payout_column = PAYOUT_COLUMNS.get(recommendation.bet_type)
+    if payout_column and payout_column in race_frame:
+        if recommendation.bet_type in {"win", "place"}:
+            row = selected_runner(race_frame, selection)
+            if row is not None:
+                odds = decimal_from_payout(row.get(payout_column))
+                if odds is not None:
+                    return odds, "official"
+    return 0.0, "none"
 
 
 def payout_price(
@@ -298,20 +353,13 @@ def payout_price(
     race_frame: pd.DataFrame,
     *,
     synthetic_exotics: bool,
+    allow_market_fallback: bool,
 ) -> tuple[float, str]:
-    payout_column = PAYOUT_COLUMNS.get(recommendation.bet_type)
-    if payout_column and payout_column in race_frame:
-        if recommendation.bet_type in {"win", "place"}:
-            row = selected_runner(race_frame, recommendation.selection)
-            if row is not None:
-                odds = decimal_from_payout(row.get(payout_column))
-                if odds is not None:
-                    return odds, "official"
-        else:
-            odds = race_frame[payout_column].dropna().map(decimal_from_payout).dropna()
-            if not odds.empty:
-                return float(odds.iloc[0]), "official"
-
+    official, source = official_payout_price(recommendation, race_frame, recommendation.selection)
+    if official > 0:
+        return official, source
+    if not allow_market_fallback:
+        return 0.0, "none"
     if recommendation.bet_type == "win":
         row = selected_runner(race_frame, recommendation.selection)
         return (float(row["market_odds"]), "market") if row is not None else (0.0, "none")
@@ -339,11 +387,13 @@ def payout_odds(
     race_frame: pd.DataFrame,
     *,
     synthetic_exotics: bool,
+    allow_market_fallback: bool = False,
 ) -> float:
     odds, _source = payout_price(
         recommendation,
         race_frame,
         synthetic_exotics=synthetic_exotics,
+        allow_market_fallback=allow_market_fallback,
     )
     return odds
 
@@ -409,19 +459,24 @@ def finalize_breakdowns(
     return output
 
 
-def market_favorite_win_baseline(frame: pd.DataFrame) -> dict[str, Any]:
+def market_favorite_win_baseline(frame: pd.DataFrame, *, allow_market_fallback: bool) -> dict[str, Any]:
     total_stake = 0.0
     total_payout = 0.0
     hits = 0
     bets = 0
+    missing_hit_payouts = 0
     for _, race_frame in frame.groupby("race_id", sort=False):
         favorite = race_frame.sort_values("market_odds").iloc[0]
         stake = 100.0
-        payout = (
-            stake * float(favorite["market_odds"])
-            if int(favorite["finish_position"]) == 1
-            else 0.0
-        )
+        payout = 0.0
+        if int(favorite["finish_position"]) == 1:
+            odds = decimal_from_payout(favorite.get("payout_win"))
+            if odds is None and allow_market_fallback:
+                odds = float(favorite["market_odds"])
+            if odds is None:
+                missing_hit_payouts += 1
+            else:
+                payout = stake * odds
         total_stake += stake
         total_payout += payout
         bets += 1
@@ -433,6 +488,8 @@ def market_favorite_win_baseline(frame: pd.DataFrame) -> dict[str, Any]:
         "total_payout": round(total_payout, 0),
         "roi": round(total_payout / total_stake, 4) if total_stake else 0,
         "hit_rate": round(hits / bets, 4) if bets else 0,
+        "missing_hit_payouts": missing_hit_payouts,
+        "payout_mode": "official_or_market_fallback" if allow_market_fallback else "official_only",
     }
 
 
@@ -448,6 +505,7 @@ def simulate(
     min_probability: float,
     max_candidate_odds: float,
     max_edge: float | None,
+    allow_market_payout_fallback: bool,
 ) -> dict[str, Any]:
     required = {"race_id", "finish_position"}
     missing = sorted(required - set(frame.columns))
@@ -467,6 +525,8 @@ def simulate(
     peak = 0.0
     max_drawdown = 0.0
     skipped_races = 0
+    missing_hit_payouts = 0
+    payout_sources: defaultdict[str, int] = defaultdict(int)
     by_bet_type: defaultdict[str, dict[str, float | int]] = defaultdict(empty_breakdown)
     by_edge: defaultdict[str, dict[str, float | int]] = defaultdict(empty_breakdown)
 
@@ -491,19 +551,25 @@ def simulate(
 
         for recommendation in prediction.recommendations[:limit]:
             stake = recommendation.stake
-            odds, payout_source = payout_price(
-                recommendation,
-                race_frame,
-                synthetic_exotics=synthetic_exotics,
-            )
-            winning_tickets = winning_ticket_count(recommendation, keys)
-            if odds > 0 and winning_tickets > 0:
-                if payout_source == "synthetic" and recommendation.tickets > 1:
-                    payout = stake * odds * winning_tickets
+            payout = 0.0
+            winning_items = winning_selections(recommendation, keys)
+            for selection in winning_items:
+                odds, payout_source = official_payout_price(recommendation, race_frame, selection)
+                if odds <= 0 and allow_market_payout_fallback:
+                    odds, payout_source = payout_price(
+                        recommendation,
+                        race_frame,
+                        synthetic_exotics=synthetic_exotics,
+                        allow_market_fallback=True,
+                    )
+                if odds > 0:
+                    payout += recommendation.unit_stake * odds
                 else:
-                    payout = recommendation.unit_stake * odds * winning_tickets
-            else:
-                payout = 0.0
+                    payout_source = "missing_official"
+                    missing_hit_payouts += 1
+                payout_sources[payout_source] += 1
+            if not winning_items:
+                payout_sources["not_hit"] += 1
             hit_count += 1 if payout else 0
             bet_count += 1
             total_stake += stake
@@ -530,6 +596,9 @@ def simulate(
         "roi": round(total_payout / total_stake, 4) if total_stake else 0,
         "hit_rate": round(hit_count / bet_count, 4) if bet_count else 0,
         "max_drawdown": round(max_drawdown, 0),
+        "payout_data_complete": missing_hit_payouts == 0,
+        "missing_hit_payouts": missing_hit_payouts,
+        "payout_sources": dict(sorted(payout_sources.items())),
         "bet_types": enabled_bet_types,
         "filters": {
             "min_edge": min_edge,
@@ -542,17 +611,20 @@ def simulate(
         "breakdown_by_bet_type": finalize_breakdowns(by_bet_type),
         "breakdown_by_edge": finalize_breakdowns(by_edge),
         "baselines": {
-            "market_favorite_win": market_favorite_win_baseline(frame),
+            "market_favorite_win": market_favorite_win_baseline(
+                frame,
+                allow_market_fallback=allow_market_payout_fallback,
+            ),
         },
-        "payout_mode": "synthetic_exotics" if synthetic_exotics else "win_place_market_odds_only",
+        "payout_mode": (
+            "official_or_market_fallback"
+            if allow_market_payout_fallback
+            else "official_payouts_only"
+        ),
         "note": (
-            "Exotic bet payouts are synthetic estimates. "
-            "Use official payout columns for publishable ROI."
-            if synthetic_exotics
-            else (
-                "Only win/place are simulated because this CSV has no official "
-                "exotic payout columns."
-            )
+            "公式払戻だけで回収率を計算します。払戻未取得の的中はmissing_hit_payoutsに出し、推定払戻では補完しません。"
+            if not allow_market_payout_fallback
+            else "検証用に市場オッズ補完を許可しています。本番表示用のROIには使わないでください。"
         ),
     }
 
@@ -577,6 +649,11 @@ def main() -> None:
         "--synthetic-exotics",
         action="store_true",
         help="Allow synthetic odds for exotic bets without payout columns",
+    )
+    parser.add_argument(
+        "--allow-market-payout-fallback",
+        action="store_true",
+        help="Use market odds as payout fallback for debugging only. Do not use for publishable ROI.",
     )
     parser.add_argument("--place-odds-divisor", default=4.0, type=float)
     parser.add_argument(
@@ -610,7 +687,8 @@ def main() -> None:
         filtered_bet_types: list[BetType] = []
         for bet_type in enabled_bet_types:
             payout_column = PAYOUT_COLUMNS.get(bet_type)
-            if bet_type in EXOTIC_BET_TYPES and payout_column not in frame.columns:
+            has_payout_json = "payouts_json" in frame.columns and frame["payouts_json"].notna().any()
+            if bet_type in EXOTIC_BET_TYPES and payout_column not in frame.columns and not has_payout_json:
                 disabled_bet_types.append(bet_type)
                 continue
             filtered_bet_types.append(bet_type)
@@ -639,6 +717,7 @@ def main() -> None:
         args.min_probability,
         args.max_odds,
         args.max_edge,
+        args.allow_market_payout_fallback,
     )
     if disabled_bet_types:
         summary["disabled_bet_types"] = disabled_bet_types

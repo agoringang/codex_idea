@@ -16,6 +16,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from enrich_netkeiba_2026_features import enrich as enrich_2026_features
 from import_netkeiba_exports import normalize_records, read_records, write_combined, write_csv
 
 
@@ -211,6 +212,66 @@ def jst_today() -> date:
     return datetime.now(timezone(timedelta(hours=9))).date()
 
 
+def estimated_post_time(
+    race_id: str,
+    source: str,
+    *,
+    race_date: date | None = None,
+) -> datetime | None:
+    if not race_id[-2:].isdigit():
+        return None
+    race_no = int(race_id[-2:])
+    jra_times = {
+        1: "09:50",
+        2: "10:20",
+        3: "10:50",
+        4: "11:20",
+        5: "12:10",
+        6: "12:40",
+        7: "13:10",
+        8: "13:40",
+        9: "14:15",
+        10: "14:50",
+        11: "15:30",
+        12: "16:10",
+    }
+    nar_times = {
+        1: "10:30",
+        2: "11:00",
+        3: "11:30",
+        4: "12:05",
+        5: "12:40",
+        6: "13:15",
+        7: "13:50",
+        8: "14:25",
+        9: "15:05",
+        10: "15:45",
+        11: "16:25",
+        12: "17:05",
+    }
+    time_text = (jra_times if source == "jra" else nar_times).get(race_no)
+    if not time_text:
+        return None
+    hour, minute = map(int, time_text.split(":"))
+    if race_date is None:
+        try:
+            race_date = date(
+                int(race_id[:4]),
+                int(race_id[4:6]),
+                int(race_id[6:8]),
+            )
+        except ValueError:
+            return None
+    return datetime(
+        race_date.year,
+        race_date.month,
+        race_date.day,
+        hour,
+        minute,
+        tzinfo=timezone(timedelta(hours=9)),
+    )
+
+
 def race_url_for_dynamic_id(
     race_id: str,
     *,
@@ -218,7 +279,10 @@ def race_url_for_dynamic_id(
     race_date: date,
     prefer_results: bool = False,
 ) -> str:
-    is_past = prefer_results or race_date < jst_today()
+    now = datetime.now(timezone(timedelta(hours=9)))
+    estimated = estimated_post_time(race_id, source, race_date=race_date)
+    result_overdue = estimated is not None and now >= estimated + timedelta(minutes=25)
+    is_past = prefer_results or race_date < jst_today() or result_overdue
     if source == "jra":
         template = JRA_RESULT_URL if is_past else JRA_SHUTUBA_URL
     else:
@@ -340,6 +404,13 @@ def import_downloaded_html(args: argparse.Namespace) -> dict[str, Any]:
     }
     if args.base_csv and args.combined_output:
         summary["combined"] = write_combined(args.base_csv, frame, args.combined_output)
+    if not args.skip_enrich and args.base_csv:
+        summary["enriched"] = enrich_2026_features(
+            base_csv=args.base_csv,
+            netkeiba_csv=args.output,
+            output_2026=args.enriched_output,
+            output_combined=args.enriched_combined_output,
+        )
     return summary
 
 
@@ -367,6 +438,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("data/keiba_history_with_2026.csv"),
     )
+    parser.add_argument("--enriched-output", type=Path, default=Path("data/netkeiba_2026_enriched.csv"))
+    parser.add_argument(
+        "--enriched-combined-output",
+        type=Path,
+        default=Path("data/keiba_history_with_2026_enriched.csv"),
+    )
     parser.add_argument("--encoding", default="utf-8-sig")
     parser.add_argument("--delay", type=float, default=1.5)
     parser.add_argument("--timeout", type=float, default=20.0)
@@ -376,6 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-calendar", action="store_true")
     parser.add_argument("--list-only", action="store_true")
     parser.add_argument("--skip-import", action="store_true")
+    parser.add_argument("--skip-enrich", action="store_true")
     parser.add_argument(
         "--user-agent",
         default=(
