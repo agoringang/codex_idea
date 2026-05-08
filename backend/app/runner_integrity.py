@@ -5,6 +5,8 @@ import re
 from collections import Counter
 from typing import Any
 
+from .runner_state import runner_is_inactive_dict, runner_is_inactive_model
+
 
 POPULARITY_PATTERN = re.compile(r"(\d+)人気")
 
@@ -62,6 +64,15 @@ def validate_race_runner_integrity(race: Any) -> dict[str, Any]:
     runners = _value(race, "runners", [])
     if not isinstance(runners, list):
         runners = []
+    active_runners = [
+        runner
+        for runner in runners
+        if not (
+            runner_is_inactive_dict(runner)
+            if isinstance(runner, dict)
+            else runner_is_inactive_model(runner)
+        )
+    ]
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -109,9 +120,12 @@ def validate_race_runner_integrity(race: Any) -> dict[str, Any]:
     if invalid_gates:
         errors.append(f"枠番が範囲外です: {invalid_gates[:6]}")
 
-    odds_count = sum(1 for value in odds if value > 1.01)
-    if 0 < odds_count < max(2, int(len(runners) * 0.7)):
-        warnings.append(f"単勝オッズが一部のみ取得されています: {odds_count}/{len(runners)}頭")
+    active_numbers = [_number(_value(runner, "number")) for runner in active_runners]
+    active_odds = [_float(_value(runner, "odds")) for runner in active_runners]
+    odds_count = sum(1 for value in active_odds if value > 1.01)
+    active_count = len(active_runners)
+    if 0 < odds_count < max(2, int(active_count * 0.7)):
+        warnings.append(f"単勝オッズが一部のみ取得されています: {odds_count}/{active_count}頭")
 
     bad_place_odds = [
         f"{number}:複勝{place:.1f}>単勝{win:.1f}"
@@ -121,12 +135,12 @@ def validate_race_runner_integrity(race: Any) -> dict[str, Any]:
     if bad_place_odds:
         errors.append(f"複勝オッズが単勝オッズを超えています: {bad_place_odds[:6]}")
 
-    if odds_count >= max(2, int(len(runners) * 0.7)):
+    if odds_count >= max(2, int(active_count * 0.7)):
         odds_rank = {
             number: index + 1
             for index, (number, _odds) in enumerate(
                 sorted(
-                    ((number, odd) for number, odd in zip(numbers, odds, strict=False) if number > 0 and odd > 1.01),
+                    ((number, odd) for number, odd in zip(active_numbers, active_odds, strict=False) if number > 0 and odd > 1.01),
                     key=lambda item: (item[1], item[0]),
                 )
             )

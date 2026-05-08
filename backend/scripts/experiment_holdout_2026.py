@@ -71,6 +71,9 @@ class ModelSpec:
     family: str
     alpha: float = 1e-4
     use_positive_weight: bool = True
+    learning_rate: float = 0.06
+    max_leaf_nodes: int = 31
+    l2_regularization: float = 0.01
 
 
 def build_sgd_pipeline(
@@ -129,17 +132,20 @@ def build_sgd_pipeline(
 
 
 def build_hgb_pipeline(
+    spec: ModelSpec,
     numeric_features: list[str],
     positive_weight: float,
     seed: int,
     max_iter: int,
 ) -> Pipeline:
     model = HistGradientBoostingClassifier(
-        learning_rate=0.06,
+        learning_rate=spec.learning_rate,
         max_iter=max_iter,
-        max_leaf_nodes=31,
-        l2_regularization=0.01,
-        class_weight={0: 1.0, 1: positive_weight} if positive_weight > 1 else None,
+        max_leaf_nodes=spec.max_leaf_nodes,
+        l2_regularization=spec.l2_regularization,
+        class_weight={0: 1.0, 1: positive_weight}
+        if spec.use_positive_weight and positive_weight > 1
+        else None,
         random_state=seed,
     )
     return Pipeline(
@@ -154,10 +160,20 @@ def model_specs(include_hgb: bool) -> list[ModelSpec]:
     specs = [
         ModelSpec("sgd_weighted_alpha_1e-4", "sgd", alpha=1e-4, use_positive_weight=True),
         ModelSpec("sgd_weighted_alpha_3e-5", "sgd", alpha=3e-5, use_positive_weight=True),
+        ModelSpec("sgd_weighted_alpha_1e-5", "sgd", alpha=1e-5, use_positive_weight=True),
         ModelSpec("sgd_unweighted_alpha_1e-4", "sgd", alpha=1e-4, use_positive_weight=False),
+        ModelSpec("sgd_unweighted_alpha_3e-5", "sgd", alpha=3e-5, use_positive_weight=False),
+        ModelSpec("sgd_unweighted_alpha_3e-4", "sgd", alpha=3e-4, use_positive_weight=False),
     ]
     if include_hgb:
-        specs.append(ModelSpec("hgb_numeric_weighted", "hgb", use_positive_weight=True))
+        specs.extend(
+            [
+                ModelSpec("hgb_numeric_weighted_balanced", "hgb", use_positive_weight=True, learning_rate=0.05, max_leaf_nodes=31, l2_regularization=0.03),
+                ModelSpec("hgb_numeric_weighted_deep", "hgb", use_positive_weight=True, learning_rate=0.04, max_leaf_nodes=63, l2_regularization=0.01),
+                ModelSpec("hgb_numeric_unweighted_value", "hgb", use_positive_weight=False, learning_rate=0.06, max_leaf_nodes=31, l2_regularization=0.08),
+                ModelSpec("hgb_numeric_unweighted_compact", "hgb", use_positive_weight=False, learning_rate=0.08, max_leaf_nodes=15, l2_regularization=0.12),
+            ]
+        )
     return specs
 
 
@@ -305,6 +321,50 @@ def evaluate_model(
     return metrics
 
 
+def single_model_rank_metrics(
+    model: CalibratedBlendModel,
+    frame: pd.DataFrame,
+    holdout_index: pd.Index,
+) -> dict[str, Any]:
+    holdout = frame.loc[holdout_index].copy()
+    if holdout.empty:
+        return {
+            "races": 0,
+            "winner_top1_rate": 0.0,
+            "winner_in_top3_rate": 0.0,
+            "top3_exact_set_rate": 0.0,
+            "market_dependency": {},
+        }
+    holdout["candidate_score"] = np.clip(model.predict_positive(holdout), 0, 1)
+    race_rows: list[dict[str, Any]] = []
+    for race_id, race in holdout.groupby("race_id", sort=False):
+        ordered = race.sort_values("candidate_score", ascending=False)
+        winner = race.loc[race["finish_position"] == 1]
+        top3 = set(race.loc[race["finish_position"] <= 3, "runner_number"].astype(int).tolist())
+        predicted_winner = int(ordered.iloc[0]["runner_number"])
+        predicted_top3 = set(ordered.head(3)["runner_number"].astype(int).tolist())
+        race_rows.append(
+            {
+                "race_id": str(race_id),
+                "winner_top1": int(
+                    not winner.empty and predicted_winner == int(winner.iloc[0]["runner_number"])
+                ),
+                "winner_in_top3": int(
+                    not winner.empty and int(winner.iloc[0]["runner_number"]) in predicted_top3
+                ),
+                "top3_exact_set": int(bool(top3) and predicted_top3 == top3),
+            }
+        )
+    race_metrics = pd.DataFrame(race_rows)
+    return {
+        "races": int(len(race_metrics)),
+        "winner_top1_rate": float(race_metrics["winner_top1"].mean()),
+        "winner_in_top3_rate": float(race_metrics["winner_in_top3"].mean()),
+        "top3_exact_set_rate": float(race_metrics["top3_exact_set"].mean()),
+        "market_dependency": market_dependency_metrics(holdout, "candidate_score"),
+    }
+
+
 def train_candidate(
     spec: ModelSpec,
     frame: pd.DataFrame,
@@ -327,7 +387,7 @@ def train_candidate(
 
     if spec.family == "hgb":
         active_features = numeric_features
-        base_model = build_hgb_pipeline(numeric_features, positive_weight, seed, max_iter)
+        base_model = build_hgb_pipeline(spec, numeric_features, positive_weight, seed, max_iter)
     else:
         active_features = features
         base_model = build_sgd_pipeline(
@@ -367,18 +427,97 @@ def train_candidate(
             train_positive_rate,
         ),
         "holdout_2026": evaluate_model(model, frame, holdout_index, target, train_positive_rate),
+        "rank_holdout_2026": single_model_rank_metrics(model, frame, holdout_index),
     }
     return model, metrics
 
 
-def choose_best(candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    return min(
+def model_selection_utility(
+    item: dict[str, Any],
+    *,
+    favorite_rate_cap: float,
+    favorite_penalty: float,
+) -> dict[str, float]:
+    rank = item.get("rank_holdout_2026", {})
+    market_dependency = rank.get("market_dependency", {}) if isinstance(rank, dict) else {}
+    target = str(item.get("target") or "")
+    hit_score = (
+        rank.get("winner_top1_rate", 0)
+        if target == "is_win"
+        else rank.get("winner_in_top3_rate", 0)
+    )
+    favorite_rate = market_dependency.get("predicted_top1_favorite_rate")
+    favorite_value = float(favorite_rate) if favorite_rate is not None else 1.0
+    favorite_excess = max(0.0, favorite_value - favorite_rate_cap)
+    ece = float(item["holdout_2026"]["calibration"]["ece"])
+    utility = float(hit_score or 0) - favorite_excess * favorite_penalty - ece * 0.04
+    return {
+        "hit_score": float(hit_score or 0),
+        "favorite_rate": favorite_value,
+        "favorite_excess": favorite_excess,
+        "utility": utility,
+    }
+
+
+def choose_best(
+    candidates: list[dict[str, Any]],
+    *,
+    favorite_rate_cap: float,
+    favorite_penalty: float,
+) -> dict[str, Any]:
+    def key(item: dict[str, Any]) -> tuple[float, float, float, float]:
+        selection = model_selection_utility(
+            item,
+            favorite_rate_cap=favorite_rate_cap,
+            favorite_penalty=favorite_penalty,
+        )
+        return (
+            selection["utility"],
+            -selection["favorite_rate"],
+            -item["holdout_2026"]["brier"],
+            -item["holdout_2026"]["calibration"]["ece"],
+        )
+
+    best = max(
         candidates,
-        key=lambda item: (
+        key=key,
+    )
+    best["selection_policy"] = model_selection_utility(
+        best,
+        favorite_rate_cap=favorite_rate_cap,
+        favorite_penalty=favorite_penalty,
+    )
+    best["selection_policy"].update(
+        {
+            "favorite_rate_cap": float(favorite_rate_cap),
+            "favorite_penalty": float(favorite_penalty),
+        }
+    )
+    return best
+
+
+def legacy_choose_best(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    def key(item: dict[str, Any]) -> tuple[float, float, float, float]:
+        rank = item.get("rank_holdout_2026", {})
+        market_dependency = rank.get("market_dependency", {}) if isinstance(rank, dict) else {}
+        target = str(item.get("target") or "")
+        hit_score = (
+            rank.get("winner_top1_rate", 0)
+            if target == "is_win"
+            else rank.get("winner_in_top3_rate", 0)
+        )
+        favorite_rate = market_dependency.get("predicted_top1_favorite_rate")
+        favorite_penalty = float(favorite_rate) if favorite_rate is not None else 1.0
+        return (
+            -float(hit_score or 0),
+            favorite_penalty,
             item["holdout_2026"]["brier"],
             item["holdout_2026"]["calibration"]["ece"],
-            -(item["holdout_2026"].get("auc") or 0),
-        ),
+        )
+
+    return min(
+        candidates,
+        key=key,
     )
 
 
@@ -546,6 +685,10 @@ def train_best_bundle(
     trained_models: dict[str, dict[str, CalibratedBlendModel]] = {target: {} for target in TARGETS}
     for target in TARGETS:
         for spec in model_specs(args.include_hgb):
+            print(
+                f"[train] target={target} model={spec.name} family={spec.family}",
+                flush=True,
+            )
             model, metrics = train_candidate(
                 spec,
                 frame,
@@ -564,7 +707,14 @@ def train_best_bundle(
             all_metrics[target].append(metrics)
             trained_models[target][spec.name] = model
 
-    best_metrics = {target: choose_best(metrics) for target, metrics in all_metrics.items()}
+    best_metrics = {
+        target: choose_best(
+            metrics,
+            favorite_rate_cap=args.favorite_rate_cap,
+            favorite_penalty=args.favorite_penalty,
+        )
+        for target, metrics in all_metrics.items()
+    }
     best_models = {
         target: trained_models[target][metrics["model"]]
         for target, metrics in best_metrics.items()
@@ -586,6 +736,8 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
     best = {}
     for target, metrics in payload["best"].items():
         holdout = metrics["holdout_2026"]
+        rank = metrics.get("rank_holdout_2026", {})
+        dependency = rank.get("market_dependency", {}) if isinstance(rank, dict) else {}
         best[target] = {
             "model": metrics["model"],
             "market_ensemble_weight": metrics["market_ensemble_weight"],
@@ -594,6 +746,10 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "holdout_auc": round(float(holdout.get("auc") or 0), 6),
             "holdout_auc_vs_market": holdout["auc_vs_market"],
             "holdout_ece": holdout["calibration"]["ece"],
+            "winner_top1_rate": round(float(rank.get("winner_top1_rate") or 0), 6),
+            "winner_in_top3_rate": round(float(rank.get("winner_in_top3_rate") or 0), 6),
+            "predicted_top1_favorite_rate": dependency.get("predicted_top1_favorite_rate"),
+            "selection_policy": metrics.get("selection_policy", {}),
         }
     return {
         "trained_at": payload["trained_at"],
@@ -635,7 +791,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-race-limit", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-iter", type=int, default=35)
-    parser.add_argument("--include-hgb", action="store_true")
+    parser.add_argument(
+        "--skip-hgb",
+        action="store_false",
+        dest="include_hgb",
+        help="Skip the slower HistGradientBoosting candidates. By default the full 10-model zoo is trained.",
+    )
+    parser.set_defaults(include_hgb=True)
     parser.add_argument(
         "--feature-mode",
         choices=["all", "anti_market"],
@@ -645,10 +807,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--market-weight-cap",
         type=float,
-        default=1.0,
+        default=0.2,
         help="Upper limit for blending calibrated model probabilities with market probabilities.",
     )
     parser.add_argument("--market-weight-step", type=float, default=0.05)
+    parser.add_argument(
+        "--favorite-rate-cap",
+        type=float,
+        default=0.74,
+        help="Model selection starts penalizing candidates whose AI top pick is the market favorite too often.",
+    )
+    parser.add_argument(
+        "--favorite-penalty",
+        type=float,
+        default=0.36,
+        help="Penalty strength applied to favorite-rate excess during model selection.",
+    )
     return parser
 
 
@@ -709,6 +883,8 @@ def main() -> None:
         "removed_market_features": bundle["removed_market_features"],
         "market_weight_cap": args.market_weight_cap,
         "market_weight_step": args.market_weight_step,
+        "favorite_rate_cap": args.favorite_rate_cap,
+        "favorite_penalty": args.favorite_penalty,
         "targets": bundle["targets"],
         "best": bundle["best"],
         "rank_holdout_2026": bundle["rank_holdout_2026"],

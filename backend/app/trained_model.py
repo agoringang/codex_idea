@@ -20,6 +20,7 @@ from .schemas import RunnerInput
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_PATH = BACKEND_ROOT / "models/racequant/latest.joblib"
+DAILY_MODEL_PATH = BACKEND_ROOT / "models/racequant_daily/holdout_artifact.joblib"
 ANTI_MARKET_MODEL_PATH = BACKEND_ROOT / "models/racequant_anti_market_full/holdout_artifact.joblib"
 HOLDOUT_MODEL_PATH = BACKEND_ROOT / "models/racequant_holdout_2026/holdout_artifact.joblib"
 MODEL_URL_ENV = "RACEQUANT_MODEL_URL"
@@ -122,6 +123,8 @@ def configured_model_path() -> Path:
     configured = os.environ.get("RACEQUANT_MODEL_PATH")
     if configured:
         return Path(configured)
+    if DAILY_MODEL_PATH.exists():
+        return DAILY_MODEL_PATH
     if HOLDOUT_MODEL_PATH.exists():
         return HOLDOUT_MODEL_PATH
     if ANTI_MARKET_MODEL_PATH.exists():

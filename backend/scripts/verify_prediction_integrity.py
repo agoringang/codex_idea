@@ -109,9 +109,11 @@ def main() -> None:
             official = float(item.get("official_payout_yen") or 0)
             if source == "official" and (not hit or official <= 0 or payout <= 0):
                 errors.append(f"{entry.get('race_id')}: official payout source has invalid hit/payout")
-            if source != "official" and payout > 0:
+            if source == "refund" and (payout <= 0 or payout > float(item.get("stake") or 0)):
+                errors.append(f"{entry.get('race_id')}: refund source has invalid payout")
+            if source not in {"official", "refund"} and payout > 0:
                 errors.append(f"{entry.get('race_id')}: non-official payout source produced positive payout")
-            if not hit and source not in {"not_hit", "missing_official_payout"}:
+            if not hit and source not in {"not_hit", "missing_official_payout", "refund"}:
                 errors.append(f"{entry.get('race_id')}: non-hit recommendation has unexpected payout source {source}")
             if not hit and source == "missing_official_payout" and payout > 0:
                 errors.append(f"{entry.get('race_id')}: missing official payout was counted as a positive return")

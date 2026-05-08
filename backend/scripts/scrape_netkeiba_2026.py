@@ -480,6 +480,16 @@ def parse_odds_number(value: str) -> float | None:
     return number
 
 
+def parse_odds_runner_status(value: str) -> str:
+    text = strip_html_fragment(value)
+    compact = text.replace(" ", "").replace("\u3000", "")
+    if "競走除外" in compact or "発走除外" in compact or "除外" in compact:
+        return "除外"
+    if "出走取消" in compact or "取消" in compact:
+        return "取消"
+    return ""
+
+
 def extract_odds_table(text: str, block_id: str) -> str:
     block_index = text.find(block_id)
     if block_index < 0:
@@ -529,13 +539,17 @@ def parse_odds_block(text: str, block_id: str, value_key: str) -> dict[int, dict
         )
         odds_text = odds_match.group(1) if odds_match else cells[-1][1]
         odds_value = parse_odds_number(odds_text)
-        if odds_value is None:
+        runner_status = parse_odds_runner_status(odds_text)
+        if odds_value is None and not runner_status:
             continue
         parsed[runner_number] = {
             "runner_number": runner_number,
             "horse_name": horse_name,
-            value_key: odds_value,
         }
+        if odds_value is not None:
+            parsed[runner_number][value_key] = odds_value
+        if runner_status:
+            parsed[runner_number]["runner_status"] = runner_status
     return parsed
 
 
@@ -561,6 +575,8 @@ def parse_live_odds_file(path: Path) -> list[dict[str, Any]]:
         }
         row.update(place_odds.get(runner_number, {}))
         row.update(win_odds.get(runner_number, {}))
+        if row.get("runner_status"):
+            row["scratched"] = 1
         rows.append(row)
 
     valid_win_odds = sorted(
@@ -603,7 +619,7 @@ def overlay_live_odds(frame: pd.DataFrame, raw_dir: Path) -> pd.DataFrame:
 
     live_columns = [
         column
-        for column in ["market_odds", "place_odds", "odds_rank", "odds_snapshot_at"]
+        for column in ["market_odds", "place_odds", "odds_rank", "odds_snapshot_at", "runner_status", "scratched"]
         if column in odds_frame
     ]
     if not live_columns:

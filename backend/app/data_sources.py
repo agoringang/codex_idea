@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .runner_integrity import validate_race_runner_integrity
+from .runner_state import canonical_runner_status, runner_is_inactive_dict
 from .schemas import LiveSnapshot, Race
 
 
@@ -49,6 +50,29 @@ JRA_COURSE_CODE_VENUES = {
     "09": "阪神",
     "10": "小倉",
 }
+
+
+def _runner_status_from_row(row: dict[str, Any]) -> str | None:
+    for column in (
+        "runner_status",
+        "runnerStatus",
+        "status",
+        "result_status",
+        "remarks",
+        "note",
+        "備考",
+        "状態",
+        "finish_position",
+        "着順",
+    ):
+        status = canonical_runner_status(row.get(column))
+        if status:
+            return status
+    for column in ("market_odds", "place_odds", "odds_rank"):
+        status = canonical_runner_status(row.get(column))
+        if status:
+            return status
+    return None
 
 
 def _surface_label(surface: str | None) -> str:
@@ -503,6 +527,8 @@ def build_race_dicts_from_rows(
             number = _runner_number(row, index)
             gate = _gate_number(row, number)
             finish_position = _int_value(row, "finish_position", 0) or None
+            runner_status = _runner_status_from_row(row)
+            scratched = runner_status is not None
             market_odds = _float_value(row, "market_odds")
             place_odds = _trusted_place_odds(row, market_odds)
             horse_weight = _horse_weight_value(row)
@@ -512,6 +538,8 @@ def build_race_dicts_from_rows(
                 result_order.append(number)
 
             tags = ["実データ", "検証済み"]
+            if runner_status:
+                tags.append(runner_status)
             if finish_position is not None:
                 tags.append(f"{finish_position}着")
             if row.get("odds_rank"):
@@ -566,8 +594,10 @@ def build_race_dicts_from_rows(
                     "damSireId": _clean_text(row.get("dam_sire_id")) or None,
                     "damSire": _clean_text(row.get("dam_sire")) or None,
                     "rating": _rating_from_runner_features(row),
-                    "odds": float(market_odds) if market_odds and market_odds > 1 else 0.0,
-                    "placeOdds": place_odds,
+                    "odds": 0.0 if scratched else float(market_odds) if market_odds and market_odds > 1 else 0.0,
+                    "placeOdds": None if scratched else place_odds,
+                    "scratched": scratched,
+                    "runnerStatus": runner_status,
                     "tags": tags,
                 }
             )
@@ -617,7 +647,15 @@ def build_race_dicts_from_rows(
             "updated_at": race_date,
             "next_poll_seconds": 0,
             "odds_moves": [],
-            "scratches": [],
+            "scratches": [
+                {
+                    "number": runner["number"],
+                    "name": runner["name"],
+                    "reason": runner.get("runnerStatus") or "取消",
+                }
+                for runner in runners
+                if runner_is_inactive_dict(runner)
+            ],
             "result": {
                 "status": "official" if is_finished else "pending",
                 "message": f"{source_name}から生成された検証済みデータ {race_date}",
@@ -891,6 +929,27 @@ def _sanitize_race_payload(race: dict[str, Any]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 horse_weight_diff = 0
             runner["horseWeightDiff"] = horse_weight_diff if abs(horse_weight_diff) <= 80 else None
+
+        status = canonical_runner_status(runner.get("runnerStatus")) or canonical_runner_status(runner.get("runner_status"))
+        if status:
+            runner["runnerStatus"] = status
+            runner["scratched"] = True
+        if runner_is_inactive_dict(runner):
+            runner["scratched"] = True
+            runner["runnerStatus"] = status or canonical_runner_status(runner.get("status")) or "取消"
+            tags = runner.get("tags") if isinstance(runner.get("tags"), list) else []
+            if runner["runnerStatus"] not in tags:
+                tags.append(runner["runnerStatus"])
+            runner["tags"] = [
+                tag
+                for tag in tags
+                if not (isinstance(tag, str) and tag.endswith("人気"))
+            ]
+            runner["odds"] = 0.0
+            runner["placeOdds"] = None
+            runner["payoutWin"] = None
+            runner["payoutPlace"] = None
+            continue
 
         try:
             win_odds = float(str(runner.get("odds")))

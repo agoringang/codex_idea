@@ -54,6 +54,8 @@ class Runner(BaseModel):
     rating: int
     odds: float
     placeOdds: float | None = None
+    scratched: bool = False
+    runnerStatus: str | None = None
     tags: list[str]
 
 
@@ -164,6 +166,8 @@ class RunnerInput(BaseModel):
     ticket_pool_share: float | None = Field(default=None, ge=0, le=1)
     draw_bias: float | None = Field(default=None, ge=-1, le=1)
     body_weight_announced_minutes: float | None = Field(default=None, ge=0)
+    scratched: bool = False
+    runner_status: str | None = None
 
 
 class RaceRequest(BaseModel):

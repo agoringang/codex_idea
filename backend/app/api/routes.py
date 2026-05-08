@@ -163,13 +163,13 @@ def training_job(request: strategy_schemas.TrainingJobRequest) -> strategy_schem
 
 
 def _authorize_ingest_job(authorization: str | None, x_cron_secret: str | None = None) -> None:
-    secret = os.getenv("CRON_SECRET")
+    secret = os.getenv("UMALAB_CRON_SECRET") or os.getenv("CRON_SECRET")
     if secret:
         if authorization != f"Bearer {secret}" and x_cron_secret != secret:
             raise HTTPException(status_code=401, detail="invalid cron secret")
         return
     if os.getenv("VERCEL"):
-        raise HTTPException(status_code=401, detail="CRON_SECRET is required in production")
+        raise HTTPException(status_code=401, detail="UMALAB_CRON_SECRET or CRON_SECRET is required in production")
 
 
 @router.get("/jobs/ingest/netkeiba", response_model=strategy_schemas.NetkeibaIngestResponse)

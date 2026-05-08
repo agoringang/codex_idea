@@ -1566,6 +1566,21 @@ h1 {
   background: #f5f9ff;
 }
 
+.runner-table tr.inactive td {
+  border-color: rgba(100, 116, 139, 0.18);
+  background: #f8fafc;
+  color: #64748b;
+}
+
+.runner-table tr.inactive strong,
+.runner-table tr.inactive b {
+  color: #64748b;
+}
+
+.runner-table tr.inactive em {
+  color: #94a3b8;
+}
+
 .runner-table b,
 .runner-table strong,
 .runner-table span,

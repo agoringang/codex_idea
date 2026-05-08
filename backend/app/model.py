@@ -3,6 +3,7 @@ from collections.abc import Callable, Iterable, Sequence
 from itertools import combinations, permutations
 
 from .features import clamp, raw_probability_score
+from .runner_state import runner_is_inactive_model
 from .schemas import BetRecommendation, BetType, RacePrediction, RaceRequest, RunnerPrediction
 from .trained_model import predict_probabilities
 
@@ -599,38 +600,36 @@ def fixed_type_recommendations(
 ) -> list[BetRecommendation]:
     enabled = set(request.enabled_bet_types) & RECOMMENDABLE_BET_TYPES
     by_type: dict[BetType, BetRecommendation] = {}
-    strategy_priority: dict[BetType, tuple[str, ...]] = {
-        "trio": (
-            "3連複1頭軸流し",
-            "3連複2頭軸流し",
-            "3連複フォーメーション",
-            "3連複5頭ボックス",
-        ),
-        "trifecta": (
-            "3連単1着軸流し",
-            "3連単フォーメーション",
-            "3連単1頭軸マルチ",
-            "3連単2頭軸マルチ",
-            "3連単4頭ボックス",
-            "3連単2着軸流し",
-            "3連単3着軸流し",
-        ),
-    }
 
-    def candidate_score(item: BetRecommendation) -> tuple[int, float, float]:
-        priorities = strategy_priority.get(item.bet_type)
-        if priorities:
-            try:
-                priority = priorities.index(item.strategy)
-            except ValueError:
-                # A single 3連複/3連単 point should be a fallback only.
-                priority = 99
+    def strategy_shape_bonus(item: BetRecommendation) -> float:
+        if item.bet_type not in {"trio", "trifecta"}:
+            return 0.0
+        strategy = item.strategy
+        tickets = max(item.tickets, 1)
+        coverage = min(tickets / (12 if item.bet_type == "trio" else 24), 1.0)
+        ticket_penalty = max(0.0, (tickets - (18 if item.bet_type == "trio" else 36)) * 0.004)
+        if "ボックス" in strategy:
+            shape = 0.22
+        elif "フォーメーション" in strategy:
+            shape = 0.19
+        elif "マルチ" in strategy:
+            shape = 0.17
+        elif "2頭軸" in strategy:
+            shape = 0.13
+        elif "1頭軸" in strategy:
+            shape = 0.11
         else:
-            priority = 0
+            # 3連系の1点買いは表示候補としては最後。
+            shape = -0.72
+        return shape + coverage * 0.16 - ticket_penalty
+
+    def candidate_score(item: BetRecommendation) -> tuple[float, float, float]:
+        base = risk_adjusted_score(item, request.risk_level)
+        stability = item.probability * (1.25 if item.bet_type in {"trio", "trifecta"} else 1.0)
         return (
-            -priority,
-            risk_adjusted_score(item, request.risk_level),
+            base + strategy_shape_bonus(item) + stability,
             item.probability,
+            -float(item.tickets),
         )
 
     for item in sorted(recommendations, key=candidate_score, reverse=True):
@@ -642,6 +641,10 @@ def fixed_type_recommendations(
 
 
 def predict_race(request: RaceRequest) -> RacePrediction:
+    active_runners = [runner for runner in request.runners if not runner_is_inactive_model(runner)]
+    if len(active_runners) >= 2 and len(active_runners) != len(request.runners):
+        request = request.model_copy(update={"runners": active_runners})
+
     trained_probabilities = predict_probabilities(request.runners, market=request.market)
     if trained_probabilities is None:
         raw_scores = [raw_probability_score(runner, request.model_mode) for runner in request.runners]

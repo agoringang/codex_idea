@@ -74,6 +74,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "race_date": ("race_date", "日付", "年月日", "開催日", "date"),
     "race_no": ("race_no", "R", "レース", "レース番号", "race"),
     "finish_position": ("finish_position", "着順", "着", "順位"),
+    "runner_status": ("runner_status", "出走状態", "競走状態", "状態", "備考", "取消除外"),
     "runner_number": ("runner_number", "horse_number", "number", "馬番", "馬"),
     "bracket": ("bracket", "枠", "枠番"),
     "horse_name": ("horse_name", "馬名", "name", "競走馬"),
@@ -172,6 +173,8 @@ OUTPUT_COLUMNS = [
     "horse_weight_diff",
     "field_size",
     "finish_position",
+    "runner_status",
+    "scratched",
     "is_win",
     "is_place",
     "market_odds",
@@ -499,6 +502,19 @@ def parse_finish_position(value: Any) -> int | None:
     normalized = normalize_digits(text)
     match = re.search(r"\d+", normalized)
     return int(match.group(0)) if match else None
+
+
+def parse_runner_status(*values: Any) -> str:
+    for value in values:
+        text = clean_text(value)
+        if not text:
+            continue
+        compact = text.replace(" ", "").replace("\u3000", "")
+        if "競走除外" in compact or "発走除外" in compact or "除外" in compact:
+            return "除外"
+        if "出走取消" in compact or "取消" in compact:
+            return "取消"
+    return ""
 
 
 def parse_sex_age(value: Any) -> tuple[str, int | None]:
@@ -932,9 +948,19 @@ def normalize_table(
             sex = sex or parsed_sex
             age = age if age is not None else parsed_age
 
-        finish_position = parse_finish_position(first_value(row, frame, "finish_position"))
-        market_odds = to_float(first_value(row, frame, "market_odds"))
-        place_odds = to_float(first_value(row, frame, "place_odds"))
+        raw_finish_position = first_value(row, frame, "finish_position")
+        raw_market_odds = first_value(row, frame, "market_odds")
+        raw_place_odds = first_value(row, frame, "place_odds")
+        runner_status = parse_runner_status(
+            first_value(row, frame, "runner_status"),
+            raw_finish_position,
+            raw_market_odds,
+            raw_place_odds,
+        )
+        scratched = bool(runner_status)
+        finish_position = None if scratched else parse_finish_position(raw_finish_position)
+        market_odds = None if scratched else to_float(raw_market_odds)
+        place_odds = None if scratched else to_float(raw_place_odds)
         if market_odds is not None and market_odds <= 1.0:
             market_odds = None
         if place_odds is not None and place_odds <= 1.0:
@@ -956,7 +982,7 @@ def normalize_table(
             ),
             None,
         )
-        if finish_position is None and predicted_odds_column and market_odds is None:
+        if not scratched and finish_position is None and predicted_odds_column and market_odds is None:
             shifted_odds = to_float(raw_horse_weight)
             shifted_rank = to_int(row.get(predicted_odds_column))
             if shifted_odds is not None and shifted_odds > 1:
@@ -1000,6 +1026,8 @@ def normalize_table(
             "horse_weight_diff": horse_weight_diff,
             "field_size": None,
             "finish_position": finish_position,
+            "runner_status": runner_status,
+            "scratched": 1 if scratched else 0,
             "is_win": 1 if finish_position == 1 else 0 if finish_position is not None else None,
             "is_place": (
                 1
@@ -1026,7 +1054,7 @@ def normalize_table(
         }
         records.append(record)
 
-    field_size = len(records)
+    field_size = sum(1 for record in records if not record.get("scratched")) or len(records)
     for record in records:
         record["field_size"] = field_size
     return records

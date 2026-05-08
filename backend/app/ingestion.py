@@ -14,6 +14,7 @@ from .data_sources import build_race_dicts_from_rows
 from .history import get_all_history, record_prediction
 from .model import predict_race
 from .race_storage import fetch_race_cards, race_storage_available, record_ingest_run, upsert_race_cards
+from .runner_state import canonical_runner_status, runner_is_inactive_dict
 from .schemas import RaceRequest, RunnerInput
 
 
@@ -86,7 +87,8 @@ def _trusted_place_odds(win_odds: float, value: Any) -> float | None:
 
 
 def _race_request_from_dict(race: dict[str, Any]) -> RaceRequest:
-    runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+    raw_runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+    runners = [runner for runner in raw_runners if isinstance(runner, dict) and not runner_is_inactive_dict(runner)]
     odds_rank = {
         id(item): index + 1
         for index, item in enumerate(
@@ -153,6 +155,8 @@ def _race_request_from_dict(race: dict[str, Any]) -> RaceRequest:
                 odds_delta=runner.get("oddsDelta"),
                 ticket_pool_share=runner.get("ticketPoolShare"),
                 draw_bias=runner.get("drawBias"),
+                scratched=False,
+                runner_status=canonical_runner_status(runner.get("runnerStatus") or runner.get("runner_status")),
             )
         )
 
@@ -188,7 +192,11 @@ def _race_request_from_dict(race: dict[str, Any]) -> RaceRequest:
 
 
 def _race_has_usable_market_odds(race: dict[str, Any]) -> bool:
-    runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+    runners = [
+        runner
+        for runner in (race.get("runners") if isinstance(race.get("runners"), list) else [])
+        if isinstance(runner, dict) and not runner_is_inactive_dict(runner)
+    ]
     if len(runners) < 2:
         return False
     usable = 0

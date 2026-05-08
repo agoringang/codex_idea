@@ -16,6 +16,8 @@ type Runner = {
   jockey: string;
   odds: number;
   placeOdds?: number;
+  scratched?: boolean;
+  runnerStatus?: string;
   baseWin: number;
   drift: number;
   form: number;
@@ -201,6 +203,8 @@ type RecommendationResult = {
   payoutSource?: string;
   winningTickets?: number;
   winningSelections?: string[];
+  refundedTickets?: number;
+  refundedSelections?: string[];
 };
 
 type ApiState = "loading" | "ready" | "empty" | "fallback";
@@ -728,9 +732,33 @@ function hasRunnerWinOdds(runner: Pick<Runner, "odds">) {
   return hasWinOddsValue(runner.odds);
 }
 
+function runnerInactiveStatus(runner: Pick<Runner, "scratched" | "runnerStatus" | "tags">) {
+  if (runner.scratched) {
+    return runner.runnerStatus || "取消";
+  }
+  const explicit = String(runner.runnerStatus ?? "");
+  if (/(取消|除外)/.test(explicit)) {
+    return explicit.includes("除外") ? "除外" : "取消";
+  }
+  const tag = runner.tags?.find((value) => /(取消|除外)/.test(value));
+  if (!tag) {
+    return undefined;
+  }
+  return tag.includes("除外") ? "除外" : "取消";
+}
+
+function runnerIsActive(runner: Pick<Runner, "scratched" | "runnerStatus" | "tags">) {
+  return runnerInactiveStatus(runner) === undefined;
+}
+
+function activeRaceRunners(race: Race) {
+  return race.runners.filter(runnerIsActive);
+}
+
 function raceHasUsableWinOdds(race: Race) {
-  const usable = race.runners.filter(hasRunnerWinOdds).length;
-  return usable >= Math.max(2, Math.floor(race.runners.length * 0.7));
+  const active = activeRaceRunners(race);
+  const usable = active.filter(hasRunnerWinOdds).length;
+  return usable >= Math.max(2, Math.floor(active.length * 0.7));
 }
 
 function normalizeApiRace(item: any): Race {
@@ -747,6 +775,8 @@ function normalizeApiRace(item: any): Race {
       jockey: optionalText(runner.jockey) ?? "-",
       odds,
       placeOdds: trustedPlaceOdds(odds, runner.placeOdds ?? runner.place_odds),
+      scratched: Boolean(runner.scratched),
+      runnerStatus: optionalText(runner.runnerStatus ?? runner.runner_status),
       baseWin: hasWinOddsValue(odds)
         ? Math.min(0.65, Math.max(0.004, 1 / odds))
         : 1 / Math.max(runners.length, 1),
@@ -870,6 +900,10 @@ function normalizeApiHistory(payload: any): HistoricalPrediction[] {
             winningSelections: Array.isArray(item.winning_selections)
               ? item.winning_selections.map((value: any) => String(value))
               : undefined,
+            refundedTickets: optionalNumber(item.refunded_tickets),
+            refundedSelections: Array.isArray(item.refunded_selections)
+              ? item.refunded_selections.map((value: any) => String(value))
+              : undefined,
           }))
         : [];
       const recommendationResults = rawRecommendationResults.filter((item) => isPublicBetType(item.betType));
@@ -948,8 +982,9 @@ async function fetchHistoryRangeFromApi(startDate: string, endDate: string) {
 }
 
 function buildRaceRequest(race: Race, riskLevel: number, bankroll: number) {
+  const runnersForPrediction = activeRaceRunners(race);
   const oddsRank = new Map(
-    [...race.runners]
+    [...runnersForPrediction]
       .sort((a, b) => (hasRunnerWinOdds(a) ? a.odds : 9999) - (hasRunnerWinOdds(b) ? b.odds : 9999))
       .map((runner, index) => [runner.number, index + 1]),
   );
@@ -992,7 +1027,7 @@ function buildRaceRequest(race: Race, riskLevel: number, bankroll: number) {
       "trio",
       "trifecta",
     ],
-    runners: race.runners.map((runner) => {
+    runners: runnersForPrediction.map((runner) => {
       const odds = Math.max(hasRunnerWinOdds(runner) ? runner.odds : 1.1, 1.1);
       const form = Math.max(1, Math.min(100, runner.form));
       return {
@@ -1045,6 +1080,8 @@ function buildRaceRequest(race: Race, riskLevel: number, bankroll: number) {
         odds_delta_15m: runner.oddsDelta15m,
         odds_volatility: runner.oddsVolatility,
         ticket_pool_share: runner.ticketPoolShare,
+        scratched: false,
+        runner_status: undefined,
       };
     }),
   };
@@ -1181,6 +1218,9 @@ function resultBetSummary(item: RecommendationResult) {
 }
 
 function resultPayoutPer100Label(item: RecommendationResult) {
+  if (item.payoutSource === "refund") {
+    return "返還";
+  }
   if (item.officialPayoutYen && item.officialPayoutYen > 0) {
     return formatYen(item.officialPayoutYen);
   }
@@ -1194,6 +1234,9 @@ function resultPayoutPer100Label(item: RecommendationResult) {
 }
 
 function resultOddsLabel(item: RecommendationResult) {
+  if (item.payoutSource === "refund") {
+    return "返還";
+  }
   if (item.officialPayoutYen && item.officialPayoutYen > 0) {
     return `${(item.officialPayoutYen / 100).toFixed(item.officialPayoutYen >= 10000 ? 0 : 1)}倍`;
   }
@@ -1400,6 +1443,19 @@ function mergeApiProjections(prediction: ApiRacePrediction | null, race: Race) {
         score: safeNumber(runner.score, 0),
       };
     });
+  race.runners.forEach((runner) => {
+    if (merged.some((item) => item.number === runner.number)) {
+      return;
+    }
+    merged.push({
+      ...runner,
+      winProbability: 0,
+      placeProbability: 0,
+      fairOdds: 0,
+      edge: 0,
+      score: -1,
+    });
+  });
   return rankProjections(merged, race);
 }
 
@@ -1427,7 +1483,7 @@ function taggedPopularity(runner: Runner) {
 
 function oddsRankMap(race: Race) {
   return new Map(
-    [...race.runners]
+    activeRaceRunners(race)
       .sort((a, b) => {
         const oddsA = hasRunnerWinOdds(a) ? a.odds : 9999;
         const oddsB = hasRunnerWinOdds(b) ? b.odds : 9999;
@@ -1448,6 +1504,10 @@ function runnerPopularity(runner: Runner, race: Race) {
 }
 
 function runnerOddsMeta(runner: Runner, race: Race) {
+  const inactive = runnerInactiveStatus(runner);
+  if (inactive) {
+    return inactive;
+  }
   const popularity = runnerPopularity(runner, race);
   const popularityLabel = popularity ? `${popularity}人気` : "人気不明";
   const placeLabel = runner.placeOdds ? ` / 複${runner.placeOdds.toFixed(1)}倍` : "";
@@ -1458,15 +1518,15 @@ function runnerOddsMeta(runner: Runner, race: Race) {
 function marketWinProbability(race: Race, runnerNumber: number) {
   const oddsReady = raceHasUsableWinOdds(race);
   if (!oddsReady) {
-    return 1 / Math.max(race.runners.length, 1);
+    return 1 / Math.max(activeRaceRunners(race).length, 1);
   }
-  const implied = race.runners.filter(hasRunnerWinOdds).map((runner) => ({
+  const implied = activeRaceRunners(race).filter(hasRunnerWinOdds).map((runner) => ({
     number: runner.number,
     value: 1 / Math.max(runner.odds, 1.01),
   }));
   const total = implied.reduce((sum, item) => sum + item.value, 0);
   const target = implied.find((item) => item.number === runnerNumber)?.value ?? 0;
-  return total > 0 ? target / total : 1 / Math.max(race.runners.length, 1);
+  return total > 0 ? target / total : 1 / Math.max(activeRaceRunners(race).length, 1);
 }
 
 function nonMarketFeatureScore(runner: Runner) {
@@ -1483,9 +1543,13 @@ function nonMarketFeatureScore(runner: Runner) {
 }
 
 function predictionDisplayScore(runner: RunnerProjection, race: Race) {
+  if (!runnerIsActive(runner)) {
+    return -1;
+  }
   const marketProbability = marketWinProbability(race, runner.number);
   const marketGap = runner.winProbability - marketProbability;
-  const placeMarket = Math.min(marketProbability * Math.min(race.runners.length, 3), 0.95);
+  const activeCount = activeRaceRunners(race).length;
+  const placeMarket = Math.min(marketProbability * Math.min(activeCount, 3), 0.95);
   const placeGap = runner.placeProbability - placeMarket;
   const top2Probability = runner.top2Probability ?? Math.min(0.92, runner.winProbability + runner.placeProbability * 0.42);
   const baselineForm = hasRunnerWinOdds(runner)
@@ -1526,7 +1590,11 @@ function rankProjections(projections: RunnerProjection[], race: Race) {
 }
 
 function buildRaceOnlyProjections(race: Race, riskRatio = 0.52) {
+  const activeCount = activeRaceRunners(race).length;
   const raw = race.runners.map((runner) => {
+    if (!runnerIsActive(runner)) {
+      return { runner, score: 0 };
+    }
     const valueLift = hasRunnerWinOdds(runner) && runner.odds >= 8 ? riskRatio * 0.012 : 0;
     const oddsMoveLift = runner.drift < 0 ? Math.abs(runner.drift) * 0.00045 : -runner.drift * 0.0003;
     const featureLift = nonMarketFeatureScore(runner) / 140;
@@ -1536,8 +1604,18 @@ function buildRaceOnlyProjections(race: Race, riskRatio = 0.52) {
   const total = raw.reduce((sum, item) => sum + item.score, 0);
 
   const projections = raw.map(({ runner, score }) => {
-    const winProbability = total > 0 ? score / total : 1 / Math.max(race.runners.length, 1);
+    const winProbability = total > 0 ? score / total : 1 / Math.max(activeCount, 1);
     const placeProbability = Math.min(0.86, winProbability * 2.55 + runner.form / 820);
+    if (!runnerIsActive(runner)) {
+      return {
+        ...runner,
+        winProbability: 0,
+        placeProbability: 0,
+        fairOdds: 0,
+        edge: 0,
+        score: -1,
+      };
+    }
     const fairOdds = 1 / Math.max(winProbability, 0.001);
     const edge = hasRunnerWinOdds(runner) ? winProbability * runner.odds - 1 : 0;
     return {
@@ -1895,7 +1973,9 @@ function raceStatusLabel(race: Race) {
 }
 
 function fieldSizeLabel(race: Race) {
-  return `${race.runners.length}頭`;
+  const active = activeRaceRunners(race).length;
+  const inactive = race.runners.length - active;
+  return inactive > 0 ? `${active}頭 / 取消除外${inactive}` : `${active}頭`;
 }
 
 function runnerWeightLabel(runner: Runner) {
@@ -1920,7 +2000,8 @@ function runnerProfileLabel(runner: Runner) {
 }
 
 function dataDepthScore(race: Race) {
-  if (race.runners.length === 0) {
+  const active = activeRaceRunners(race);
+  if (active.length === 0) {
     return 0;
   }
 
@@ -1953,7 +2034,7 @@ function dataDepthScore(race: Race) {
     "damSire",
   ];
 
-  const present = race.runners.reduce((sum, runner) => {
+  const present = active.reduce((sum, runner) => {
     return (
       sum +
       fields.filter((field) => {
@@ -1963,13 +2044,14 @@ function dataDepthScore(race: Race) {
     );
   }, 0);
 
-  return present / Math.max(race.runners.length * fields.length, 1);
+  return present / Math.max(active.length * fields.length, 1);
 }
 
 function raceVolatilityProfile(race: Race, projections: RunnerProjection[]) {
   const top = projections[0];
   const second = projections[1];
-  const favorite = [...race.runners]
+  const active = activeRaceRunners(race);
+  const favorite = [...active]
     .filter(hasRunnerWinOdds)
     .sort((a, b) => a.odds - b.odds || a.number - b.number)[0];
   const favoriteMarketProbability = favorite ? marketWinProbability(race, favorite.number) : 0;
@@ -1981,9 +2063,9 @@ function raceVolatilityProfile(race: Race, projections: RunnerProjection[]) {
     const gap = runner.winProbability - marketWinProbability(race, runner.number);
     return hasRunnerWinOdds(runner) && runner.odds >= 4 && gap >= 0.012;
   }).length;
-  const weightSwings = race.runners.filter((runner) => Math.abs(runner.horseWeightDiff ?? 0) >= 12).length;
-  const oddsMoves = race.runners.filter((runner) => Math.abs(runner.oddsDelta ?? 0) >= 0.08).length;
-  const paddockSignals = race.runners.filter((runner) => (runner.paddockScore ?? runner.trainingScore ?? 0) >= 76).length;
+  const weightSwings = active.filter((runner) => Math.abs(runner.horseWeightDiff ?? 0) >= 12).length;
+  const oddsMoves = active.filter((runner) => Math.abs(runner.oddsDelta ?? 0) >= 0.08).length;
+  const paddockSignals = active.filter((runner) => (runner.paddockScore ?? runner.trainingScore ?? 0) >= 76).length;
   const favoriteIsAiTop = Boolean(top && favorite && top.number === favorite.number);
   const topPopularity = top ? runnerPopularity(top, race) ?? 99 : 99;
   const depth = dataDepthScore(race);
@@ -1992,7 +2074,7 @@ function raceVolatilityProfile(race: Race, projections: RunnerProjection[]) {
     Math.min(
       100,
       36 +
-        Math.max(0, race.runners.length - 8) * 3.2 +
+        Math.max(0, active.length - 8) * 3.2 +
         Math.max(0, 0.28 - favoriteMarketProbability) * 120 +
         Math.max(0, 0.14 - winGap) * 135 +
         Math.max(0, contenderCount - 2) * 7 +
@@ -2400,7 +2482,7 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     async function loadPrediction() {
-      if (activeTab !== "predict" || !modelingRace || modelingRace.runners.length < 2) {
+      if (activeTab !== "predict" || !modelingRace || activeRaceRunners(modelingRace).length < 2) {
         setApiPrediction(null);
         return;
       }
@@ -3144,14 +3226,15 @@ function SettledTicketList({
             return null;
           }
           const hit = Boolean(result?.hit);
+          const refunded = result?.payoutSource === "refund" || Boolean(result?.refundedTickets);
           const matchedButMissing = result?.selectionMatched && result.payoutSource === "missing_official_payout";
-          const statusLabel = hit ? "🎯 的中" : matchedButMissing ? "払戻未取得" : result ? "不的中" : "照合待ち";
+          const statusLabel = hit ? "🎯 的中" : refunded ? "返還" : matchedButMissing ? "払戻未取得" : result ? "不的中" : "照合待ち";
           const payoutLabel = result ? resultPayoutPer100Label(result) : "-";
           const oddsLabel = ticket ? ticketOddsLabel(ticket, true) : result ? resultOddsLabel(result) : "-";
           return (
             <article
               className={[
-                hit ? "hit" : matchedButMissing ? "pending" : result ? "miss" : "pending",
+                hit ? "hit" : refunded || matchedButMissing ? "pending" : result ? "miss" : "pending",
                 marketClass(race.market),
               ].filter(Boolean).join(" ")}
               key={guide.id}
@@ -3166,11 +3249,11 @@ function SettledTicketList({
                 <Value label="券オッズ" value={oddsLabel} />
                 <Value label="予想100円払戻" value={ticket ? ticketPayoutPer100Label(ticket, true) : "-"} />
                 <Value label="公式払戻" value={payoutLabel} />
-                <Value label="回収" value={result ? (hit ? formatYen(result.payout) : "払戻なし") : "-"} tone={hit ? "positive" : result ? "negative" : undefined} />
+                <Value label="回収" value={result ? (result.payout > 0 ? formatYen(result.payout) : "払戻なし") : "-"} tone={hit || refunded ? "positive" : result ? "negative" : undefined} />
               </div>
               <div className="settled-ticket-foot">
                 <span>{ticket ? ticketCompactMethod(ticket) : publicStrategyLabel(result?.strategy)}</span>
-                <b>{result?.winningTickets ? `的中 ${result.winningTickets}点` : statusLabel}</b>
+                <b>{result?.winningTickets ? `的中 ${result.winningTickets}点` : result?.refundedTickets ? `返還 ${result.refundedTickets}点` : statusLabel}</b>
               </div>
             </article>
           );
@@ -4101,9 +4184,16 @@ function RunnerTable({ projections, race }: { projections: RunnerProjection[]; r
             const result = finishPosition(runner);
             const popularity = runnerPopularity(runner, race);
             const predictionRank = projections.findIndex((item) => item.number === runner.number) + 1;
+            const inactiveStatus = runnerInactiveStatus(runner);
 
             return (
-              <tr className={result && result <= 3 ? "placed" : ""} key={runner.number}>
+              <tr
+                className={[
+                  result && result <= 3 ? "placed" : "",
+                  inactiveStatus ? "inactive" : "",
+                ].filter(Boolean).join(" ")}
+                key={runner.number}
+              >
                 <td>
                   <b>{sortKey === "prediction" ? index + 1 : predictionRank || index + 1}</b>
                   {result && <em>{result}着</em>}
@@ -4114,12 +4204,26 @@ function RunnerTable({ projections, race }: { projections: RunnerProjection[]; r
                   <span className="runner-condition-inline">{profile} / {horseWeight}</span>
                 </td>
                 <td>
-                  <strong>{hasRunnerWinOdds(runner) ? `単 ${runner.odds.toFixed(1)}倍` : "単勝 未取得"}</strong>
-                  <span>{runner.placeOdds ? `複 ${runner.placeOdds.toFixed(1)}倍` : "複 未取得"}</span>
-                  <span>{popularity ? `${popularity}人気` : "人気不明"}</span>
+                  {inactiveStatus ? (
+                    <>
+                      <strong>{inactiveStatus}</strong>
+                      <span>馬券対象外</span>
+                    </>
+                  ) : (
+                    <>
+                      <strong>{hasRunnerWinOdds(runner) ? `単 ${runner.odds.toFixed(1)}倍` : "単勝 未取得"}</strong>
+                      <span>{runner.placeOdds ? `複 ${runner.placeOdds.toFixed(1)}倍` : "複 未取得"}</span>
+                      <span>{popularity ? `${popularity}人気` : "人気不明"}</span>
+                    </>
+                  )}
                 </td>
                 <td>
-                  {oddsReady ? (
+                  {inactiveStatus ? (
+                    <>
+                      <strong>{inactiveStatus}</strong>
+                      <span>予想から除外</span>
+                    </>
+                  ) : oddsReady ? (
                     <>
                       <strong>AI {displayAiIndex(runner, race)}</strong>
                       <span>勝 {formatPercent(runner.winProbability)} / 3内 {formatPercent(runner.placeProbability)}</span>
@@ -4132,7 +4236,7 @@ function RunnerTable({ projections, race }: { projections: RunnerProjection[]; r
                   )}
                 </td>
                 <td>
-                  <strong>{profile}</strong>
+                  <strong>{inactiveStatus ?? profile}</strong>
                   <span>{horseWeight}</span>
                 </td>
               </tr>

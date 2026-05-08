@@ -4,6 +4,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
+from .runner_state import runner_is_inactive_model
 from .schemas import Race
 
 
@@ -65,6 +66,17 @@ def _payout_key(selection: Any, *, ordered: bool) -> str:
 
 def _runner_by_number(race: Race) -> dict[int, Any]:
     return {runner.number: runner for runner in race.runners}
+
+
+def _inactive_runner_numbers(race: Race) -> set[int]:
+    return {runner.number for runner in race.runners if runner_is_inactive_model(runner)}
+
+
+def _refunded_entries(recommendation: dict[str, Any], race: Race) -> list[list[int]]:
+    inactive = _inactive_runner_numbers(race)
+    if not inactive:
+        return []
+    return [entry for entry in _recommendation_entries(recommendation) if set(entry) & inactive]
 
 
 def _official_payout_yen(recommendation: dict[str, Any], race: Race, order: list[int]) -> float | None:
@@ -184,6 +196,8 @@ def settle_prediction_entry(entry: dict[str, Any], race: Race | None) -> dict[st
         odds = float(recommendation.get("odds") or 0)
         tickets = max(int(float(recommendation.get("tickets") or 1)), 1)
         unit_stake = float(recommendation.get("unit_stake") or (stake / tickets if tickets else stake))
+        refunded_entries = _refunded_entries(recommendation, race)
+        refund_payout = unit_stake * len(refunded_entries)
         winning_entries = _winning_entries(recommendation, order, race)
         recommendation_hit = bool(winning_entries)
         official_payouts = [
@@ -209,7 +223,7 @@ def settle_prediction_entry(entry: dict[str, Any], race: Race | None) -> dict[st
         payable_hit = recommendation_hit and not missing_official_payout
         if payable_hit:
             hit_recommendations.append(recommendation)
-            total_payout += payout
+        total_payout += payout + refund_payout
         recommendation_results.append(
             {
                 "bet_type": recommendation.get("bet_type"),
@@ -219,13 +233,17 @@ def settle_prediction_entry(entry: dict[str, Any], race: Race | None) -> dict[st
                 "selection_matched": recommendation_hit,
                 "stake": stake,
                 "odds": odds,
-                "payout": payout,
+                "payout": payout + refund_payout,
                 "official_payout_yen": official_payout,
                 "winning_tickets": len(winning_entries),
                 "winning_selections": winning_selections,
+                "refunded_tickets": len(refunded_entries),
+                "refunded_selections": [_entry_key(entry, ordered=ordered) for entry in refunded_entries],
                 "payout_source": (
                     "official"
                     if recommendation_hit and not missing_official_payout
+                    else "refund"
+                    if refunded_entries
                     else "missing_official_payout"
                     if recommendation_hit
                     else "not_hit"
