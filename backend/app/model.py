@@ -598,13 +598,11 @@ def fixed_type_recommendations(
     recommendations: list[BetRecommendation], request: RaceRequest
 ) -> list[BetRecommendation]:
     enabled = set(request.enabled_bet_types) & RECOMMENDABLE_BET_TYPES
-    ranked = sorted(
-        recommendations,
-        key=lambda item: risk_adjusted_score(item, request.risk_level),
-        reverse=True,
-    )
     by_type: dict[BetType, BetRecommendation] = {}
-    for item in ranked:
+    # Public UI predictions must preserve the model's own ranking.
+    # Recommendations are generated in AI-score order, so the first candidate
+    # for each type is the clearest "AI評価どおり" ticket.
+    for item in recommendations:
         if item.bet_type not in PUBLIC_FIXED_BET_TYPES or item.bet_type not in enabled:
             continue
         if item.bet_type not in by_type:
@@ -1005,7 +1003,6 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             force_display=True,
         )
 
-    recommendations.sort(key=lambda item: risk_adjusted_score(item, request.risk_level), reverse=True)
     recommendations = fixed_type_recommendations(recommendations, request)
 
     total_stake = sum(item.stake for item in recommendations)

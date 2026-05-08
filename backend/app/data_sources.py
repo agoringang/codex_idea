@@ -935,6 +935,105 @@ def _apply_runner_integrity_status(race: dict[str, Any]) -> dict[str, Any]:
     return race
 
 
+def _runner_finish_tags(race: dict[str, Any]) -> dict[int, list[str]]:
+    runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+    finish_tags: dict[int, list[str]] = {}
+    for runner in runners:
+        if not isinstance(runner, dict):
+            continue
+        number = _int_value(runner, "number", 0)
+        tags = runner.get("tags") if isinstance(runner.get("tags"), list) else []
+        values = [str(tag) for tag in tags if isinstance(tag, str) and tag.endswith("着")]
+        if number > 0 and values:
+            finish_tags[number] = values
+    return finish_tags
+
+
+def _is_top3_only_result(race: dict[str, Any]) -> bool:
+    if str(race.get("status") or "") != "finished":
+        return False
+    runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+    if len(runners) > 3:
+        return False
+    finish_positions: list[int] = []
+    for runner in runners:
+        if not isinstance(runner, dict):
+            continue
+        tags = runner.get("tags") if isinstance(runner.get("tags"), list) else []
+        for tag in tags:
+            if not isinstance(tag, str) or not tag.endswith("着"):
+                continue
+            value = _int_value({"finish_position": tag.replace("着", "")}, "finish_position", 0)
+            if value > 0:
+                finish_positions.append(value)
+    return sorted(finish_positions) == [1, 2, 3]
+
+
+def _merge_duplicate_race_payloads(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
+    first_runners = first.get("runners") if isinstance(first.get("runners"), list) else []
+    second_runners = second.get("runners") if isinstance(second.get("runners"), list) else []
+    first_finished = str(first.get("status") or "") == "finished"
+    second_finished = str(second.get("status") or "") == "finished"
+    card = second if len(second_runners) > len(first_runners) else first
+    result = second if second_finished else first if first_finished else None
+
+    if result is None or card is result:
+        if _is_top3_only_result(second) and len(first_runners) > len(second_runners):
+            result = second
+            card = first
+        elif _is_top3_only_result(first) and len(second_runners) > len(first_runners):
+            result = first
+            card = second
+        else:
+            return second if _race_quality_score(second) >= _race_quality_score(first) else first
+
+    merged = deepcopy(card)
+    merged["status"] = "finished"
+    merged["start"] = result.get("start") or merged.get("start")
+    merged["title"] = result.get("title") or merged.get("title")
+    merged["officialNote"] = f"{_clean_text(merged.get('officialNote'))} / 結果は{_clean_text(result.get('source')) or '別ソース'}で照合済み".strip(" /")
+    merged["source"] = " + ".join(
+        dict.fromkeys(
+            source
+            for source in [str(merged.get("source") or ""), str(result.get("source") or "")]
+            if source
+        )
+    ) or merged.get("source")
+    merged["sourceUrl"] = result.get("sourceUrl") or merged.get("sourceUrl")
+    merged["sourceCheckedAt"] = max(str(merged.get("sourceCheckedAt") or ""), str(result.get("sourceCheckedAt") or ""))
+    result_payouts = result.get("payouts") if isinstance(result.get("payouts"), list) else []
+    if result_payouts:
+        merged["payouts"] = result_payouts
+
+    finish_tags = _runner_finish_tags(result)
+    payout_by_number = {
+        _int_value(runner, "number", 0): runner
+        for runner in (result.get("runners") if isinstance(result.get("runners"), list) else [])
+        if isinstance(runner, dict)
+    }
+    for runner in merged.get("runners", []):
+        if not isinstance(runner, dict):
+            continue
+        number = _int_value(runner, "number", 0)
+        tags = [tag for tag in (runner.get("tags") if isinstance(runner.get("tags"), list) else []) if not (isinstance(tag, str) and tag.endswith("着"))]
+        tags.extend(finish_tags.get(number, []))
+        runner["tags"] = tags
+        result_runner = payout_by_number.get(number)
+        if result_runner:
+            for key in [
+                "payoutWin",
+                "payoutPlace",
+                "payoutQuinella",
+                "payoutWide",
+                "payoutExacta",
+                "payoutTrio",
+                "payoutTrifecta",
+            ]:
+                if result_runner.get(key):
+                    runner[key] = result_runner[key]
+    return merged
+
+
 def _repair_race_start_time(race: dict[str, Any]) -> dict[str, Any]:
     start = str(race.get("start") or "")
     if re.search(r"\d{1,2}:\d{2}", start):
@@ -954,14 +1053,16 @@ def _repair_race_start_time(race: dict[str, Any]) -> dict[str, Any]:
 def _collapse_duplicate_races(races: list[dict[str, Any]]) -> list[dict[str, Any]]:
     collapsed: dict[tuple[str, str, int], dict[str, Any]] = {}
     for race in races:
-        race = _apply_runner_integrity_status(_sanitize_race_payload(_repair_race_start_time(race)))
+        race = _sanitize_race_payload(_repair_race_start_time(race))
         key = _race_display_key(race)
         if key[2] == 999:
             key = (key[0], key[1], hash(str(race.get("id") or "")))
         current = collapsed.get(key)
-        if current is None or _race_quality_score(race) >= _race_quality_score(current):
+        if current is None:
             collapsed[key] = race
-    return sorted(collapsed.values(), key=_sort_race_dict)
+        else:
+            collapsed[key] = _merge_duplicate_race_payloads(current, race)
+    return sorted((_apply_runner_integrity_status(race) for race in collapsed.values()), key=_sort_race_dict)
 
 
 def _resolve_requested_window(

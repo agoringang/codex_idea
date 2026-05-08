@@ -523,6 +523,7 @@ const tabs: { id: ViewTab; label: string; icon: TabIconId }[] = [
 ];
 
 const PORTFOLIO_RISK_LEVEL = 72;
+const DEFAULT_PUBLIC_BANKROLL = 100000;
 const PUBLIC_BET_TYPE_GUIDES = [
   { id: "win", label: "単勝", summary: "1着を当てる", method: "1頭指定" },
   { id: "bracket_quinella", label: "枠連", summary: "1・2着の枠", method: "枠指定 / 流し" },
@@ -924,7 +925,9 @@ function normalizeApiHistory(payload: any): HistoricalPrediction[] {
 }
 
 async function fetchRaceRangeFromApi(startDate: string, endDate: string) {
-  const response = await fetch(`${apiBaseUrl()}/races?start_date=${startDate}&end_date=${endDate}`);
+  const response = await fetch(`${apiBaseUrl()}/races?start_date=${startDate}&end_date=${endDate}`, {
+    cache: "no-store",
+  });
   if (!response.ok) {
     throw new Error(`races ${response.status}`);
   }
@@ -935,7 +938,9 @@ async function fetchRaceRangeFromApi(startDate: string, endDate: string) {
 }
 
 async function fetchHistoryRangeFromApi(startDate: string, endDate: string) {
-  const response = await fetch(`${apiBaseUrl()}/history?start_date=${startDate}&end_date=${endDate}`);
+  const response = await fetch(`${apiBaseUrl()}/history?start_date=${startDate}&end_date=${endDate}`, {
+    cache: "no-store",
+  });
   if (!response.ok) {
     return [];
   }
@@ -1573,6 +1578,49 @@ function todayAtJst() {
   }).format(new Date());
 }
 
+function nowPartsAtJst() {
+  const parts = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
+  return {
+    date: `${value("year")}-${value("month")}-${value("day")}`,
+    minutes: Number(value("hour")) * 60 + Number(value("minute")),
+  };
+}
+
+function raceStartMinutes(race: Race) {
+  const match = String(race.start || "").match(/(\d{1,2}):(\d{2})/);
+  if (!match) {
+    return null;
+  }
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function raceHasStartedByClock(race: Race) {
+  if (race.status === "finished" || race.status === "schedule") {
+    return false;
+  }
+  const startMinutes = raceStartMinutes(race);
+  if (startMinutes === null || race.start.includes("推定")) {
+    return false;
+  }
+  const now = nowPartsAtJst();
+  if (race.date < now.date) {
+    return true;
+  }
+  if (race.date > now.date) {
+    return false;
+  }
+  return now.minutes >= startMinutes;
+}
+
 function addDays(date: string, days: number) {
   const [year, month, day] = date.split("-").map(Number);
   return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
@@ -1803,7 +1851,7 @@ function displayHistoryTitle(history: HistoricalPrediction) {
 }
 
 function raceStatusLead(race: Race) {
-  const status = race.status === "finished" ? "結果確定" : "発走前";
+  const status = race.status === "finished" ? "結果確定" : raceHasStartedByClock(race) ? "結果取得中" : "発走前";
   return `${race.course} / ${publicMarketLabel(race.market)} / ${status}`;
 }
 
@@ -1811,7 +1859,7 @@ function raceStartLabel(race: Race) {
   const match = String(race.start || "").match(/\d{1,2}:\d{2}/);
   if (match) {
     const prefix = race.start.includes("推定") ? "推定 " : "";
-    const suffix = race.status === "finished" ? " / 結果確定" : "";
+    const suffix = race.status === "finished" ? " / 結果確定" : raceHasStartedByClock(race) ? " / 結果取得中" : "";
     return `${prefix}${match[0]}発走${suffix}`;
   }
   if (race.status === "finished") {
@@ -1827,6 +1875,9 @@ function raceStatusClass(race: Race) {
   if (race.status === "schedule") {
     return "status-schedule";
   }
+  if (raceHasStartedByClock(race)) {
+    return "status-waiting-result";
+  }
   return "status-open";
 }
 
@@ -1836,6 +1887,9 @@ function raceStatusLabel(race: Race) {
   }
   if (race.status === "schedule") {
     return "開催予定";
+  }
+  if (raceHasStartedByClock(race)) {
+    return "結果取得中";
   }
   return "発走前";
 }
@@ -2189,7 +2243,6 @@ export default function Home() {
   const [selectedVenue, setSelectedVenue] = useState("");
   const [monthAnchor, setMonthAnchor] = useState(monthStart(INITIAL_CALENDAR_DATE));
   const [todayDate, setTodayDate] = useState(INITIAL_CALENDAR_DATE);
-  const [bankroll, setBankroll] = useState(100000);
   const [apiRaces, setApiRaces] = useState<Race[]>([]);
   const [apiHistory, setApiHistory] = useState<HistoricalPrediction[]>([]);
   const [apiState, setApiState] = useState<ApiState>("loading");
@@ -2249,7 +2302,7 @@ export default function Home() {
     () => summarizeHistory(availableHistory.filter((item) => !item.generatedAfterResult)),
     [availableHistory],
   );
-  const activeBankroll = Number.isFinite(bankroll) ? Math.max(bankroll, 1000) : 100000;
+  const activeBankroll = DEFAULT_PUBLIC_BANKROLL;
   const riskLevel = PORTFOLIO_RISK_LEVEL;
   const riskRatio = riskLevel / 100;
   const modelingRace = activeTab === "predict" ? predictionRace : race;
@@ -2359,6 +2412,7 @@ export default function Home() {
         const response = await fetch(`${apiBaseUrl()}/predict`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          cache: "no-store",
           body: JSON.stringify(buildRaceRequest(modelingRace, riskLevel, activeBankroll)),
         });
         if (!response.ok) {
@@ -2380,7 +2434,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [activeBankroll, activeTab, modelingRace, riskLevel, todayDate]);
+  }, [activeTab, modelingRace, riskLevel, todayDate]);
 
   useEffect(() => {
     if (selectedDateRaces.length === 0) {
@@ -2499,7 +2553,7 @@ export default function Home() {
             <span className={visibleRace?.verificationStatus === "verified" ? "verified" : ""}>
               {visibleRace?.verificationStatus === "verified" ? "実データ" : "確認中"}
             </span>
-            <span>{visibleRace?.status === "finished" ? "結果あり" : "予想対象"}</span>
+            <span>{visibleRace?.status === "finished" ? "結果あり" : visibleRace && raceHasStartedByClock(visibleRace) ? "結果取得中" : "予想対象"}</span>
           </div>
         </section>
 
@@ -2522,9 +2576,7 @@ export default function Home() {
         {activeTab === "predict" && predictionRace && (
           <PredictPanel
             activeBankroll={activeBankroll}
-            bankroll={bankroll}
             expectedRoi={expectedRoi}
-            onBankrollChange={setBankroll}
             onRaceSelect={(raceId) => selectRace(raceId)}
             onVenueSelect={setSelectedVenue}
             projections={projections}
@@ -2622,9 +2674,7 @@ function LoadingBanner({ apiState, phase }: { apiState: ApiState; phase: DataPha
 
 function PredictPanel({
   activeBankroll,
-  bankroll,
   expectedRoi,
-  onBankrollChange,
   onRaceSelect,
   onVenueSelect,
   projections,
@@ -2639,9 +2689,7 @@ function PredictPanel({
   venueRaces,
 }: {
   activeBankroll: number;
-  bankroll: number;
   expectedRoi: number;
-  onBankrollChange: (value: number) => void;
   onRaceSelect: (raceId: string) => void;
   onVenueSelect: (venue: string) => void;
   projections: RunnerProjection[];
@@ -2681,21 +2729,6 @@ function PredictPanel({
           selectedVenue={selectedVenue || race.venue}
           venues={venueOptions}
         />
-
-        {!isFinished && (
-          <div className="settings-grid">
-            <label className="field-card bankroll-card">
-              <span>軍資金</span>
-              <input
-                min={1000}
-                onChange={(event) => onBankrollChange(Number(event.target.value))}
-                step={1000}
-                type="number"
-                value={bankroll}
-              />
-            </label>
-          </div>
-        )}
       </div>
 
       <RaceInfoChips race={race} />

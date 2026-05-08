@@ -70,11 +70,20 @@ def validate_race_runner_integrity(race: Any) -> dict[str, Any]:
     gates = [_number(_value(runner, "gate")) for runner in runners]
     odds = [_float(_value(runner, "odds")) for runner in runners]
     place_odds = [_float(_value(runner, "placeOdds")) for runner in runners]
+    status = str(_value(race, "status", ""))
+    finish_positions = [
+        _number(tag.replace("着", ""))
+        for runner in runners
+        for tag in _tags(runner)
+        if tag.endswith("着")
+    ]
 
     if len(runners) < 2:
         errors.append("出走馬が2頭未満です")
     if len(runners) > 18:
         errors.append(f"出走馬数が18頭を超えています: {len(runners)}頭")
+    if status == "finished" and len(runners) <= 3 and sorted(position for position in finish_positions if position > 0) == [1, 2, 3]:
+        errors.append("出走馬表ではなく結果上位3頭のみ取得されています")
 
     invalid_numbers = [number for number in numbers if number <= 0 or number > 18]
     if invalid_numbers:

@@ -128,6 +128,18 @@ def main() -> None:
         sampled += 1
         generated_types = {item.bet_type for item in prediction.recommendations}
         sample_bet_types.update(generated_types)
+        ai_top3 = [runner.number for runner in prediction.runners[:3]]
+        recommendation_by_type = {item.bet_type: item for item in prediction.recommendations}
+        for triple_type in ("trio", "trifecta"):
+            item = recommendation_by_type.get(triple_type)
+            if item is None:
+                continue
+            try:
+                selected = [int(value) for value in str(item.selection).replace("→", "-").split("-") if value.strip()]
+            except ValueError:
+                selected = []
+            if selected[:3] != ai_top3:
+                errors.append(f"{race.id}: {triple_type} does not follow AI top3 order: {item.selection} != {ai_top3}")
         if "support" in generated_types:
             errors.append(f"{race.id}: prediction generated unsupported support bet")
         if "place" in generated_types:
