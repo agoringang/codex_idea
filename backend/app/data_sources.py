@@ -943,7 +943,13 @@ def get_races(start_date: str | None = None, end_date: str | None = None) -> lis
     except Exception:
         stored_races = []
 
-    return [Race(**deepcopy(race)) for race in _collapse_duplicate_races([*raw_races, *stored_races])]
+    normalized_races: list[Race] = []
+    for race in _collapse_duplicate_races([*raw_races, *stored_races]):
+        payload = deepcopy(race)
+        if payload.get("verificationStatus") not in {"verified", "stale", "unverified"}:
+            payload["verificationStatus"] = "verified"
+        normalized_races.append(Race(**payload))
+    return normalized_races
 
 
 def get_snapshots() -> dict[str, LiveSnapshot]:

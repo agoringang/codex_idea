@@ -318,7 +318,7 @@ def _apply_live_odds_to_races(races: list[dict[str, Any]], odds_rows: list[dict[
 
         if race_updated:
             race["sourceCheckedAt"] = datetime.now(timezone.utc).isoformat()
-            race["verificationStatus"] = "odds_verified"
+            race["verificationStatus"] = "verified"
             updated += 1
     return updated
 
