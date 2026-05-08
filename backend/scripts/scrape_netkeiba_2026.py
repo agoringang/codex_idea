@@ -31,6 +31,11 @@ NAR_RESULT_URL = "https://nar.netkeiba.com/race/result.html?race_id={race_id}"
 JRA_RESULT_URL = "https://race.netkeiba.com/race/result.html?race_id={race_id}"
 NAR_ODDS_TANFUKU_URL = "https://nar.netkeiba.com/odds/index.html?type=b1&race_id={race_id}"
 JRA_ODDS_TANFUKU_URL = "https://race.netkeiba.com/odds/index.html?race_id={race_id}&type=b1"
+JRA_ODDS_API_URL = (
+    "https://race.netkeiba.com/api/api_get_jra_odds.html"
+    "?pid=api_get_jra_odds&input=UTF-8&output=jsonp"
+    "&race_id={race_id}&type=1&action=init&sort=odds&compress=0"
+)
 RACE_ID_RE = re.compile(r"/race/(20\d{10})/?|race_id=(20\d{10})")
 JRA_COURSE_CODES = {"01", "02", "03", "04", "05", "06", "07", "08", "09", "10"}
 DEFAULT_USER_AGENT = (
@@ -331,6 +336,10 @@ def odds_url_for_dynamic_id(race_id: str, *, source: str) -> str:
     return template.format(race_id=race_id)
 
 
+def jra_odds_api_url_for_dynamic_id(race_id: str) -> str:
+    return JRA_ODDS_API_URL.format(race_id=race_id)
+
+
 def scrape_calendar_pages(
     args: argparse.Namespace,
     fetcher: RateLimitedFetcher,
@@ -429,7 +438,10 @@ def should_fetch_odds_page(race_id: str, args: argparse.Namespace) -> bool:
         race_date = parse_date(race_date_text)
     except ValueError:
         return True
-    return race_date <= jst_today()
+    # JRA/NAR next-day race cards can already expose early odds signals on the
+    # previous night. Fetch through tomorrow so the preday cron can create
+    # predictions before race day, then refresh again on race day for updates.
+    return race_date <= jst_today() + timedelta(days=1)
 
 
 def scrape_odds_pages(
@@ -453,6 +465,18 @@ def scrape_odds_pages(
         results.append(row)
         if result.status in {"blocked", "access_limited"}:
             raise SystemExit(f"netkeiba odds access stopped: {result.status} {result.url}")
+        if source == "jra":
+            api_result = fetcher.fetch(
+                jra_odds_api_url_for_dynamic_id(race_id),
+                output_dir / f"{race_id}_jra_b1_api.jsonp",
+            )
+            api_row = api_result.__dict__.copy()
+            api_row["race_id"] = race_id
+            api_row["source"] = source
+            api_row["odds_api"] = "jra_tanfuku"
+            results.append(api_row)
+            if api_result.status in {"blocked", "access_limited"}:
+                raise SystemExit(f"netkeiba odds api access stopped: {api_result.status} {api_result.url}")
 
     return results
 
@@ -594,6 +618,67 @@ def parse_live_odds_file(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def parse_jsonp_payload(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    if stripped.endswith(";"):
+        stripped = stripped[:-1].strip()
+    if stripped.startswith("(") and stripped.endswith(")"):
+        stripped = stripped[1:-1].strip()
+    callback_match = re.match(r"^[A-Za-z_$][\w$]*\((.*)\)$", stripped, flags=re.DOTALL)
+    if callback_match:
+        stripped = callback_match.group(1).strip()
+    payload = json.loads(stripped)
+    return payload if isinstance(payload, dict) else {}
+
+
+def parse_jra_odds_api_file(path: Path) -> list[dict[str, Any]]:
+    race_id_match = re.search(r"(20\d{10})", path.stem)
+    if not race_id_match:
+        return []
+    race_id = race_id_match.group(1)
+    try:
+        payload = parse_jsonp_payload(read_html(path))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return []
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    odds = data.get("odds") if isinstance(data.get("odds"), dict) else {}
+    win_rows = odds.get("1") if isinstance(odds.get("1"), dict) else {}
+    if not win_rows:
+        return []
+
+    snapshot_at = datetime.now(timezone.utc).isoformat()
+    official_datetime = data.get("official_datetime")
+    rows: list[dict[str, Any]] = []
+    for runner_key, values in win_rows.items():
+        try:
+            runner_number = int(runner_key)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(values, list) or not values:
+            continue
+        odds_value = parse_odds_number(str(values[0]))
+        runner_status = parse_odds_runner_status(str(values[0]))
+        if odds_value is None and not runner_status:
+            continue
+        row: dict[str, Any] = {
+            "race_id": race_id,
+            "runner_number": runner_number,
+            "odds_snapshot_at": official_datetime or snapshot_at,
+        }
+        if odds_value is not None:
+            row["market_odds"] = odds_value
+        if len(values) >= 3:
+            try:
+                row["odds_rank"] = int(float(values[2]))
+            except (TypeError, ValueError):
+                pass
+        if runner_status:
+            row["runner_status"] = runner_status
+            row["scratched"] = 1
+        rows.append(row)
+    return rows
+
+
 def load_live_odds_rows(raw_dir: Path) -> list[dict[str, Any]]:
     odds_dir = raw_dir / "_odds"
     if not odds_dir.exists():
@@ -601,6 +686,8 @@ def load_live_odds_rows(raw_dir: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in sorted(odds_dir.glob("*_b1.html")):
         rows.extend(parse_live_odds_file(path))
+    for path in sorted(odds_dir.glob("*_jra_b1_api.jsonp")):
+        rows.extend(parse_jra_odds_api_file(path))
     return rows
 
 
