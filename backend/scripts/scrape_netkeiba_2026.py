@@ -692,21 +692,18 @@ def parse_jra_odds_api_file_with_mapping(path: Path, html_path: Path | None = No
         return []
     place_rows = odds.get("2") if isinstance(odds.get("2"), dict) else {}
     row_map = parse_jra_odds_row_map(html_path)
+    if not row_map:
+        return []
 
     snapshot_at = datetime.now(timezone.utc).isoformat()
     official_datetime = data.get("official_datetime")
     rows: list[dict[str, Any]] = []
     for runner_key, values in win_rows.items():
         mapped = row_map.get(str(runner_key).zfill(2))
-        if mapped:
-            runner_number = int(mapped["runner_number"])
-            horse_name = str(mapped.get("horse_name") or "")
-        else:
-            try:
-                runner_number = int(runner_key)
-            except (TypeError, ValueError):
-                continue
-            horse_name = ""
+        if not mapped:
+            continue
+        runner_number = int(mapped["runner_number"])
+        horse_name = str(mapped.get("horse_name") or "")
         if not isinstance(values, list) or not values:
             continue
         odds_value = parse_odds_number(str(values[0]))
