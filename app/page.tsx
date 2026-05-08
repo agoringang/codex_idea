@@ -349,6 +349,64 @@ function permutationCount(n: number, r: number) {
 
 const ticketTemplates: TicketTemplate[] = [
   {
+    type: "単勝",
+    selection: (top) => `${top[0].number}`,
+    legs: (top) => [{ label: "単勝", numbers: [top[0].number] }],
+    method: "1頭指定",
+    tickets: () => 1,
+    risk: 42,
+    probability: 0.18,
+    odds: 4.2,
+    model: "勝ち切り評価",
+  },
+  {
+    type: "複勝",
+    selection: (top) => `${top[0].number}`,
+    legs: (top) => [{ label: "複勝", numbers: [top[0].number] }],
+    method: "1頭指定",
+    tickets: () => 1,
+    risk: 24,
+    probability: 0.46,
+    odds: 1.9,
+    model: "安定評価",
+  },
+  {
+    type: "ワイド",
+    selection: (top) => runnerNumbers(top, 0, 2),
+    legs: (top) => [{ label: "組み合わせ", numbers: runnerNumberList(top, 0, 2) }],
+    method: "2頭指定",
+    tickets: () => 1,
+    risk: 36,
+    probability: 0.22,
+    odds: 4.8,
+    model: "相手評価",
+  },
+  {
+    type: "馬連",
+    selection: (top) => runnerNumbers(top, 0, 2),
+    legs: (top) => [{ label: "組み合わせ", numbers: runnerNumberList(top, 0, 2) }],
+    method: "2頭指定",
+    tickets: () => 1,
+    risk: 58,
+    probability: 0.11,
+    odds: 8.6,
+    model: "相手評価",
+  },
+  {
+    type: "馬単",
+    selection: (top) => runnerNumbers(top, 0, 2),
+    legs: (top) => [
+      { label: "1着", numbers: runnerNumberList(top, 0, 1) },
+      { label: "2着", numbers: runnerNumberList(top, 1, 2) },
+    ],
+    method: "1着固定",
+    tickets: () => 1,
+    risk: 68,
+    probability: 0.07,
+    odds: 12.4,
+    model: "相手評価",
+  },
+  {
     type: "3連複",
     selection: (top) => `軸 ${top[0].number} / 相手 ${runnerNumbers(top, 1, 6)}`,
     legs: (top) => [
@@ -360,7 +418,7 @@ const ticketTemplates: TicketTemplate[] = [
     risk: 74,
     probability: 0.12,
     odds: 8.4,
-    model: "三連系評価",
+    model: "期待値評価",
   },
   {
     type: "3連複",
@@ -375,7 +433,7 @@ const ticketTemplates: TicketTemplate[] = [
     risk: 78,
     probability: 0.085,
     odds: 12.2,
-    model: "三連系評価",
+    model: "期待値評価",
   },
   {
     type: "3連複",
@@ -386,7 +444,7 @@ const ticketTemplates: TicketTemplate[] = [
     risk: 82,
     probability: 0.17,
     odds: 6.4,
-    model: "三連系評価",
+    model: "期待値評価",
   },
   {
     type: "3連単",
@@ -453,6 +511,12 @@ const tabs: { id: ViewTab; label: string; icon: TabIconId }[] = [
 
 const PORTFOLIO_RISK_LEVEL = 72;
 const PUBLIC_BET_TYPE_GUIDES = [
+  { id: "win", label: "単勝", summary: "1着を当てる", method: "1頭指定" },
+  { id: "place", label: "複勝", summary: "3着以内を当てる", method: "1頭指定" },
+  { id: "bracket_quinella", label: "枠連", summary: "1・2着の枠", method: "枠指定 / 流し" },
+  { id: "quinella", label: "馬連", summary: "1・2着を順不同", method: "流し / BOX" },
+  { id: "wide", label: "ワイド", summary: "2頭が3着以内", method: "流し / BOX" },
+  { id: "exacta", label: "馬単", summary: "1・2着順通り", method: "軸流し / BOX" },
   { id: "trio", label: "3連複", summary: "3頭が3着以内", method: "1頭軸 / 2頭軸 / BOX / フォーメーション" },
   { id: "trifecta", label: "3連単", summary: "1・2・3着順通り", method: "軸流し / マルチ / BOX / フォーメーション" },
 ];
@@ -579,9 +643,9 @@ function venueMarket(venue: string): Market {
 
 function normalizedTopTicket(prediction: any) {
   const recommendations = Array.isArray(prediction.recommendations) ? prediction.recommendations : [];
-  const recommendation = recommendations.find((item: any) => isTripleBetType(item?.bet_type)) ?? recommendations[0];
+  const recommendation = recommendations.find((item: any) => isPublicBetType(item?.bet_type)) ?? recommendations[0];
   if (recommendation?.selection) {
-    const label = betTypeLabels[String(recommendation.bet_type ?? "")] ?? "三連系";
+    const label = betTypeLabels[String(recommendation.bet_type ?? "")] ?? "買い目";
     return `${label} ${String(recommendation.selection)}`;
   }
   if (prediction.top_ticket) {
@@ -594,9 +658,38 @@ function normalizedTopTicket(prediction: any) {
   return warning || "AI予想";
 }
 
-function isTripleBetType(value: string | undefined) {
+function isPublicBetType(value: string | undefined) {
   const normalized = normalizedBetType(value);
-  return ["trio", "fuku3", "trifecta", "tan3", "3連複", "三連複", "3連単", "三連単"].includes(normalized);
+  return [
+    "win",
+    "tansho",
+    "単勝",
+    "place",
+    "fukusho",
+    "複勝",
+    "bracket_quinella",
+    "wakuren",
+    "枠連",
+    "枠連複",
+    "quinella",
+    "umaren",
+    "馬連",
+    "馬連複",
+    "wide",
+    "ワイド",
+    "exacta",
+    "umatan",
+    "馬単",
+    "馬連単",
+    "trio",
+    "fuku3",
+    "3連複",
+    "三連複",
+    "trifecta",
+    "tan3",
+    "3連単",
+    "三連単",
+  ].includes(normalized);
 }
 
 function hasWinOddsValue(value: number | undefined | null) {
@@ -725,7 +818,7 @@ function normalizeApiHistory(payload: any): HistoricalPrediction[] {
       const prediction = entry.prediction ?? {};
       const result = entry.result ?? {};
       const predictionRecommendations = Array.isArray(prediction.recommendations)
-        ? prediction.recommendations.filter((item: any) => isTripleBetType(item?.bet_type))
+        ? prediction.recommendations.filter((item: any) => isPublicBetType(item?.bet_type))
         : [];
       const displayPrediction = { ...prediction, recommendations: predictionRecommendations };
       const raceId = String(entry.race_id ?? `${date}-${index}`);
@@ -748,23 +841,23 @@ function normalizeApiHistory(payload: any): HistoricalPrediction[] {
             winningTickets: optionalNumber(item.winning_tickets),
           }))
         : [];
-      const recommendationResults = rawRecommendationResults.filter((item) => isTripleBetType(item.betType));
-      const hasTripleResultBreakdown = recommendationResults.length > 0;
-      const resultStake = settled && hasTripleResultBreakdown
+      const recommendationResults = rawRecommendationResults.filter((item) => isPublicBetType(item.betType));
+      const hasRecommendationBreakdown = recommendationResults.length > 0;
+      const resultStake = settled && hasRecommendationBreakdown
         ? recommendationResults.reduce((sum, item) => sum + item.stake, 0)
         : safeNumber(result.stake, stake);
-      const payout = settled && hasTripleResultBreakdown
+      const payout = settled && hasRecommendationBreakdown
         ? recommendationResults.reduce((sum, item) => sum + item.payout, 0)
         : settled
           ? safeNumber(result.payout, 0)
           : safeNumber(prediction.expected_return, 0);
-      const hit = settled && hasTripleResultBreakdown
+      const hit = settled && hasRecommendationBreakdown
         ? recommendationResults.some((item) => item.hit)
         : Boolean(result.hit);
-      const hitCount = settled && hasTripleResultBreakdown
+      const hitCount = settled && hasRecommendationBreakdown
         ? recommendationResults.filter((item) => item.hit).length
         : safeNumber(result.hit_count, hit ? 1 : 0);
-      const betCount = settled && hasTripleResultBreakdown
+      const betCount = settled && hasRecommendationBreakdown
         ? recommendationResults.length
         : predictionRecommendations.length || safeNumber(result.bet_count, 0);
       const resultOrder = Array.isArray(result.order)
@@ -849,13 +942,13 @@ function buildRaceRequest(race: Race, riskLevel: number, bankroll: number) {
     model_mode: "ensemble",
     risk_level: riskLevel,
     bankroll,
-    min_edge: 0.08,
+    min_edge: 0.03,
     min_probability: 0.0,
     max_candidate_odds: 160,
-    max_edge: 0.2,
+    max_edge: 0.9,
     max_exposure: 0.08,
-    recommendation_limit: 3,
-    enabled_bet_types: ["trio", "trifecta"],
+    recommendation_limit: 7,
+    enabled_bet_types: ["win", "place", "quinella", "wide", "exacta", "trio", "trifecta"],
     runners: race.runners.map((runner) => {
       const odds = Math.max(hasRunnerWinOdds(runner) ? runner.odds : 1.1, 1.1);
       const form = Math.max(1, Math.min(100, runner.form));
@@ -1115,12 +1208,21 @@ function apiRecommendationToTicket(recommendation: ApiBetRecommendation): Ticket
   const stake = safeNumber(recommendation.stake, 0);
   const probability = safeNumber(recommendation.probability, 0);
   const odds = safeNumber(recommendation.odds, 1);
+  const riskByType: Record<string, number> = {
+    win: 42,
+    place: 24,
+    wide: 36,
+    quinella: 58,
+    exacta: 68,
+    trio: 74,
+    trifecta: 90,
+  };
   return {
     type: betTypeLabels[recommendation.bet_type] ?? recommendation.bet_type,
     method: publicStrategyLabel(recommendation.strategy || recommendation.note),
     probability,
     odds,
-    risk: recommendation.bet_type === "trifecta" ? 90 : recommendation.bet_type === "trio" ? 74 : 48,
+    risk: riskByType[recommendation.bet_type] ?? 48,
     model: modelLabelForBetType(recommendation.bet_type),
     selection: recommendation.selection,
     legs: recommendation.legs ?? [],
@@ -1773,7 +1875,7 @@ function evaluateBettingHeat({
     return {
       tone: "pass" as const,
       label: "オッズ待ち",
-      action: "三連系オッズ公開後に自動予想",
+      action: "単勝・複勝オッズ公開後に券種別予想",
       score: 0,
       profile: "買い目未生成",
       volatilityLabel: "未判定",
@@ -1822,7 +1924,7 @@ function evaluateBettingHeat({
     `市場差 ${marketGap >= 0 ? "+" : ""}${formatPercent(marketGap, 1)}`,
   ];
 
-  if (dataDepth < 0.18) {
+  if (dataDepth < 0.18 && tickets.length === 0) {
     return {
       tone: "pass" as const,
       label: "情報不足",
@@ -1836,7 +1938,21 @@ function evaluateBettingHeat({
     };
   }
 
-  if (expectedRoi < 1.0 || positiveTickets === 0 || marketGap < -0.035 || score < 34) {
+  if (tickets.length === 0 || positiveTickets === 0) {
+    return {
+      tone: "pass" as const,
+      label: "買い目なし",
+      action: "期待値不足",
+      score,
+      profile: "見送り",
+      volatilityLabel: volatility.label,
+      volatilityScore: volatility.score,
+      dataDepth,
+      reasons,
+    };
+  }
+
+  if (expectedRoi < 1.0 || marketGap < -0.045 || score < 30) {
     if (volatility.score >= 68 && dataDepth >= 0.22 && (valueCandidates >= 1 || marketGap > -0.02)) {
       return {
         tone: "standard" as const,
@@ -1851,11 +1967,11 @@ function evaluateBettingHeat({
       };
     }
     return {
-      tone: "pass" as const,
-      label: "見送り寄り",
-      action: "無理に買わない",
-      score,
-      profile: "買い材料不足",
+      tone: "standard" as const,
+      label: "低比率",
+      action: "買うなら小さく",
+      score: Math.max(score, 38),
+      profile: "控えめ候補",
       volatilityLabel: volatility.label,
       volatilityScore: volatility.score,
       dataDepth,
@@ -2564,7 +2680,7 @@ function DecisionCard({
 }) {
   const topTicket = tickets[0];
   const oddsReady = raceHasUsableWinOdds(race);
-  const shouldPass = !oddsReady || !topTicket || heat.tone === "pass";
+  const shouldPass = !oddsReady || !topTicket || (heat.tone === "pass" && topTicket.edge <= 0);
   const isPendingOdds = !oddsReady;
   const topRunner = projections[0];
   const exposure = activeBankroll > 0 ? totalStake / activeBankroll : 0;
@@ -2580,7 +2696,7 @@ function DecisionCard({
         <h2>{isPendingOdds ? "AI評価は取得待ち" : shouldPass ? "見送り優先" : `${topTicket.type} ${topTicket.selection}`}</h2>
         <p>
           {isPendingOdds
-            ? "出馬表は取得済み。単勝・三連系オッズ公開後に三連複と三連単だけを自動生成します。"
+            ? "出馬表は取得済み。単勝・複勝オッズ公開後に券種別の買い候補を自動生成します。"
             : shouldPass
             ? heat.action
             : `推奨投資比率は${formatPercent(topTicket.stake / activeBankroll, 2)}。${ticketCompactMethod(topTicket)}`}
@@ -2690,8 +2806,8 @@ function MarketPendingCard({ race }: { race: Race }) {
         <strong>{race.runners.length}頭取得済み</strong>
         <span>単勝オッズ</span>
         <strong>未取得</strong>
-        <span>三連予想</span>
-        <strong>オッズ公開後に自動生成</strong>
+        <span>買い候補</span>
+        <strong>オッズ公開後に券種別生成</strong>
       </div>
     </section>
   );

@@ -100,6 +100,11 @@ BetType = Literal[
 ]
 
 DEFAULT_BET_TYPES: list[BetType] = [
+    "win",
+    "place",
+    "quinella",
+    "wide",
+    "exacta",
     "trio",
     "trifecta",
 ]

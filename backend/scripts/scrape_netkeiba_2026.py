@@ -33,6 +33,11 @@ NAR_ODDS_TANFUKU_URL = "https://nar.netkeiba.com/odds/index.html?type=b1&race_id
 JRA_ODDS_TANFUKU_URL = "https://race.netkeiba.com/odds/index.html?race_id={race_id}&type=b1"
 RACE_ID_RE = re.compile(r"/race/(20\d{10})/?|race_id=(20\d{10})")
 JRA_COURSE_CODES = {"01", "02", "03", "04", "05", "06", "07", "08", "09", "10"}
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 "
+    "UmaLabResearch/0.2"
+)
 ACCESS_LIMIT_TEXT = (
     "アクセス制限",
     "通信制限",
@@ -136,6 +141,9 @@ class RateLimitedFetcher:
                 "User-Agent": self.user_agent,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Referer": "https://www.netkeiba.com/",
             },
         )
         self.request_count += 1
@@ -711,10 +719,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--include-odds", action="store_true")
     parser.add_argument(
         "--user-agent",
-        default=(
-            "UmaLabResearch/0.1 "
-            "(public pages only; rate-limited; contact: local-user)"
-        ),
+        default=DEFAULT_USER_AGENT,
     )
     return parser
 

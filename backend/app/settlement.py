@@ -8,7 +8,7 @@ from .schemas import Race
 
 
 NUMBER_PATTERN = re.compile(r"\d+")
-SUPPORTED_BET_TYPES = {"trio", "trifecta"}
+SUPPORTED_BET_TYPES = {"win", "place", "quinella", "wide", "exacta", "trio", "trifecta"}
 
 
 def _numbers(value: Any) -> list[int]:

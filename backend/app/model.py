@@ -20,7 +20,15 @@ PAYOUT_RATES: dict[BetType, float] = {
 }
 
 RunnerCombo = tuple[RunnerPrediction, ...]
-TRIPLE_ONLY_BET_TYPES: set[BetType] = {"trio", "trifecta"}
+RECOMMENDABLE_BET_TYPES: set[BetType] = {
+    "win",
+    "place",
+    "quinella",
+    "wide",
+    "exacta",
+    "trio",
+    "trifecta",
+}
 
 BET_TYPE_RISK: dict[BetType, float] = {
     "place": 0.12,
@@ -257,7 +265,7 @@ def add_candidate(
     legs: list[dict[str, object]] | None = None,
     edge_floor: float | None = None,
 ) -> None:
-    if bet_type not in TRIPLE_ONLY_BET_TYPES:
+    if bet_type not in RECOMMENDABLE_BET_TYPES:
         return
     if bet_type not in request.enabled_bet_types:
         return
@@ -318,7 +326,7 @@ def add_combo_strategy(
     max_odds: float = 220,
     legs: list[dict[str, object]] | None = None,
 ) -> None:
-    if bet_type not in TRIPLE_ONLY_BET_TYPES:
+    if bet_type not in RECOMMENDABLE_BET_TYPES:
         return
     if bet_type not in request.enabled_bet_types:
         return
@@ -659,7 +667,91 @@ def predict_race(request: RaceRequest) -> RacePrediction:
     runner_predictions.sort(key=lambda item: item.score, reverse=True)
     recommendations: list[BetRecommendation] = []
     top_candidates = runner_predictions[:6]
-    enabled_bet_types = set(request.enabled_bet_types) & TRIPLE_ONLY_BET_TYPES
+    input_by_id = {runner.id: runner for runner in request.runners}
+    enabled_bet_types = set(request.enabled_bet_types) & RECOMMENDABLE_BET_TYPES
+
+    if "win" in enabled_bet_types:
+        for runner in top_candidates:
+            add_candidate(
+                recommendations,
+                request=request,
+                bet_type="win",
+                selection_text=str(runner.number),
+                note_text=f"{runner.number} {runner.name}",
+                probability=runner.win_probability,
+                odds=runner.market_odds,
+                strategy="単勝",
+                legs=[leg("単勝", [runner])],
+                edge_floor=0.0,
+            )
+
+    if "place" in enabled_bet_types:
+        for runner in top_candidates:
+            place_odds = input_by_id.get(runner.id).place_odds if input_by_id.get(runner.id) else None
+            if place_odds is None or place_odds <= 1.01:
+                continue
+            add_candidate(
+                recommendations,
+                request=request,
+                bet_type="place",
+                selection_text=str(runner.number),
+                note_text=f"{runner.number} {runner.name}",
+                probability=runner.place_probability,
+                odds=place_odds,
+                strategy="複勝",
+                legs=[leg("複勝", [runner])],
+                edge_floor=0.0,
+            )
+
+    if len(top_candidates) >= 2:
+        pair_candidates = top_candidates[:6]
+        if "wide" in enabled_bet_types:
+            for pair in combinations(pair_candidates, 2):
+                probability = wide_probability(pair)
+                add_candidate(
+                    recommendations,
+                    request=request,
+                    bet_type="wide",
+                    selection_text=selection(pair),
+                    note_text=note(pair),
+                    probability=probability,
+                    odds=synthetic_odds("wide", probability, pair, 0.08),
+                    strategy="ワイド",
+                    legs=[leg("組み合わせ", pair)],
+                    edge_floor=0.01,
+                )
+
+        if "quinella" in enabled_bet_types:
+            for pair in combinations(pair_candidates[:5], 2):
+                probability = quinella_probability(pair)
+                add_candidate(
+                    recommendations,
+                    request=request,
+                    bet_type="quinella",
+                    selection_text=selection(pair),
+                    note_text=note(pair),
+                    probability=probability,
+                    odds=synthetic_odds("quinella", probability, pair, 0.10),
+                    strategy="馬連",
+                    legs=[leg("組み合わせ", pair)],
+                    edge_floor=0.012,
+                )
+
+        if "exacta" in enabled_bet_types:
+            for ordered_pair in permutations(pair_candidates[:5], 2):
+                probability = exacta_probability(ordered_pair)
+                add_candidate(
+                    recommendations,
+                    request=request,
+                    bet_type="exacta",
+                    selection_text=selection(ordered_pair),
+                    note_text=note(ordered_pair),
+                    probability=probability,
+                    odds=synthetic_odds("exacta", probability, ordered_pair, 0.12),
+                    strategy="馬単",
+                    legs=[leg("1着", [ordered_pair[0]]), leg("2着", [ordered_pair[1]])],
+                    edge_floor=0.012,
+                )
 
     if "trio" in enabled_bet_types:
         for trio in combinations(top_candidates, 3):

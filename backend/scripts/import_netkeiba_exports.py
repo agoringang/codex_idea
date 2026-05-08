@@ -935,6 +935,10 @@ def normalize_table(
         finish_position = parse_finish_position(first_value(row, frame, "finish_position"))
         market_odds = to_float(first_value(row, frame, "market_odds"))
         place_odds = to_float(first_value(row, frame, "place_odds"))
+        if market_odds is not None and market_odds <= 1.0:
+            market_odds = None
+        if place_odds is not None and place_odds <= 1.0:
+            place_odds = None
         raw_horse_weight = first_value(row, frame, "horse_weight")
         horse_weight, horse_weight_diff = parse_horse_weight(raw_horse_weight)
         explicit_diff = to_int(first_value(row, frame, "horse_weight_diff"))

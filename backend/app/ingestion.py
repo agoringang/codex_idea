@@ -168,13 +168,13 @@ def _race_request_from_dict(race: dict[str, Any]) -> RaceRequest:
         model_mode="ensemble",
         risk_level=52,
         bankroll=100_000,
-        min_edge=0.08,
+        min_edge=0.03,
         min_probability=0.0,
         max_candidate_odds=160,
-        max_edge=0.2,
-        max_exposure=0.035,
-        recommendation_limit=3,
-        enabled_bet_types=["trio", "trifecta"],
+        max_edge=0.9,
+        max_exposure=0.06,
+        recommendation_limit=7,
+        enabled_bet_types=["win", "place", "quinella", "wide", "exacta", "trio", "trifecta"],
         runners=runner_inputs,
     )
 
@@ -398,7 +398,7 @@ def ingest_netkeiba_window(
         enriched_combined_output=None,
         user_agent=os.getenv(
             "NETKEIBA_USER_AGENT",
-            "UmaLabResearch/0.2 (public pages only; rate-limited; contact: local-user)",
+            getattr(scraper, "DEFAULT_USER_AGENT", "UmaLabResearch/0.2"),
         ),
     )
 
