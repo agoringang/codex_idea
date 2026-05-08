@@ -127,6 +127,8 @@ type TicketProjection = Omit<TicketTemplate, "selection" | "tickets" | "legs"> &
   edge: number;
   stake: number;
   expectedReturn: number;
+  oddsMin?: number;
+  oddsMax?: number;
 };
 
 type PublicHistorySummary = {
@@ -231,6 +233,8 @@ type ApiBetRecommendation = {
   legs: TicketLeg[];
   probability: number;
   odds: number;
+  odds_min?: number;
+  odds_max?: number;
   edge: number;
   stake: number;
 };
@@ -646,6 +650,24 @@ function marketClass(market: Market | undefined) {
 
 function venueMarket(venue: string): Market {
   return jraVenues.has(venue) ? "JRA" : "NAR";
+}
+
+function marketSortRank(market: Market) {
+  return market === "JRA" ? 0 : 1;
+}
+
+function sortVenueOptions(a: VenueOption, b: VenueOption) {
+  const marketDiff = marketSortRank(venueMarket(a.venue)) - marketSortRank(venueMarket(b.venue));
+  return marketDiff || a.venue.localeCompare(b.venue, "ja");
+}
+
+function groupedVenueOptions(venues: VenueOption[]) {
+  return (["JRA", "NAR"] as Market[])
+    .map((market) => ({
+      market,
+      venues: venues.filter((venue) => venueMarket(venue.venue) === market).sort(sortVenueOptions),
+    }))
+    .filter((group) => group.venues.length > 0);
 }
 
 function normalizedTopTicket(prediction: any) {
@@ -1101,8 +1123,48 @@ function formatOdds(value: number) {
   return `${value.toFixed(digits)}倍`;
 }
 
+function ticketOddsRange(ticket: TicketProjection) {
+  const min = safeNumber(ticket.oddsMin, ticket.odds);
+  const max = safeNumber(ticket.oddsMax, ticket.odds);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min <= 0 || max <= 0) {
+    return null;
+  }
+  return {
+    min: Math.min(min, max),
+    max: Math.max(min, max),
+  };
+}
+
+function ticketOddsLabel(ticket: TicketProjection, oddsReady: boolean) {
+  if (!oddsReady) {
+    return "暫定";
+  }
+  const range = ticketOddsRange(ticket);
+  if (!range) {
+    return formatOdds(ticket.odds);
+  }
+  if (ticket.tickets <= 1 || Math.abs(range.max - range.min) < 0.05) {
+    return formatOdds(ticket.odds || range.min);
+  }
+  return `${formatOdds(range.min)}〜${formatOdds(range.max)}`;
+}
+
 function ticketPayoutPer100(ticket: TicketProjection) {
   return formatYen(ticket.odds * 100);
+}
+
+function ticketPayoutPer100Label(ticket: TicketProjection, oddsReady: boolean) {
+  if (!oddsReady) {
+    return "-";
+  }
+  const range = ticketOddsRange(ticket);
+  if (!range) {
+    return ticketPayoutPer100(ticket);
+  }
+  if (ticket.tickets <= 1 || Math.abs(range.max - range.min) < 0.05) {
+    return formatYen((ticket.odds || range.min) * 100);
+  }
+  return `${formatYen(range.min * 100)}〜${formatYen(range.max * 100)}`;
 }
 
 function resultBetSummary(item: RecommendationResult) {
@@ -1127,6 +1189,55 @@ function resultOddsLabel(item: RecommendationResult) {
     return `${(item.officialPayoutYen / 100).toFixed(item.officialPayoutYen >= 10000 ? 0 : 1)}倍`;
   }
   return formatOdds(item.odds);
+}
+
+function recommendationResultKey(item: Pick<RecommendationResult, "betType" | "selection">) {
+  return `${publicBetTypeLabel(item.betType)}|${String(item.selection ?? "").trim()}`;
+}
+
+function ticketResultKey(ticket: TicketProjection) {
+  return `${ticket.type}|${ticket.selection.trim()}`;
+}
+
+function ticketResultMap(history: HistoricalPrediction | null) {
+  const map = new Map<string, RecommendationResult>();
+  (history?.recommendationResults ?? []).forEach((item) => {
+    map.set(recommendationResultKey(item), item);
+  });
+  return map;
+}
+
+function historyPredictionTickets(history: HistoricalPrediction | null) {
+  const recommendations = history?.prediction?.recommendations;
+  if (!Array.isArray(recommendations)) {
+    return [];
+  }
+  return recommendations.filter((item) => isPublicBetType(item.bet_type)).map(apiRecommendationToTicket);
+}
+
+function hitRecommendationItems(history: HistoricalPrediction) {
+  return (history.recommendationResults ?? []).filter((item) => item.hit);
+}
+
+function maxHitOdds(history: HistoricalPrediction) {
+  return hitRecommendationItems(history).reduce((max, item) => {
+    const odds = item.officialPayoutYen && item.officialPayoutYen > 0 ? item.officialPayoutYen / 100 : item.odds;
+    return Math.max(max, odds || 0);
+  }, 0);
+}
+
+function hitRecommendationText(history: HistoricalPrediction) {
+  const hits = hitRecommendationItems(history);
+  if (!history.settled) {
+    return "結果待ち";
+  }
+  if (hits.length === 0) {
+    return "的中なし";
+  }
+  return hits
+    .slice(0, 3)
+    .map((item) => `${publicBetTypeLabel(item.betType)} ${officialSelectionText({ betType: item.betType, selection: item.selection })} ${resultOddsLabel(item)}`)
+    .join(" / ");
 }
 
 const officialPayoutOrder = [
@@ -1220,6 +1331,8 @@ function apiRecommendationToTicket(recommendation: ApiBetRecommendation): Ticket
   const stake = safeNumber(recommendation.stake, 0);
   const probability = safeNumber(recommendation.probability, 0);
   const odds = safeNumber(recommendation.odds, 1);
+  const oddsMin = optionalNumber(recommendation.odds_min);
+  const oddsMax = optionalNumber(recommendation.odds_max);
   const riskByType: Record<string, number> = {
     win: 42,
     place: 24,
@@ -1243,6 +1356,8 @@ function apiRecommendationToTicket(recommendation: ApiBetRecommendation): Ticket
     edge: safeNumber(recommendation.edge, probability * odds - 1),
     stake,
     expectedReturn: stake * odds * probability,
+    oddsMin: oddsMin ?? odds,
+    oddsMax: oddsMax ?? odds,
   };
 }
 
@@ -1701,6 +1816,26 @@ function raceStartLabel(race: Race) {
   return "発走時刻未取得";
 }
 
+function raceStatusClass(race: Race) {
+  if (race.status === "finished") {
+    return "status-finished";
+  }
+  if (race.status === "schedule") {
+    return "status-schedule";
+  }
+  return "status-open";
+}
+
+function raceStatusLabel(race: Race) {
+  if (race.status === "finished") {
+    return "結果確定";
+  }
+  if (race.status === "schedule") {
+    return "開催予定";
+  }
+  return "発走前";
+}
+
 function fieldSizeLabel(race: Race) {
   return `${race.runners.length}頭`;
 }
@@ -2084,14 +2219,14 @@ export default function Home() {
     selectedDateRaces.forEach((item) => counts.set(item.venue, (counts.get(item.venue) ?? 0) + 1));
     return Array.from(counts.entries())
       .map(([venue, count]) => ({ venue, count }))
-      .sort((a, b) => a.venue.localeCompare(b.venue, "ja"));
+      .sort(sortVenueOptions);
   }, [selectedDateRaces]);
   const todayVenueOptions = useMemo<VenueOption[]>(() => {
     const counts = new Map<string, number>();
     todayRaces.forEach((item) => counts.set(item.venue, (counts.get(item.venue) ?? 0) + 1));
     return Array.from(counts.entries())
       .map(([venue, count]) => ({ venue, count }))
-      .sort((a, b) => a.venue.localeCompare(b.venue, "ja"));
+      .sort(sortVenueOptions);
   }, [todayRaces]);
   const selectedVenueRaces = useMemo(() => {
     const venue = selectedVenue || venueOptions[0]?.venue;
@@ -2585,6 +2720,9 @@ function PredictPanel({
         <RacePayoutGrid race={race} />
       )}
       {isFinished && raceHistory && (
+        <SettledTicketList history={raceHistory} race={race} />
+      )}
+      {isFinished && raceHistory && (
         <HitPayoutCard history={raceHistory} />
       )}
       {isFinished && (
@@ -2600,8 +2738,8 @@ function PredictPanel({
           <div className="summary-strip compact">
             <Metric label="券種" value={`${PUBLIC_BET_TYPE_GUIDES.length}種`} />
             <Metric label="予想点数" value={`${tickets.reduce((sum, ticket) => sum + ticket.tickets, 0)}点`} />
-            <Metric label="券オッズ" value={primaryTicket ? (oddsReady ? formatOdds(primaryTicket.odds) : "暫定") : "-"} />
-            <Metric label="100円払戻" value={primaryTicket && oddsReady ? ticketPayoutPer100(primaryTicket) : "-"} />
+            <Metric label="券オッズ" value={primaryTicket ? ticketOddsLabel(primaryTicket, oddsReady) : "-"} />
+            <Metric label="100円払戻" value={primaryTicket ? ticketPayoutPer100Label(primaryTicket, oddsReady) : "-"} />
             <Metric label="表示" value="券種別" />
           </div>
           <TicketList projections={projections} race={race} tickets={tickets} />
@@ -2708,14 +2846,14 @@ function DecisionCard({
           tone={shouldPass ? "negative" : confidence >= 62 ? "positive" : confidence < 38 ? "negative" : undefined}
         />
         <Value label="予想点数" value={shouldPass ? "-" : `${tickets.reduce((sum, ticket) => sum + ticket.tickets, 0)}点`} />
-        <Value label="券オッズ" value={shouldPass || !topTicket ? "-" : isTentative ? "暫定" : formatOdds(topTicket.odds)} />
+        <Value label="券オッズ" value={shouldPass || !topTicket ? "-" : ticketOddsLabel(topTicket, !isTentative)} />
         <Value label="券種" value={isPendingOdds ? "オッズ待ち" : shouldPass ? "生成待ち" : `${tickets.length}種`} />
       </div>
 
       <div className="decision-examples">
         {!shouldPass && topTicket ? (
           <>
-            <span>100円あたり払戻 {isTentative ? "未確定" : ticketPayoutPer100(topTicket)}</span>
+            <span>100円あたり払戻 {ticketPayoutPer100Label(topTicket, !isTentative)}</span>
             <span>的中率 {formatPercent(topTicket.probability)} / {topTicket.tickets}通り</span>
           </>
         ) : (
@@ -2847,7 +2985,7 @@ function ticketReasonRows(ticket: TicketProjection, race: Race, projections: Run
   return [
     { label: "予想形", value: ticketCompactMethod(ticket) },
     { label: "AI評価", value: `${anchor.number} ${anchor.name} / AI指数 ${displayAiIndex(anchor, race)}` },
-    { label: "券オッズ", value: oddsReady ? formatOdds(ticket.odds) : "暫定" },
+    { label: "券オッズ", value: ticketOddsLabel(ticket, oddsReady) },
     { label: "中心馬オッズ", value: `${anchor.number} ${formatOdds(anchor.odds)}` },
     { label: "AI平均との差", value: `${marketGap >= 0 ? "+" : ""}${formatPercent(marketGap, 1)}` },
     { label: "人気との差", value: popularity ? `${popularity}人気をAI上位評価` : "人気不明" },
@@ -2902,8 +3040,8 @@ function TicketList({
         }
         const reasons = ticketReasonRows(ticket, race, projections);
         const oddsReady = raceHasUsableWinOdds(race);
-        const oddsLabel = oddsReady ? formatOdds(ticket.odds) : "暫定";
-        const payoutLabel = oddsReady ? ticketPayoutPer100(ticket) : "-";
+        const oddsLabel = ticketOddsLabel(ticket, oddsReady);
+        const payoutLabel = ticketPayoutPer100Label(ticket, oddsReady);
         const isPrimary = tickets[0]?.type === ticket.type && tickets[0]?.selection === ticket.selection;
         return (
           <article className={isPrimary ? "primary" : ""} key={`${guide.id}-${ticket.selection}`}>
@@ -2941,6 +3079,85 @@ function TicketList({
   );
 }
 
+function SettledTicketList({
+  history,
+  race,
+}: {
+  history: HistoricalPrediction;
+  race: Race;
+}) {
+  const tickets = historyPredictionTickets(history);
+  const resultMap = ticketResultMap(history);
+  const resultItems = history.recommendationResults ?? [];
+  const resultByType = new Map<string, RecommendationResult>();
+  resultItems.forEach((item) => {
+    const label = publicBetTypeLabel(item.betType);
+    if (!resultByType.has(label)) {
+      resultByType.set(label, item);
+    }
+  });
+
+  if (tickets.length === 0 && resultItems.length === 0) {
+    return null;
+  }
+
+  const ticketByType = new Map<string, TicketProjection>();
+  tickets.forEach((ticket) => {
+    if (!ticketByType.has(ticket.type)) {
+      ticketByType.set(ticket.type, ticket);
+    }
+  });
+
+  return (
+    <section className="settled-ticket-card">
+      <div className="section-heading compact">
+        <h2>券種別予想と結果</h2>
+        <span>事前予想をそのまま照合</span>
+      </div>
+      <div className="settled-ticket-list">
+        {PUBLIC_BET_TYPE_GUIDES.map((guide) => {
+          const ticket = ticketByType.get(guide.label);
+          const result = ticket ? resultMap.get(ticketResultKey(ticket)) ?? resultByType.get(ticket.type) : resultByType.get(guide.label);
+          if (!ticket && !result) {
+            return null;
+          }
+          const hit = Boolean(result?.hit);
+          const matchedButMissing = result?.selectionMatched && result.payoutSource === "missing_official_payout";
+          const statusLabel = hit ? "🎯 的中" : matchedButMissing ? "払戻未取得" : result ? "不的中" : "照合待ち";
+          const payoutLabel = result ? resultPayoutPer100Label(result) : "-";
+          const oddsLabel = ticket ? ticketOddsLabel(ticket, true) : result ? resultOddsLabel(result) : "-";
+          return (
+            <article
+              className={[
+                hit ? "hit" : matchedButMissing ? "pending" : result ? "miss" : "pending",
+                marketClass(race.market),
+              ].filter(Boolean).join(" ")}
+              key={guide.id}
+            >
+              <div className="settled-ticket-name">
+                <span>{statusLabel}</span>
+                <strong>{guide.label}</strong>
+                <em>{ticket ? `${ticket.tickets}点予想` : "事前予想なし"}</em>
+              </div>
+              {ticket ? <TicketLegs legs={ticket.legs} /> : <strong>{resultBetSummary(result!)}</strong>}
+              <div className="settled-ticket-metrics">
+                <Value label="券オッズ" value={oddsLabel} />
+                <Value label="予想100円払戻" value={ticket ? ticketPayoutPer100Label(ticket, true) : "-"} />
+                <Value label="公式払戻" value={payoutLabel} />
+                <Value label="回収" value={result ? (hit ? formatYen(result.payout) : "払戻なし") : "-"} tone={hit ? "positive" : result ? "negative" : undefined} />
+              </div>
+              <div className="settled-ticket-foot">
+                <span>{ticket ? ticketCompactMethod(ticket) : publicStrategyLabel(result?.strategy)}</span>
+                <b>{result?.winningTickets ? `的中 ${result.winningTickets}点` : statusLabel}</b>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function RacePicker({
   onRaceSelect,
   onVenueSelect,
@@ -2962,32 +3179,43 @@ function RacePicker({
 }) {
   const displayRaces = compactRaceList(races);
   const totalRaceCount = displayRaces.length || venues.reduce((sum, venue) => sum + venue.count, 0);
+  const venueGroups = groupedVenueOptions(venues);
   return (
     <div className="race-picker">
       <div className="section-heading compact">
         <h2>{selectedDate}</h2>
         <span>{totalRaceCount}R</span>
       </div>
-      <div className="venue-grid" aria-label="開催場">
-        {venues.length > 0 ? (
-          venues.map((venue) => {
-            const market = venueMarket(venue.venue);
-            return (
-              <button
-                className={[
-                  selectedVenue === venue.venue ? "active" : "",
-                  marketClass(market),
-                ].filter(Boolean).join(" ")}
-                key={venue.venue}
-                onClick={() => onVenueSelect(venue.venue)}
-                type="button"
-              >
-                <i>{publicMarketShortLabel(market)}</i>
-                <strong>{venue.venue}</strong>
-                <span>{venue.count}R</span>
-              </button>
-            );
-          })
+      <div className="venue-groups" aria-label="開催場">
+        {venueGroups.length > 0 ? (
+          venueGroups.map((group) => (
+            <section className={`venue-market-group ${marketClass(group.market)}`} key={group.market}>
+              <div>
+                <strong>{publicMarketLabel(group.market)}</strong>
+                <span>{group.venues.reduce((sum, venue) => sum + venue.count, 0)}R</span>
+              </div>
+              <div className="venue-grid">
+                {group.venues.map((venue) => {
+                  const market = venueMarket(venue.venue);
+                  return (
+                    <button
+                      className={[
+                        selectedVenue === venue.venue ? "active" : "",
+                        marketClass(market),
+                      ].filter(Boolean).join(" ")}
+                      key={venue.venue}
+                      onClick={() => onVenueSelect(venue.venue)}
+                      type="button"
+                    >
+                      <i>{publicMarketShortLabel(market)}</i>
+                      <strong>{venue.venue}</strong>
+                      <span>{venue.count}R</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          ))
         ) : (
           <div className="empty-inline">開催なし</div>
         )}
@@ -3001,6 +3229,7 @@ function RacePicker({
                 item.id === selectedRaceId ? "active" : "",
                 history?.hit ? "hit" : "",
                 marketClass(item.market),
+                raceStatusClass(item),
               ].filter(Boolean).join(" ")}
               key={item.id}
               onClick={() => onRaceSelect(item.id)}
@@ -3009,7 +3238,7 @@ function RacePicker({
               {history?.hit && <em aria-label="的中">🎯</em>}
               <strong>{raceNumberValue(item)}R</strong>
               <span>{raceStartLabel(item)}</span>
-              <i>{publicMarketShortLabel(item.market)}</i>
+              <i>{publicMarketShortLabel(item.market)} / {raceStatusLabel(item)}</i>
             </button>
           );
         })}
@@ -3400,6 +3629,7 @@ function CalendarRaceDetail({
         <>
           <RaceResultStrip race={race} resultOrder={resultOrder} raceHistory={raceHistory} />
           <RacePayoutGrid race={race} />
+          {raceHistory && <SettledTicketList history={raceHistory} race={race} />}
           {raceHistory && <HitPayoutCard history={raceHistory} />}
           <PredictionResultDiff race={race} raceHistory={raceHistory} projections={projections} />
         </>
@@ -3499,14 +3729,18 @@ function ResultsPanel({
         <div className="result-race-list compact">
           {todayAll.slice(0, 6).map((item) => (
             <button
-              className={`${item.hit ? "hit" : ""} ${marketClass(item.market)}`}
+              className={[
+                item.hit ? "hit" : "",
+                maxHitOdds(item) >= 10 ? "high-odds-hit" : "",
+                marketClass(item.market),
+              ].filter(Boolean).join(" ")}
               key={item.id}
               onClick={() => onRaceSelect(item.id)}
               type="button"
             >
               <span>{publicMarketLabel(item.market)} / {item.settled ? item.result : "結果待ち"}</span>
               <strong>{displayHistoryTitle(item)}</strong>
-              <em>{item.settled ? resultOutcomeText(item) : item.topTicket}</em>
+              <em>{item.settled ? hitRecommendationText(item) : item.topTicket}</em>
             </button>
           ))}
         </div>
@@ -3535,14 +3769,18 @@ function ResultsPanel({
       <div className="result-race-list">
         {recentRaces.map((item) => (
           <button
-            className={`${item.hit ? "hit" : ""} ${marketClass(item.market)}`}
+            className={[
+              item.hit ? "hit" : "",
+              maxHitOdds(item) >= 10 ? "high-odds-hit" : "",
+              marketClass(item.market),
+            ].filter(Boolean).join(" ")}
             key={item.id}
             onClick={() => onRaceSelect(item.id)}
             type="button"
           >
             <span>{item.date.slice(5)} / {publicMarketLabel(item.market)} / {item.generatedAfterResult ? "参考" : "実績"}</span>
             <strong>{item.hit ? "🎯 " : ""}{displayHistoryTitle(item)}</strong>
-            <em>{resultOutcomeText(item)}</em>
+            <em>{hitRecommendationText(item)}</em>
           </button>
         ))}
         {settledHistory.length === 0 && <div className="empty-state">保存済み予想はまだありません</div>}
@@ -3713,9 +3951,16 @@ function TicketLegs({ legs }: { legs: TicketLeg[] }) {
 }
 
 function RunnerTable({ projections, race }: { projections: RunnerProjection[]; race: Race }) {
-  const defaultSort: RunnerSortKey = race.status === "finished" ? "result" : "prediction";
+  const hasResultSort = race.status === "finished" || projections.some((runner) => finishPosition(runner) !== undefined);
+  const defaultSort: RunnerSortKey = hasResultSort ? "result" : "prediction";
   const oddsReady = raceHasUsableWinOdds(race);
   const [sortKey, setSortKey] = useState<RunnerSortKey>(defaultSort);
+  const sortOptions: [RunnerSortKey, string][] = [
+    ["prediction", "AI評価順"],
+    ["number", "馬番順"],
+    ["odds", "オッズ順"],
+    ...(hasResultSort ? [["result", "着順"] as [RunnerSortKey, string]] : []),
+  ];
   useEffect(() => {
     setSortKey(defaultSort);
   }, [defaultSort, race.id]);
@@ -3743,12 +3988,7 @@ function RunnerTable({ projections, race }: { projections: RunnerProjection[]; r
   return (
     <>
       <div className="runner-sort" role="group" aria-label="出走馬の並び替え">
-        {[
-          ["prediction", "AI評価順"],
-          ["number", "馬番順"],
-          ["odds", "オッズ順"],
-          ["result", "着順"],
-        ].map(([key, label]) => (
+        {sortOptions.map(([key, label]) => (
           <button
             className={sortKey === key ? "active" : ""}
             key={key}

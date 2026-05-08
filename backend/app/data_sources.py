@@ -836,9 +836,45 @@ def _sanitize_race_payload(race: dict[str, Any]) -> dict[str, Any]:
         race["course"] = _clean_text(course)
 
     runners = race.get("runners") if isinstance(race.get("runners"), list) else []
+    raw_numbers: list[int] = []
     for runner in runners:
         if not isinstance(runner, dict):
             continue
+        try:
+            raw_numbers.append(int(float(str(runner.get("number")))))
+        except (TypeError, ValueError):
+            raw_numbers.append(0)
+    valid_raw_numbers = [number for number in raw_numbers if number > 0]
+    force_sequential_numbers = (
+        any(number > 18 for number in valid_raw_numbers)
+        or len(set(valid_raw_numbers)) != len(valid_raw_numbers)
+    )
+    seen_numbers: set[int] = set()
+    for index, runner in enumerate(runners, start=1):
+        if not isinstance(runner, dict):
+            continue
+
+        try:
+            number = int(float(str(runner.get("number"))))
+        except (TypeError, ValueError):
+            number = index
+        if force_sequential_numbers:
+            number = index
+        if number <= 0 or number > 18 or number in seen_numbers:
+            number = next(
+                (candidate for candidate in range(1, max(19, len(runners) + 1)) if candidate not in seen_numbers),
+                index,
+            )
+        runner["number"] = number
+        if force_sequential_numbers or not runner.get("gate"):
+            runner["gate"] = min(max((number + 1) // 2, 1), 8)
+        seen_numbers.add(number)
+
+        name = _clean_text(runner.get("name"))
+        if not name or re.fullmatch(r"[\d.\-倍人気]+", name):
+            runner["name"] = f"{number}番"
+        else:
+            runner["name"] = name
 
         try:
             horse_weight = int(float(str(runner.get("horseWeight"))))
@@ -862,6 +898,12 @@ def _sanitize_race_payload(race: dict[str, Any]) -> dict[str, Any]:
         if not math.isfinite(win_odds) or win_odds <= 1:
             runner["odds"] = 0.0
             runner["placeOdds"] = None
+            if isinstance(runner.get("tags"), list):
+                runner["tags"] = [
+                    tag
+                    for tag in runner["tags"]
+                    if not (isinstance(tag, str) and tag.endswith("人気"))
+                ]
             continue
         runner["odds"] = win_odds
 

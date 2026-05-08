@@ -612,15 +612,27 @@ def overlay_live_odds(frame: pd.DataFrame, raw_dir: Path) -> pd.DataFrame:
     work = frame.copy()
     work["race_id"] = work["race_id"].astype(str)
     work["runner_number"] = pd.to_numeric(work["runner_number"], errors="coerce").astype("Int64")
-    live = odds_frame[["race_id", "runner_number", *live_columns]].rename(
+    live_identity_columns = ["horse_name"] if "horse_name" in odds_frame else []
+    live = odds_frame[["race_id", "runner_number", *live_identity_columns, *live_columns]].rename(
         columns={column: f"{column}_live" for column in live_columns}
     )
+    if "horse_name" in live:
+        live = live.rename(columns={"horse_name": "horse_name_live"})
     work = work.merge(live, how="left", on=["race_id", "runner_number"])
+    if "horse_name_live" in work and "horse_name" in work:
+        base_names = work["horse_name"].fillna("").astype(str).str.replace(r"\s+", "", regex=True)
+        live_names = work["horse_name_live"].fillna("").astype(str).str.replace(r"\s+", "", regex=True)
+        live_name_matches = (live_names == "") | (base_names == "") | (live_names == base_names)
+    else:
+        live_name_matches = pd.Series(True, index=work.index)
     for column in live_columns:
         live_column = f"{column}_live"
         if live_column in work:
-            work[column] = work[live_column].where(work[live_column].notna(), work[column])
+            use_live = work[live_column].notna() & live_name_matches
+            work[column] = work[live_column].where(use_live, work[column])
             work = work.drop(columns=[live_column])
+    if "horse_name_live" in work:
+        work = work.drop(columns=["horse_name_live"])
     return work
 
 

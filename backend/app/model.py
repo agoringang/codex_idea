@@ -262,6 +262,8 @@ def add_candidate(
     note_text: str,
     probability: float,
     odds: float,
+    odds_min: float | None = None,
+    odds_max: float | None = None,
     strategy: str = "single",
     tickets: int = 1,
     covered_selections: list[str] | None = None,
@@ -277,6 +279,10 @@ def add_candidate(
         return
 
     edge = probability * odds - 1
+    display_odds_min = odds if odds_min is None else odds_min
+    display_odds_max = odds if odds_max is None else odds_max
+    if display_odds_min > display_odds_max:
+        display_odds_min, display_odds_max = display_odds_max, display_odds_min
     minimum_probability = max(request.min_probability, BET_TYPE_MIN_PROBABILITY.get(bet_type, 0.0))
     if not force_display and probability < minimum_probability:
         return
@@ -312,6 +318,8 @@ def add_candidate(
             legs=legs or [],
             probability=probability,
             odds=odds,
+            odds_min=display_odds_min,
+            odds_max=display_odds_max,
             edge=edge,
             kelly_fraction=kelly,
             stake=stake,
@@ -349,11 +357,13 @@ def add_combo_strategy(
     weighted_odds = 0.0
     raw_probability = 0.0
     examples: list[str] = []
+    combo_odds_values: list[float] = []
     for combo in combo_list:
         combo_probability = probability_fn(combo)
         combo_odds = synthetic_odds(bet_type, combo_probability, combo, bonus)
         raw_probability += combo_probability
         weighted_odds += combo_probability * combo_odds
+        combo_odds_values.append(combo_odds)
         if len(examples) < 4:
             examples.append(selection(combo))
 
@@ -369,6 +379,8 @@ def add_combo_strategy(
         note_text=f"{strategy} / {len(combo_list)}点 / 例 {'、'.join(examples)}",
         probability=probability,
         odds=effective_odds,
+        odds_min=min(combo_odds_values) if combo_odds_values else effective_odds,
+        odds_max=max(combo_odds_values) if combo_odds_values else effective_odds,
         strategy=strategy,
         tickets=len(combo_list),
         covered_selections=[selection(combo) for combo in combo_list],
@@ -418,11 +430,13 @@ def add_trifecta_strategy(
     weighted_odds = 0.0
     raw_probability = 0.0
     notes: list[str] = []
+    combo_odds_values: list[float] = []
     for combo in combos:
         combo_probability = trifecta_order_probability(combo)
         combo_odds = synthetic_odds("trifecta", combo_probability, combo, bonus)
         raw_probability += combo_probability
         weighted_odds += combo_probability * combo_odds
+        combo_odds_values.append(combo_odds)
         if len(notes) < 4:
             notes.append(selection(combo))
 
@@ -438,6 +452,8 @@ def add_trifecta_strategy(
         note_text=f"{strategy} / {len(combos)}点 / 例 {'、'.join(notes)}",
         probability=probability,
         odds=effective_odds,
+        odds_min=min(combo_odds_values) if combo_odds_values else effective_odds,
+        odds_max=max(combo_odds_values) if combo_odds_values else effective_odds,
         strategy=strategy,
         tickets=len(combos),
         covered_selections=[selection(combo) for combo in combos],

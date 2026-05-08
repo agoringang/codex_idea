@@ -222,6 +222,8 @@ class BetRecommendation(BaseModel):
     legs: list[BetLeg] = Field(default_factory=list)
     probability: float
     odds: float
+    odds_min: float | None = None
+    odds_max: float | None = None
     edge: float
     kelly_fraction: float
     stake: float

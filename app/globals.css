@@ -1205,6 +1205,110 @@ h1 {
   font-weight: 860;
 }
 
+.settled-ticket-card {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid rgba(47, 127, 231, 0.12);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.market-nar .settled-ticket-card {
+  border-color: rgba(43, 140, 104, 0.16);
+}
+
+.settled-ticket-list {
+  display: grid;
+  gap: 9px;
+}
+
+.settled-ticket-list article {
+  display: grid;
+  grid-template-columns: minmax(88px, 0.26fr) minmax(0, 0.74fr) minmax(0, 1.05fr);
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: #f9fcff;
+}
+
+.settled-ticket-list article.hit {
+  border-color: rgba(10, 143, 105, 0.28);
+  background:
+    linear-gradient(135deg, rgba(235, 252, 244, 0.94), rgba(255, 255, 255, 0.96)),
+    #fff;
+}
+
+.settled-ticket-list article.miss {
+  border-color: rgba(217, 75, 87, 0.16);
+  background:
+    linear-gradient(135deg, rgba(255, 245, 246, 0.86), rgba(255, 255, 255, 0.95)),
+    #fff;
+}
+
+.settled-ticket-list article.pending {
+  border-style: dashed;
+}
+
+.settled-ticket-name {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.settled-ticket-name span,
+.settled-ticket-name em,
+.settled-ticket-foot {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.settled-ticket-name strong {
+  color: var(--ink);
+  font-size: 0.98rem;
+  font-weight: 920;
+}
+
+.settled-ticket-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+
+.settled-ticket-metrics div {
+  min-width: 0;
+  padding: 8px;
+  border-radius: 15px;
+  background: rgba(241, 247, 253, 0.9);
+}
+
+.settled-ticket-foot {
+  grid-column: 2 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+}
+
+.settled-ticket-foot span,
+.settled-ticket-foot b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settled-ticket-foot b {
+  color: var(--ink);
+  font-weight: 920;
+}
+
 .pass-inline {
   gap: 4px;
   min-height: 74px;
@@ -1343,7 +1447,7 @@ h1 {
 
 .runner-sort {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
   gap: 8px;
 }
 
@@ -1672,6 +1776,51 @@ h1 {
   gap: 7px;
 }
 
+.venue-groups {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.venue-market-group {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid rgba(47, 127, 231, 0.12);
+  border-radius: 18px;
+  background: rgba(244, 249, 255, 0.72);
+}
+
+.venue-market-group.market-nar {
+  border-color: rgba(43, 140, 104, 0.14);
+  background: rgba(239, 252, 246, 0.72);
+}
+
+.venue-market-group > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.venue-market-group > div:first-child strong {
+  color: var(--jra-deep);
+  font-size: 0.78rem;
+  font-weight: 920;
+}
+
+.venue-market-group.market-nar > div:first-child strong {
+  color: var(--nar-deep);
+}
+
+.venue-market-group > div:first-child span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 860;
+}
+
 .venue-grid {
   grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
 }
@@ -1734,6 +1883,22 @@ h1 {
   background: #f1fcf7;
 }
 
+.race-number-grid button.status-finished {
+  border-color: rgba(10, 143, 105, 0.22);
+}
+
+.race-number-grid button.status-finished i {
+  color: var(--green);
+}
+
+.race-number-grid button.status-open i {
+  color: var(--blue);
+}
+
+.race-number-grid button.status-schedule i {
+  color: var(--muted);
+}
+
 .race-number-grid button em {
   position: absolute;
   right: 5px;
@@ -1775,6 +1940,14 @@ h1 {
 .race-number-grid button.active span,
 .race-number-grid button.active i {
   color: #506176;
+}
+
+.race-number-grid button.status-finished.active i {
+  color: var(--green);
+}
+
+.race-number-grid button.status-open.active i {
+  color: var(--blue);
 }
 
 .empty-inline {
@@ -2342,6 +2515,18 @@ h1 {
 .result-race-list button.hit {
   border-color: rgba(10, 143, 105, 0.22);
   background: #f1fcf7;
+}
+
+.result-race-list button.high-odds-hit {
+  border-color: rgba(216, 169, 40, 0.4);
+  background:
+    linear-gradient(135deg, rgba(255, 248, 221, 0.94), rgba(241, 252, 247, 0.96)),
+    #fff;
+}
+
+.result-race-list button.high-odds-hit em {
+  color: #9a6a00;
+  font-weight: 920;
 }
 
 .result-race-list button.market-jra {
@@ -2960,7 +3145,9 @@ h1 {
   .heat-card,
   .diff-grid,
   .ticket-list article,
+  .settled-ticket-list article,
   .ticket-data,
+  .settled-ticket-metrics,
   .loading-banner,
   .probability-chart article,
   .results-hero,
@@ -2982,6 +3169,10 @@ h1 {
 
   .hit-payout-card {
     grid-template-columns: 1fr;
+  }
+
+  .settled-ticket-foot {
+    grid-column: 1;
   }
 
   .order-grid {
