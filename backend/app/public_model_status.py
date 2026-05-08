@@ -10,26 +10,26 @@ PUBLIC_HOLDOUT_METRICS = {
     "best": {
         "is_win": {
             "holdout_2026": {
-                "auc": 0.856558,
-                "brier": 0.063621,
-                "brier_vs_market": 0.000048,
-                "calibration": {"ece": 0.004308},
+                "auc": 0.814713,
+                "brier": 0.075271,
+                "brier_vs_market": 0.011699,
+                "calibration": {"ece": 0.039631},
             }
         },
         "is_top2": {
             "holdout_2026": {
-                "auc": 0.841770,
-                "brier": 0.107954,
-                "brier_vs_market": -0.001746,
-                "calibration": {"ece": 0.010581},
+                "auc": 0.79889,
+                "brier": 0.132398,
+                "brier_vs_market": 0.022697,
+                "calibration": {"ece": 0.06933},
             }
         },
         "is_place": {
             "holdout_2026": {
-                "auc": 0.825213,
-                "brier": 0.142486,
-                "brier_vs_market": -0.005229,
-                "calibration": {"ece": 0.017688},
+                "auc": 0.776251,
+                "brier": 0.176938,
+                "brier_vs_market": 0.029224,
+                "calibration": {"ece": 0.098975},
             }
         },
     },
@@ -59,24 +59,11 @@ PUBLIC_HOLDOUT_METRICS = {
         "trainer": 1.0,
     },
     "risk_router": {
-        "stable_on_2026": True,
-        "low": {"target": "is_top2", "bet_types": ["win", "bracket_quinella", "wide"]},
-        "middle": {"target": "is_top2", "bet_types": ["wide", "quinella", "trio"]},
-        "high": {"target": "is_win", "bet_types": ["exacta", "trio", "trifecta"]},
+        "stable_on_2026": False,
+        "low": {"target": "is_place", "bet_types": ["win", "bracket_quinella", "wide"]},
+        "middle": {"target": "is_place", "bet_types": ["wide", "quinella", "trio"]},
+        "high": {"target": "is_top2", "bet_types": ["exacta", "trio", "trifecta"]},
     },
 }
 
-PUBLIC_HOLDOUT_BACKTEST = {
-    "races": 5_506,
-    "bets": 3_423,
-    "total_stake": 7_174_600.0,
-    "total_payout": 9_685_282.0,
-    "roi": 1.3499,
-    "hit_rate": 0.2591,
-    "max_drawdown": 68_876.0,
-    "note": (
-        "2026 holdout fixed seven-bet simulation. Place betting is excluded; "
-        "official exotic payout columns are required "
-        "for public ROI yet."
-    ),
-}
+PUBLIC_HOLDOUT_BACKTEST = None
