@@ -204,6 +204,8 @@ def settle_prediction_entry(entry: dict[str, Any], race: Race | None) -> dict[st
             (float(value) for value in official_payouts if value is not None and value > 0),
             None,
         )
+        ordered = str(recommendation.get("bet_type") or "") in {"exacta", "trifecta"}
+        winning_selections = [_entry_key(entry, ordered=ordered) for entry in winning_entries]
         payable_hit = recommendation_hit and not missing_official_payout
         if payable_hit:
             hit_recommendations.append(recommendation)
@@ -220,6 +222,7 @@ def settle_prediction_entry(entry: dict[str, Any], race: Race | None) -> dict[st
                 "payout": payout,
                 "official_payout_yen": official_payout,
                 "winning_tickets": len(winning_entries),
+                "winning_selections": winning_selections,
                 "payout_source": (
                     "official"
                     if recommendation_hit and not missing_official_payout

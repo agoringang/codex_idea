@@ -200,6 +200,7 @@ type RecommendationResult = {
   officialPayoutYen?: number;
   payoutSource?: string;
   winningTickets?: number;
+  winningSelections?: string[];
 };
 
 type ApiState = "loading" | "ready" | "empty" | "fallback";
@@ -865,6 +866,9 @@ function normalizeApiHistory(payload: any): HistoricalPrediction[] {
             officialPayoutYen: optionalNumber(item.official_payout_yen),
             payoutSource: String(item.payout_source ?? ""),
             winningTickets: optionalNumber(item.winning_tickets),
+            winningSelections: Array.isArray(item.winning_selections)
+              ? item.winning_selections.map((value: any) => String(value))
+              : undefined,
           }))
         : [];
       const recommendationResults = rawRecommendationResults.filter((item) => isPublicBetType(item.betType));
@@ -2666,15 +2670,6 @@ function PredictPanel({
 
   return (
     <section className={`tab-panel ${marketClass(race.market)}`}>
-      {!isFinished && (
-        <DecisionCard
-          heat={bettingHeat}
-          projections={projections}
-          race={race}
-          tickets={tickets}
-        />
-      )}
-
       <div className="control-strip">
         <RacePicker
           onRaceSelect={onRaceSelect}
@@ -2710,20 +2705,14 @@ function PredictPanel({
       )}
       {!isFinished && <BettingHeatCard heat={bettingHeat} />}
 
-      {raceHistory && (
-        <ResultStrip history={raceHistory} />
-      )}
       {isFinished && (
         <RaceResultStrip race={race} resultOrder={resultOrder} raceHistory={raceHistory} />
       )}
       {isFinished && (
-        <RacePayoutGrid race={race} />
+        <RacePayoutGrid race={race} raceHistory={raceHistory} />
       )}
       {isFinished && raceHistory && (
         <SettledTicketList history={raceHistory} race={race} />
-      )}
-      {isFinished && raceHistory && (
-        <HitPayoutCard history={raceHistory} />
       )}
       {isFinished && (
         <PredictionResultDiff race={race} raceHistory={raceHistory} projections={projections} />
@@ -3350,12 +3339,62 @@ function RaceResultStrip({
   );
 }
 
-function RacePayoutGrid({ race }: { race: Race }) {
+function canonicalPayoutBetType(value: string | undefined) {
+  const normalized = normalizedBetType(value);
+  if (["win", "tansho", "単勝"].includes(normalized)) return "win";
+  if (["place", "fukusho", "複勝"].includes(normalized)) return "place";
+  if (["bracket_quinella", "wakuren", "枠連", "枠連複"].includes(normalized)) return "bracket_quinella";
+  if (["quinella", "umaren", "馬連", "馬連複"].includes(normalized)) return "quinella";
+  if (["wide", "ワイド"].includes(normalized)) return "wide";
+  if (["exacta", "umatan", "馬単", "馬連単"].includes(normalized)) return "exacta";
+  if (["trio", "fuku3", "3連複", "三連複"].includes(normalized)) return "trio";
+  if (["trifecta", "tan3", "3連単", "三連単"].includes(normalized)) return "trifecta";
+  return normalized;
+}
+
+function orderedPayoutType(value: string | undefined) {
+  return ["exacta", "trifecta"].includes(canonicalPayoutBetType(value));
+}
+
+function selectionNumberKey(value: string | undefined, ordered: boolean) {
+  const numbers = String(value ?? "").match(/\d+/g) ?? [];
+  const normalized = ordered ? numbers : [...numbers].sort((a, b) => Number(a) - Number(b));
+  return normalized.join("-");
+}
+
+function officialHitPayoutKeys(history: HistoricalPrediction | null) {
+  const precise = new Set<string>();
+  const fallback = new Set<string>();
+  (history?.recommendationResults ?? []).forEach((item) => {
+    const payoutYen = Math.round(Number(item.officialPayoutYen ?? 0));
+    if (!item.hit || payoutYen <= 0) {
+      return;
+    }
+    const type = canonicalPayoutBetType(item.betType);
+    fallback.add(`${type}:${payoutYen}`);
+    (item.winningSelections ?? []).forEach((selection) => {
+      const selectionKey = selectionNumberKey(selection, orderedPayoutType(item.betType));
+      if (selectionKey) {
+        precise.add(`${type}:${payoutYen}:${selectionKey}`);
+      }
+    });
+  });
+  return { precise, fallback };
+}
+
+function RacePayoutGrid({
+  race,
+  raceHistory,
+}: {
+  race: Race;
+  raceHistory?: HistoricalPrediction | null;
+}) {
   const payouts = [...racePayoutRows(race)].sort((a, b) => {
     const typeRank = officialPayoutRank(a.betType) - officialPayoutRank(b.betType);
     if (typeRank !== 0) return typeRank;
     return officialSelectionText(a).localeCompare(officialSelectionText(b), "ja");
   });
+  const hitPayoutKeys = officialHitPayoutKeys(raceHistory ?? null);
   if (payouts.length === 0) {
     return (
       <section className="race-payout-grid empty">
@@ -3384,12 +3423,22 @@ function RacePayoutGrid({ race }: { race: Race }) {
         {payouts.map((payout, index) => {
           const currentType = officialBetTypeLabel(payout.betType, race.market);
           const previousType = index > 0 ? officialBetTypeLabel(payouts[index - 1].betType, race.market) : "";
+          const typeKey = canonicalPayoutBetType(payout.betType);
+          const payoutKey = `${typeKey}:${Math.round(payout.payoutYen)}`;
+          const preciseKey = `${payoutKey}:${selectionNumberKey(payout.selection, orderedPayoutType(payout.betType))}`;
+          const highlighted = hitPayoutKeys.precise.size > 0
+            ? hitPayoutKeys.precise.has(preciseKey)
+            : hitPayoutKeys.fallback.has(payoutKey);
           return (
-            <div className="official-payout-row" key={`${payout.betType}-${payout.selection}-${index}`} role="row">
-              <span role="cell">{currentType === previousType ? "" : currentType}</span>
+            <div
+              className={highlighted ? "official-payout-row hit" : "official-payout-row"}
+              key={`${payout.betType}-${payout.selection}-${index}`}
+              role="row"
+            >
+              <span role="cell">{highlighted ? `🎯 ${currentType}` : currentType === previousType ? "" : currentType}</span>
               <strong role="cell">{officialSelectionText(payout)}</strong>
               <b role="cell">{numberFormatter.format(Math.round(payout.payoutYen))}円</b>
-              <em role="cell">{payout.popularity ? `${payout.popularity}人気` : "-"}</em>
+              <em role="cell">{highlighted ? `的中${payout.popularity ? ` / ${payout.popularity}人気` : ""}` : payout.popularity ? `${payout.popularity}人気` : "-"}</em>
             </div>
           );
         })}
@@ -3628,9 +3677,8 @@ function CalendarRaceDetail({
       {isFinished ? (
         <>
           <RaceResultStrip race={race} resultOrder={resultOrder} raceHistory={raceHistory} />
-          <RacePayoutGrid race={race} />
+          <RacePayoutGrid race={race} raceHistory={raceHistory} />
           {raceHistory && <SettledTicketList history={raceHistory} race={race} />}
-          {raceHistory && <HitPayoutCard history={raceHistory} />}
           <PredictionResultDiff race={race} raceHistory={raceHistory} projections={projections} />
         </>
       ) : (

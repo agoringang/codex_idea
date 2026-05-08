@@ -685,7 +685,42 @@ def import_downloaded_html(args: argparse.Namespace) -> dict[str, Any]:
             output_2026=args.enriched_output,
             output_combined=args.enriched_combined_output,
         )
+    summary["runner_integrity"] = verify_scraped_runner_integrity(args.start_date, args.end_date)
     return summary
+
+
+def verify_scraped_runner_integrity(start_date: str, end_date: str) -> dict[str, Any]:
+    from app.data_sources import get_races
+    from app.runner_integrity import validate_race_runner_integrity
+
+    races = get_races(start_date=start_date, end_date=end_date)
+    reports: list[dict[str, Any]] = []
+    error_count = 0
+    warning_count = 0
+    for race in races:
+        report = validate_race_runner_integrity(race)
+        errors = report.get("errors") if isinstance(report.get("errors"), list) else []
+        warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
+        error_count += len(errors)
+        warning_count += len(warnings)
+        if errors or warnings:
+            reports.append(
+                {
+                    "race_id": race.id,
+                    "date": race.date,
+                    "venue": race.venue,
+                    "race_no": race.raceNo,
+                    "errors": errors,
+                    "warnings": warnings,
+                }
+            )
+    return {
+        "status": "ok" if error_count == 0 else "failed",
+        "races": len(races),
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "reports": reports[:50],
+    }
 
 
 def write_manifest(path: Path, payload: dict[str, Any]) -> None:

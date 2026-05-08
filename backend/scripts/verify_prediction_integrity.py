@@ -14,6 +14,7 @@ from app.data_sources import get_races
 from app.history import get_all_history
 from app.ingestion import _race_request_from_dict
 from app.model import predict_race
+from app.runner_integrity import validate_race_runner_integrity
 from app.settlement import settle_history
 
 FIXED_PUBLIC_BET_TYPES = {
@@ -99,9 +100,19 @@ def main() -> None:
     sampled = 0
     sample_bet_types: Counter[str] = Counter()
     non_triple_predictions = 0
+    runner_integrity_errors = 0
+    runner_integrity_warnings = 0
     for race in races:
+        integrity = validate_race_runner_integrity(race)
+        runner_errors = integrity.get("errors") if isinstance(integrity.get("errors"), list) else []
+        runner_warnings = integrity.get("warnings") if isinstance(integrity.get("warnings"), list) else []
+        runner_integrity_errors += len(runner_errors)
+        runner_integrity_warnings += len(runner_warnings)
+        for error in runner_errors:
+            errors.append(f"{race.id}: runner integrity failed: {error}")
+
         if sampled >= args.sample_predictions:
-            break
+            continue
         payload = race.model_dump(mode="json")
         if len(payload.get("runners") or []) < 2:
             continue
@@ -138,6 +149,8 @@ def main() -> None:
         "payout_sources": dict(payout_sources),
         "sampled_predictions": sampled,
         "sample_prediction_bet_types": dict(sample_bet_types),
+        "runner_integrity_errors": runner_integrity_errors,
+        "runner_integrity_warnings": runner_integrity_warnings,
         "errors": errors[:50],
         "error_count": len(errors),
     }

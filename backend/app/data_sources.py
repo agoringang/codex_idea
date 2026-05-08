@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from .runner_integrity import validate_race_runner_integrity
 from .schemas import LiveSnapshot, Race
 
 
@@ -919,6 +920,21 @@ def _sanitize_race_payload(race: dict[str, Any]) -> dict[str, Any]:
     return race
 
 
+def _apply_runner_integrity_status(race: dict[str, Any]) -> dict[str, Any]:
+    report = validate_race_runner_integrity(race)
+    errors = report.get("errors") if isinstance(report.get("errors"), list) else []
+    if not errors:
+        return race
+
+    race = deepcopy(race)
+    race["verificationStatus"] = "unverified"
+    current_note = _clean_text(race.get("officialNote"))
+    issue_text = " / ".join(str(error) for error in errors[:3])
+    integrity_note = f"出走馬整合性要確認: {issue_text}"
+    race["officialNote"] = f"{current_note} / {integrity_note}" if current_note else integrity_note
+    return race
+
+
 def _repair_race_start_time(race: dict[str, Any]) -> dict[str, Any]:
     start = str(race.get("start") or "")
     if re.search(r"\d{1,2}:\d{2}", start):
@@ -938,7 +954,7 @@ def _repair_race_start_time(race: dict[str, Any]) -> dict[str, Any]:
 def _collapse_duplicate_races(races: list[dict[str, Any]]) -> list[dict[str, Any]]:
     collapsed: dict[tuple[str, str, int], dict[str, Any]] = {}
     for race in races:
-        race = _sanitize_race_payload(_repair_race_start_time(race))
+        race = _apply_runner_integrity_status(_sanitize_race_payload(_repair_race_start_time(race)))
         key = _race_display_key(race)
         if key[2] == 999:
             key = (key[0], key[1], hash(str(race.get("id") or "")))
