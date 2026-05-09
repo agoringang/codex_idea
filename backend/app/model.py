@@ -170,6 +170,31 @@ def unique_gate_runners(runners: Iterable[RunnerPrediction]) -> list[RunnerPredi
     return unique
 
 
+def market_tempered_win_probability(
+    model_probability: float,
+    market_probability: float,
+    market_odds: float,
+) -> float:
+    """Keep inference from turning weak model signal into extreme longshot picks."""
+
+    if not math.isfinite(model_probability) or model_probability <= 0:
+        model_probability = market_probability
+    if not math.isfinite(market_probability) or market_probability <= 0:
+        return max(model_probability, 1e-6)
+
+    if market_odds >= 80:
+        positive_cap = 0.012
+    elif market_odds >= 40:
+        positive_cap = 0.020
+    elif market_odds >= 20:
+        positive_cap = 0.035
+    else:
+        positive_cap = 0.075
+    negative_cap = 0.12
+    gap = clamp(model_probability - market_probability, -negative_cap, positive_cap)
+    return max(market_probability + gap * 0.85, 1e-6)
+
+
 def unique_combos(combos: Iterable[RunnerCombo], *, unordered: bool = False) -> list[RunnerCombo]:
     unique: list[RunnerCombo] = []
     seen: set[tuple[str, ...]] = set()
@@ -730,9 +755,23 @@ def predict_race(request: RaceRequest) -> RacePrediction:
         (value / implied_total) if implied_total > 0 else 1 / len(request.runners)
         for value in implied_market
     ]
+    model_win_probabilities = [score / total for score in raw_scores]
+    if trained_probabilities is not None:
+        tempered = [
+            market_tempered_win_probability(model_probability, market_probability, runner.market_odds)
+            for runner, model_probability, market_probability in zip(
+                request.runners,
+                model_win_probabilities,
+                market_probabilities,
+                strict=True,
+            )
+        ]
+        tempered_total = sum(tempered)
+        if math.isfinite(tempered_total) and tempered_total > 0:
+            model_win_probabilities = [value / tempered_total for value in tempered]
 
-    for index, (runner, raw_score) in enumerate(zip(request.runners, raw_scores, strict=True)):
-        win_probability = raw_score / total
+    for index, runner in enumerate(request.runners):
+        win_probability = model_win_probabilities[index]
         top2_probability: float | None = None
         second_probability: float | None = None
         third_probability: float | None = None
@@ -774,13 +813,13 @@ def predict_race(request: RaceRequest) -> RacePrediction:
         )
         top2_score = top2_probability if top2_probability is not None else place_probability
         score = (
-            market_probability * 3
-            + win_probability * 104
-            + top2_score * 46
-            + place_probability * 14
-            + capped_market_gap * 164
-            + capped_place_gap * 34
-            + capped_edge * 6
+            market_probability * 16
+            + win_probability * 118
+            + top2_score * 34
+            + place_probability * 10
+            + capped_market_gap * 42
+            + capped_place_gap * 22
+            + capped_edge * 1.5
             + runner.condition / 12
             + runner.speed / 20
             + non_market_features * 1.8
