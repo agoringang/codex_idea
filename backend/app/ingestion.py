@@ -378,13 +378,23 @@ def ingest_netkeiba_window(
     refresh: bool = False,
     prefer_results: bool = False,
     backfill_finished_predictions: bool = False,
+    market: str = "all",
 ) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc).isoformat()
     if not start_date or not end_date:
         start_date, end_date = _date_range_for_days(days, days_ahead)
 
-    raw_dir = Path(os.getenv("NETKEIBA_RAW_DIR", "/tmp/umalab_netkeiba_raw")) / f"{start_date}_{end_date}"
-    output = Path(os.getenv("NETKEIBA_INGEST_OUTPUT", "/tmp/umalab_netkeiba_normalized.csv"))
+    market_scope = market if market in {"JRA", "NAR"} else "all"
+    raw_dir = (
+        Path(os.getenv("NETKEIBA_RAW_DIR", "/tmp/umalab_netkeiba_raw"))
+        / f"{market_scope}_{start_date}_{end_date}"
+    )
+    configured_output = os.getenv("NETKEIBA_INGEST_OUTPUT")
+    output = (
+        Path(configured_output)
+        if configured_output
+        else Path("/tmp") / f"umalab_netkeiba_{market_scope}_{start_date}_{end_date}.csv"
+    )
     raw_dir.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -410,6 +420,7 @@ def ingest_netkeiba_window(
         skip_import=False,
         skip_enrich=True,
         include_odds=True,
+        market=market_scope,
         enriched_output=None,
         enriched_combined_output=None,
         user_agent=os.getenv(
@@ -465,6 +476,12 @@ def ingest_netkeiba_window(
             existing_races = fetch_race_cards(start_date, end_date)
         except Exception:
             existing_races = []
+        if market_scope in {"JRA", "NAR"}:
+            existing_races = [
+                race
+                for race in existing_races
+                if str(race.get("market") or "").upper() == market_scope
+            ]
         existing_updates = _apply_live_odds_to_races(existing_races, live_odds_rows)
         if existing_updates:
             race_ids_from_rows = {str(race.get("id") or "") for race in race_dicts}
@@ -495,6 +512,7 @@ def ingest_netkeiba_window(
     summary = {
         "status": status,
         "source": "netkeiba",
+        "market": args.market,
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "start_date": start_date,

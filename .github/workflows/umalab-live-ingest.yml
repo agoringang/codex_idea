@@ -2,12 +2,13 @@ name: UmaLab live ingest
 
 on:
   schedule:
-    # JST 12:00-22:55. Vercel Hobby Cron cannot run this often, so GitHub
-    # Actions can drive near-real-time result polling when repository secrets
-    # are configured.
-    - cron: "*/5 3-13 * * *"
-    # JST 07:00 card refresh before racing starts.
-    - cron: "0 22 * * *"
+    # JST 12:00-17:55. Near-real-time result polling while races are running.
+    - cron: "*/5 3-8 * * *"
+    # JST 18:00-23:50. JRA next-day odds are refreshed separately and quickly.
+    - cron: "*/10 9-14 * * *"
+    # JST 06:00-10:50. Race-day JRA odds refresh before the first races.
+    - cron: "*/10 21-23 * * *"
+    - cron: "*/10 0-1 * * *"
   workflow_dispatch:
 
 jobs:
@@ -27,11 +28,11 @@ jobs:
           fi
 
           base_url="${UMALAB_PROD_URL:-https://uma-lab.vercel.app}"
-          hour_utc="$(date -u +%H)"
-          if [ "$hour_utc" = "22" ]; then
-            endpoint="/api/jobs/ingest/netkeiba?days=1&days_ahead=3&max_requests=320"
+          hour_jst="$(TZ=Asia/Tokyo date +%H)"
+          if [ "$hour_jst" -ge 18 ] || [ "$hour_jst" -le 10 ]; then
+            endpoint="/api/jobs/ingest/netkeiba/jra-odds?days=1&days_ahead=1&max_requests=260&delay=0.08"
           else
-            endpoint="/api/jobs/ingest/netkeiba/results?days=1&max_requests=220&backfill_finished_predictions=false"
+            endpoint="/api/jobs/ingest/netkeiba/results?days=1&days_ahead=1&max_requests=260&delay=0.18&backfill_finished_predictions=false"
           fi
 
           curl -fsS \

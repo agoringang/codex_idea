@@ -348,26 +348,34 @@ def scrape_calendar_pages(
     results: list[dict[str, Any]] = []
     dynamic_page_urls: dict[str, str] = getattr(args, "race_page_urls", {}) or {}
     race_meta: dict[str, dict[str, str]] = getattr(args, "race_meta", {}) or {}
+    market = str(getattr(args, "market", "all") or "all").upper()
+    include_jra = market in {"ALL", "JRA"}
+    include_nar = market in {"ALL", "NAR"}
 
     for day in date_range(parse_date(args.start_date), parse_date(args.end_date)):
         yyyymmdd = day.strftime("%Y%m%d")
-        output_path = args.raw_dir / "_list" / f"{yyyymmdd}.html"
-        result = fetcher.fetch(LIST_URL.format(yyyymmdd=yyyymmdd), output_path)
-        row = result.__dict__.copy()
-        row["date"] = day.isoformat()
-        row["race_ids"] = []
+        if market == "ALL":
+            output_path = args.raw_dir / "_list" / f"{yyyymmdd}.html"
+            result = fetcher.fetch(LIST_URL.format(yyyymmdd=yyyymmdd), output_path)
+            row = result.__dict__.copy()
+            row["date"] = day.isoformat()
+            row["race_ids"] = []
 
-        if result.status in {"fetched", "cached"} and output_path.exists():
-            html = read_html(output_path)
-            ids = extract_race_ids(html)
-            row["race_ids"] = ids
-            race_ids.extend(ids)
-        elif result.status in {"blocked", "access_limited"}:
-            row["warning"] = f"netkeiba db list blocked: {result.status}"
+            if result.status in {"fetched", "cached"} and output_path.exists():
+                html = read_html(output_path)
+                ids = extract_race_ids(html)
+                row["race_ids"] = ids
+                race_ids.extend(ids)
+            elif result.status in {"blocked", "access_limited"}:
+                row["warning"] = f"netkeiba db list blocked: {result.status}"
 
-        results.append(row)
+            results.append(row)
 
         for source, url_template in (("nar", NAR_LIST_SUB_URL), ("jra", JRA_LIST_SUB_URL)):
+            if source == "jra" and not include_jra:
+                continue
+            if source == "nar" and not include_nar:
+                continue
             sub_output_path = args.raw_dir / "_list" / f"{yyyymmdd}_{source}_sub.html"
             sub_result = fetcher.fetch(url_template.format(yyyymmdd=yyyymmdd), sub_output_path)
             sub_row = sub_result.__dict__.copy()
@@ -924,6 +932,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-import", action="store_true")
     parser.add_argument("--skip-enrich", action="store_true")
     parser.add_argument("--include-odds", action="store_true")
+    parser.add_argument(
+        "--market",
+        choices=["all", "JRA", "NAR"],
+        default="all",
+        help="Limit calendar/race scraping to JRA or NAR. Useful for fast central odds refreshes.",
+    )
     parser.add_argument(
         "--user-agent",
         default=DEFAULT_USER_AGENT,

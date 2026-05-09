@@ -722,16 +722,16 @@ def predict_race(request: RaceRequest) -> RacePrediction:
         )
         top2_score = top2_probability if top2_probability is not None else place_probability
         score = (
-            market_probability * 16
-            + win_probability * 92
-            + top2_score * 44
-            + place_probability * 18
-            + capped_market_gap * 126
-            + capped_place_gap * 30
-            + capped_edge * 10
+            market_probability * 3
+            + win_probability * 104
+            + top2_score * 46
+            + place_probability * 14
+            + capped_market_gap * 164
+            + capped_place_gap * 34
+            + capped_edge * 6
             + runner.condition / 12
             + runner.speed / 20
-            + non_market_features * 1.35
+            + non_market_features * 1.8
         )
 
         runner_predictions.append(

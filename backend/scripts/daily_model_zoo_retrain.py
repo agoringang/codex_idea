@@ -5,7 +5,7 @@ import hashlib
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-iter", type=int, default=80)
     parser.add_argument("--train-race-limit", type=int, default=0)
     parser.add_argument("--skip-hgb", action="store_true")
+    parser.add_argument("--zoo-profile", choices=["default", "jra30"], default="default")
     return parser
 
 
@@ -54,14 +55,19 @@ def main() -> None:
     python = sys.executable
 
     if not args.skip_ingest:
+        today = datetime.now().date()
+        start_date = (today - timedelta(days=max(args.days - 1, 0))).isoformat()
+        end_date = (today + timedelta(days=max(args.days_ahead, 0))).isoformat()
         run_command(
             [
                 python,
                 "scripts/scrape_netkeiba_2026.py",
-                "--days",
-                str(args.days),
-                "--days-ahead",
-                str(args.days_ahead),
+                "--start-date",
+                start_date,
+                "--end-date",
+                end_date,
+                "--include-odds",
+                "--refresh",
                 "--base-csv",
                 str(args.train_csv),
                 "--output",
@@ -94,6 +100,8 @@ def main() -> None:
         str(args.favorite_rate_cap),
         "--favorite-penalty",
         str(args.favorite_penalty),
+        "--zoo-profile",
+        args.zoo_profile,
         "--max-iter",
         str(args.max_iter),
     ]
@@ -119,7 +127,8 @@ def main() -> None:
                 "market_weight_cap": args.market_weight_cap,
                 "favorite_rate_cap": args.favorite_rate_cap,
                 "favorite_penalty": args.favorite_penalty,
-                "model_count": 10 if not args.skip_hgb else 6,
+                "zoo_profile": args.zoo_profile,
+                "model_count": 30 if args.zoo_profile == "jra30" and not args.skip_hgb else 10 if not args.skip_hgb else 6,
             },
             ensure_ascii=False,
             indent=2,

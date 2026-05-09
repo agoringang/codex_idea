@@ -74,6 +74,8 @@ class ModelSpec:
     learning_rate: float = 0.06
     max_leaf_nodes: int = 31
     l2_regularization: float = 0.01
+    feature_mode: str = "global"
+    market_weight_cap: float | None = None
 
 
 def build_sgd_pipeline(
@@ -156,7 +158,47 @@ def build_hgb_pipeline(
     )
 
 
-def model_specs(include_hgb: bool) -> list[ModelSpec]:
+def _jra30_variants(base_specs: list[ModelSpec], *, include_hgb: bool) -> list[ModelSpec]:
+    linear_specs = [spec for spec in base_specs if spec.family == "sgd"]
+    hgb_specs = [spec for spec in base_specs if spec.family == "hgb"] if include_hgb else []
+    variants: list[ModelSpec] = []
+    for feature_mode, market_cap in (
+        ("anti_market", 0.08),
+        ("anti_market", 0.16),
+        ("all", 0.05),
+    ):
+        for spec in linear_specs:
+            variants.append(
+                ModelSpec(
+                    name=f"{spec.name}_{feature_mode}_mw{market_cap:g}",
+                    family=spec.family,
+                    alpha=spec.alpha,
+                    use_positive_weight=spec.use_positive_weight,
+                    learning_rate=spec.learning_rate,
+                    max_leaf_nodes=spec.max_leaf_nodes,
+                    l2_regularization=spec.l2_regularization,
+                    feature_mode=feature_mode,
+                    market_weight_cap=market_cap,
+                )
+            )
+        for spec in hgb_specs:
+            variants.append(
+                ModelSpec(
+                    name=f"{spec.name}_{feature_mode}_mw{market_cap:g}",
+                    family=spec.family,
+                    alpha=spec.alpha,
+                    use_positive_weight=spec.use_positive_weight,
+                    learning_rate=spec.learning_rate,
+                    max_leaf_nodes=spec.max_leaf_nodes,
+                    l2_regularization=spec.l2_regularization,
+                    feature_mode=feature_mode,
+                    market_weight_cap=market_cap,
+                )
+            )
+    return variants
+
+
+def model_specs(include_hgb: bool, zoo_profile: str = "default") -> list[ModelSpec]:
     specs = [
         ModelSpec("sgd_weighted_alpha_1e-4", "sgd", alpha=1e-4, use_positive_weight=True),
         ModelSpec("sgd_weighted_alpha_3e-5", "sgd", alpha=3e-5, use_positive_weight=True),
@@ -174,6 +216,8 @@ def model_specs(include_hgb: bool) -> list[ModelSpec]:
                 ModelSpec("hgb_numeric_unweighted_compact", "hgb", use_positive_weight=False, learning_rate=0.08, max_leaf_nodes=15, l2_regularization=0.12),
             ]
         )
+    if zoo_profile == "jra30":
+        return _jra30_variants(specs, include_hgb=include_hgb)[:30]
     return specs
 
 
@@ -379,6 +423,8 @@ def train_candidate(
     max_iter: int,
     market_weight_cap: float,
     market_weight_step: float,
+    feature_mode: str,
+    removed_market_features: list[str],
 ) -> tuple[CalibratedBlendModel, dict[str, Any]]:
     fit = frame.loc[fit_index]
     calibration = frame.loc[calibration_index]
@@ -414,7 +460,10 @@ def train_candidate(
         "model": spec.name,
         "family": spec.family,
         "target": target,
+        "feature_mode": feature_mode,
         "features": active_features,
+        "removed_market_features": removed_market_features,
+        "market_weight_cap": market_weight_cap,
         "positive_weight": positive_weight,
         "calibration_method": calibration_method,
         "market_ensemble_weight": market_weight,
@@ -448,13 +497,25 @@ def model_selection_utility(
     )
     favorite_rate = market_dependency.get("predicted_top1_favorite_rate")
     favorite_value = float(favorite_rate) if favorite_rate is not None else 1.0
+    market_favorite_hit = market_dependency.get("market_favorite_win_rate")
+    market_favorite_hit_value = (
+        float(market_favorite_hit) if market_favorite_hit is not None and target == "is_win" else 0.0
+    )
     favorite_excess = max(0.0, favorite_value - favorite_rate_cap)
+    hit_shortfall = max(0.0, market_favorite_hit_value - float(hit_score or 0))
     ece = float(item["holdout_2026"]["calibration"]["ece"])
-    utility = float(hit_score or 0) - favorite_excess * favorite_penalty - ece * 0.04
+    utility = (
+        float(hit_score or 0)
+        - favorite_excess * favorite_penalty
+        - hit_shortfall * 0.28
+        - ece * 0.04
+    )
     return {
         "hit_score": float(hit_score or 0),
         "favorite_rate": favorite_value,
+        "market_favorite_hit_rate": market_favorite_hit_value,
         "favorite_excess": favorite_excess,
+        "hit_shortfall_vs_market_favorite": hit_shortfall,
         "utility": utility,
     }
 
@@ -630,6 +691,18 @@ def apply_feature_mode(
         ]
         features = [feature for feature in features if feature not in MARKET_DIRECT_FEATURES]
         return features, numeric_features, categorical_features, removed
+    if feature_mode == "odds_rank_only":
+        direct_odds = {
+            "market_odds",
+            "market_win_probability",
+            "market_place_probability",
+            "odds_delta",
+            "ticket_pool_share",
+        }
+        removed = [feature for feature in features if feature in direct_odds]
+        numeric_features = [feature for feature in numeric_features if feature not in direct_odds]
+        features = [feature for feature in features if feature not in direct_odds]
+        return features, numeric_features, categorical_features, removed
     return features, numeric_features, categorical_features, []
 
 
@@ -673,20 +746,33 @@ def train_best_bundle(
     holdout_index: pd.Index,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    features, numeric_features, categorical_features = select_training_features(frame, fit_index)
-    features, numeric_features, categorical_features, removed_features = apply_feature_mode(
-        features,
-        numeric_features,
-        categorical_features,
-        args.feature_mode,
+    base_features, base_numeric_features, base_categorical_features = select_training_features(
+        frame,
+        fit_index,
     )
 
     all_metrics: dict[str, list[dict[str, Any]]] = {target: [] for target in TARGETS}
     trained_models: dict[str, dict[str, CalibratedBlendModel]] = {target: {} for target in TARGETS}
+    removed_features_union: set[str] = set()
+    specs = model_specs(args.include_hgb, args.zoo_profile)
     for target in TARGETS:
-        for spec in model_specs(args.include_hgb):
+        for spec in specs:
+            feature_mode = spec.feature_mode if spec.feature_mode != "global" else args.feature_mode
+            features, numeric_features, categorical_features, removed_features = apply_feature_mode(
+                base_features.copy(),
+                base_numeric_features.copy(),
+                base_categorical_features.copy(),
+                feature_mode,
+            )
+            removed_features_union.update(removed_features)
+            candidate_market_cap = (
+                args.market_weight_cap
+                if spec.market_weight_cap is None
+                else float(spec.market_weight_cap)
+            )
             print(
-                f"[train] target={target} model={spec.name} family={spec.family}",
+                f"[train] target={target} model={spec.name} family={spec.family} "
+                f"feature_mode={feature_mode} market_cap={candidate_market_cap:g}",
                 flush=True,
             )
             model, metrics = train_candidate(
@@ -701,8 +787,10 @@ def train_best_bundle(
                 features,
                 args.seed,
                 args.max_iter,
-                args.market_weight_cap,
+                candidate_market_cap,
                 args.market_weight_step,
+                feature_mode,
+                removed_features,
             )
             all_metrics[target].append(metrics)
             trained_models[target][spec.name] = model
@@ -725,10 +813,11 @@ def train_best_bundle(
         "models": best_models,
         "rank_holdout_2026": rank_holdout_metrics(frame, holdout_index, best_models),
         "risk_router": risk_router(best_metrics),
-        "numeric_features": numeric_features,
-        "categorical_features": categorical_features,
-        "features": features,
-        "removed_market_features": removed_features,
+        "numeric_features": base_numeric_features,
+        "categorical_features": base_categorical_features,
+        "features": base_features,
+        "removed_market_features": sorted(removed_features_union),
+        "model_candidate_count": len(specs),
     }
 
 
@@ -740,6 +829,8 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
         dependency = rank.get("market_dependency", {}) if isinstance(rank, dict) else {}
         best[target] = {
             "model": metrics["model"],
+            "feature_mode": metrics.get("feature_mode"),
+            "market_weight_cap": metrics.get("market_weight_cap"),
             "market_ensemble_weight": metrics["market_ensemble_weight"],
             "holdout_brier": round(float(holdout["brier"]), 6),
             "holdout_brier_vs_market": holdout["brier_vs_market"],
@@ -761,6 +852,7 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
             market: metrics.get("rank_holdout_2026", {})
             for market, metrics in payload.get("segment_metrics", {}).items()
         },
+        "model_candidate_count": payload.get("model_candidate_count"),
         "metrics_path": payload["metrics_path"],
         "artifact_path": payload["artifact_path"],
     }
@@ -800,9 +892,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(include_hgb=True)
     parser.add_argument(
         "--feature-mode",
-        choices=["all", "anti_market"],
+        choices=["all", "anti_market", "odds_rank_only"],
         default="all",
         help="anti_market removes direct odds/popularity features from the trained model.",
+    )
+    parser.add_argument(
+        "--zoo-profile",
+        choices=["default", "jra30"],
+        default="default",
+        help="jra30 compares 30 central-oriented variants across odds-free, odds-rank-only, and low-market models.",
     )
     parser.add_argument(
         "--market-weight-cap",
@@ -885,6 +983,8 @@ def main() -> None:
         "market_weight_step": args.market_weight_step,
         "favorite_rate_cap": args.favorite_rate_cap,
         "favorite_penalty": args.favorite_penalty,
+        "zoo_profile": args.zoo_profile,
+        "model_candidate_count": bundle["model_candidate_count"],
         "targets": bundle["targets"],
         "best": bundle["best"],
         "rank_holdout_2026": bundle["rank_holdout_2026"],

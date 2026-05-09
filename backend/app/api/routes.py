@@ -186,6 +186,7 @@ def netkeiba_ingest_job(
     refresh: bool = False,
     prefer_results: bool = False,
     backfill_finished_predictions: bool = False,
+    market: str = "all",
 ) -> strategy_schemas.NetkeibaIngestResponse:
     _authorize_ingest_job(authorization, x_cron_secret)
     summary = ingest_netkeiba_window(
@@ -198,6 +199,7 @@ def netkeiba_ingest_job(
         refresh=refresh,
         prefer_results=prefer_results,
         backfill_finished_predictions=backfill_finished_predictions,
+        market=market if market in {"JRA", "NAR"} else "all",
     )
     return strategy_schemas.NetkeibaIngestResponse(
         status=summary.get("status", "error"),
@@ -219,6 +221,7 @@ def netkeiba_preday_ingest_job(
     x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
     max_requests: int | None = None,
     delay: float | None = None,
+    market: str = "all",
 ) -> strategy_schemas.NetkeibaIngestResponse:
     _authorize_ingest_job(authorization, x_cron_secret)
     tomorrow = (datetime.now(JST).date() + timedelta(days=1)).isoformat()
@@ -230,6 +233,41 @@ def netkeiba_preday_ingest_job(
         refresh=True,
         prefer_results=False,
         backfill_finished_predictions=False,
+        market=market if market in {"JRA", "NAR"} else "all",
+    )
+    return strategy_schemas.NetkeibaIngestResponse(
+        status=summary.get("status", "error"),
+        source=summary.get("source", "netkeiba"),
+        start_date=summary.get("start_date", ""),
+        end_date=summary.get("end_date", ""),
+        rows_found=summary.get("rows_found", 0),
+        races_found=summary.get("races_found", 0),
+        races_stored=summary.get("races_stored", 0),
+        auto_predictions=summary.get("auto_predictions", 0),
+        backfilled_predictions=summary.get("backfilled_predictions", 0),
+        message=summary.get("message", ""),
+    )
+
+
+@router.get("/jobs/ingest/netkeiba/jra-odds", response_model=strategy_schemas.NetkeibaIngestResponse)
+def netkeiba_jra_odds_ingest_job(
+    authorization: str | None = Header(default=None),
+    x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
+    days: int = 1,
+    days_ahead: int = 1,
+    max_requests: int | None = None,
+    delay: float | None = None,
+) -> strategy_schemas.NetkeibaIngestResponse:
+    _authorize_ingest_job(authorization, x_cron_secret)
+    summary = ingest_netkeiba_window(
+        days=days,
+        days_ahead=days_ahead,
+        max_requests=max_requests if max_requests is not None else 260,
+        delay=delay if delay is not None else 0.12,
+        refresh=True,
+        prefer_results=False,
+        backfill_finished_predictions=False,
+        market="JRA",
     )
     return strategy_schemas.NetkeibaIngestResponse(
         status=summary.get("status", "error"),
@@ -254,6 +292,7 @@ def netkeiba_result_ingest_job(
     max_requests: int | None = None,
     delay: float | None = None,
     backfill_finished_predictions: bool = False,
+    market: str = "all",
 ) -> strategy_schemas.NetkeibaIngestResponse:
     _authorize_ingest_job(authorization, x_cron_secret)
     summary = ingest_netkeiba_window(
@@ -264,6 +303,7 @@ def netkeiba_result_ingest_job(
         refresh=True,
         prefer_results=True,
         backfill_finished_predictions=backfill_finished_predictions,
+        market=market if market in {"JRA", "NAR"} else "all",
     )
     return strategy_schemas.NetkeibaIngestResponse(
         status=summary.get("status", "error"),

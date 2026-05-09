@@ -80,8 +80,11 @@ def _download_model(url: str, expected_sha256: str | None = None) -> Path:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
     if cache_path.exists() and cache_path.stat().st_size > 0:
-        _verify_model_checksum(cache_path, expected_sha256)
-        return cache_path
+        try:
+            _verify_model_checksum(cache_path, expected_sha256)
+            return cache_path
+        except ValueError:
+            cache_path.unlink(missing_ok=True)
 
     tmp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp")
     request = Request(url, headers={"User-Agent": "UmaLab/0.2 model-loader"})
