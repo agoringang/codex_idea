@@ -431,12 +431,16 @@ def _race_payout_items(row: dict[str, Any]) -> list[dict[str, Any]]:
         if key in seen:
             continue
         seen.add(key)
+        popularity_limit = 30 if bet_type in {"win", "place"} else 36 if bet_type == "bracket_quinella" else 10000
+        popularity = _int_value({"popularity": item.get("popularity")}, "popularity", 0) or None
+        if popularity is not None and not 1 <= popularity <= popularity_limit:
+            popularity = None
         items.append(
             {
                 "betType": bet_type,
                 "selection": selection,
                 "payoutYen": float(payout),
-                "popularity": _int_value({"popularity": item.get("popularity")}, "popularity", 0) or None,
+                "popularity": popularity,
             }
         )
     return items

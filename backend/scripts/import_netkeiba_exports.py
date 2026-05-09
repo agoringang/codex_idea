@@ -774,7 +774,17 @@ def payout_rows_from_html(text: str) -> list[list[str]]:
     return rows
 
 
+def payout_popularity_limit(bet_type: str) -> int:
+    if bet_type in {"win", "place"}:
+        return 30
+    if bet_type == "bracket_quinella":
+        return 36
+    return 10000
+
+
 def payout_item(bet_type: str, selection: str, payout_yen: int, popularity: int | None = None) -> dict[str, Any]:
+    if popularity is not None and not 1 <= popularity <= payout_popularity_limit(bet_type):
+        popularity = None
     return {
         "bet_type": bet_type,
         "selection": selection,
@@ -796,6 +806,24 @@ def selection_numbers_from_cells(cells: list[str]) -> list[int]:
     return []
 
 
+def payout_popularity_values(value: Any) -> list[int]:
+    text = normalize_digits(value)
+    if not text:
+        return []
+    matched = [
+        int(match)
+        for match in re.findall(r"(?<!\d)(\d{1,5})\s*人気", text)
+        if 1 <= int(match) <= 10000
+    ]
+    if matched:
+        return matched
+    return [
+        int(match)
+        for match in re.findall(r"(?<!\d)(\d{1,5})(?!\d)", text)
+        if 1 <= int(match) <= 10000
+    ]
+
+
 def apply_payout_row(payouts: dict[str, Any], cells: list[str]) -> None:
     if len(cells) < 3:
         return
@@ -805,17 +833,13 @@ def apply_payout_row(payouts: dict[str, Any], cells: list[str]) -> None:
 
     selections = split_cell_lines(cells[1]) or [cells[1]]
     payout_values = split_cell_lines(cells[2]) or [cells[2]]
-    popularity_values = split_cell_lines(cells[3]) if len(cells) > 3 else []
+    popularity_values = payout_popularity_values(cells[3]) if len(cells) > 3 else []
 
     for index, selection in enumerate(selections):
         payout_yen = payout_yen_from_cells([payout_values[min(index, len(payout_values) - 1)]])
         if payout_yen is None:
             continue
-        popularity = (
-            to_int(popularity_values[min(index, len(popularity_values) - 1)])
-            if popularity_values
-            else None
-        )
+        popularity = popularity_values[min(index, len(popularity_values) - 1)] if popularity_values else None
         numbers = selection_numbers_from_cells([selection])
         payouts["items"].append(payout_item(bet_type, selection, payout_yen, popularity))
         if bet_type == "win" and numbers:

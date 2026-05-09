@@ -274,6 +274,57 @@ h1 {
   gap: 7px;
 }
 
+.race-actions {
+  display: grid;
+  min-width: 0;
+  justify-items: end;
+  gap: 8px;
+}
+
+.manual-refresh-button {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid rgba(47, 127, 231, 0.24);
+  border-radius: 999px;
+  background: #0b5fbd;
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 900;
+  box-shadow: 0 10px 22px rgba(11, 95, 189, 0.18);
+}
+
+.manual-refresh-button.running {
+  background: #64748b;
+  box-shadow: none;
+}
+
+.manual-refresh-button.error {
+  border-color: rgba(217, 75, 87, 0.34);
+  background: var(--red);
+}
+
+.manual-refresh-button:disabled {
+  cursor: wait;
+  opacity: 0.8;
+}
+
+.manual-refresh-message {
+  max-width: 250px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 820;
+  line-height: 1.3;
+  text-align: right;
+}
+
+.manual-refresh-message.done {
+  color: var(--green);
+}
+
+.manual-refresh-message.error {
+  color: var(--red);
+}
+
 .race-pills span,
 .section-heading > span,
 .section-heading > a {
@@ -1520,7 +1571,7 @@ h1 {
 }
 
 .runner-table th:nth-child(1) {
-  width: 42px;
+  width: 52px;
 }
 
 .runner-table th:nth-child(3),
@@ -1598,6 +1649,53 @@ h1 {
   color: #142033;
   font-size: 1.02rem;
   font-weight: 920;
+}
+
+.runner-table .ai-mark-label {
+  display: inline-flex;
+  width: auto;
+  min-width: 0;
+  margin: 0 0 2px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: #eaf4ff;
+  color: var(--jra);
+  font-size: 0.55rem;
+  font-weight: 940;
+  line-height: 1;
+}
+
+.market-nar .runner-table .ai-mark-label {
+  background: #e9fbf2;
+  color: var(--nar);
+}
+
+.runner-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.runner-table .horse-number-badge {
+  display: inline-flex;
+  width: fit-content;
+  margin: 0;
+  padding: 3px 7px;
+  border: 1px solid #cfe2f3;
+  border-radius: 999px;
+  background: #f1f7ff;
+  color: #0b5fbd;
+  font-size: 0.64rem;
+  font-weight: 940;
+  line-height: 1;
+}
+
+.market-nar .runner-table .horse-number-badge {
+  border-color: #bfe9d4;
+  background: #eefbf4;
+  color: var(--nar);
 }
 
 .runner-table em {
@@ -2088,7 +2186,7 @@ h1 {
 
 .official-payout-row {
   display: grid;
-  grid-template-columns: minmax(48px, 0.62fr) minmax(72px, 1fr) minmax(82px, 0.9fr) minmax(44px, 0.58fr);
+  grid-template-columns: minmax(58px, 0.62fr) minmax(82px, 1fr) minmax(86px, 0.9fr) minmax(72px, 0.64fr);
   min-width: 0;
   border-top: 1px solid var(--line);
 }
@@ -2114,15 +2212,16 @@ h1 {
 .official-payout-row b,
 .official-payout-row em {
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
+  overflow-wrap: anywhere;
   padding: 8px 9px;
   border-left: 1px solid var(--line);
   color: var(--ink);
   font-size: 0.78rem;
   font-style: normal;
   font-weight: 900;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .official-payout-row span:first-child,
@@ -3242,6 +3341,14 @@ h1 {
     justify-content: flex-start;
   }
 
+  .race-actions {
+    justify-items: start;
+  }
+
+  .manual-refresh-message {
+    text-align: left;
+  }
+
   h1 {
     white-space: normal;
   }
@@ -3251,7 +3358,7 @@ h1 {
   }
 
   .runner-table th:nth-child(1) {
-    width: 34px;
+    width: 44px;
   }
 
   .runner-table th:nth-child(3),
@@ -3333,7 +3440,7 @@ h1 {
   }
 
   .runner-table th:nth-child(1) {
-    width: 34px;
+    width: 44px;
   }
 
   .runner-table th:nth-child(3),
@@ -3348,6 +3455,16 @@ h1 {
 
   .runner-table b {
     font-size: 0.88rem;
+  }
+
+  .runner-table .ai-mark-label {
+    padding: 2px 4px;
+    font-size: 0.50rem;
+  }
+
+  .runner-table .horse-number-badge {
+    padding: 3px 6px;
+    font-size: 0.58rem;
   }
 
   .runner-table strong {
@@ -3400,7 +3517,7 @@ h1 {
   }
 
   .official-payout-row {
-    grid-template-columns: 46px minmax(64px, 1fr) minmax(76px, 0.96fr) 42px;
+    grid-template-columns: 50px minmax(66px, 1fr) minmax(74px, 0.9fr) 64px;
   }
 
   .official-payout-row span,

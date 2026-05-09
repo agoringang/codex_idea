@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Header, HTTPException, Response
@@ -25,6 +26,7 @@ from app.status import get_backend_status
 
 router = APIRouter()
 JST = timezone(timedelta(hours=9))
+_MANUAL_REFRESH_LAST_AT = 0.0
 
 
 @router.get("/health")
@@ -173,6 +175,21 @@ def _authorize_ingest_job(authorization: str | None, x_cron_secret: str | None =
         raise HTTPException(status_code=401, detail="UMALAB_CRON_SECRET or CRON_SECRET is required in production")
 
 
+def _netkeiba_response(summary: dict) -> strategy_schemas.NetkeibaIngestResponse:
+    return strategy_schemas.NetkeibaIngestResponse(
+        status=summary.get("status", "error"),
+        source=summary.get("source", "netkeiba"),
+        start_date=summary.get("start_date", ""),
+        end_date=summary.get("end_date", ""),
+        rows_found=summary.get("rows_found", 0),
+        races_found=summary.get("races_found", 0),
+        races_stored=summary.get("races_stored", 0),
+        auto_predictions=summary.get("auto_predictions", 0),
+        backfilled_predictions=summary.get("backfilled_predictions", 0),
+        message=summary.get("message", ""),
+    )
+
+
 @router.get("/jobs/ingest/netkeiba", response_model=strategy_schemas.NetkeibaIngestResponse)
 def netkeiba_ingest_job(
     authorization: str | None = Header(default=None),
@@ -201,18 +218,7 @@ def netkeiba_ingest_job(
         backfill_finished_predictions=backfill_finished_predictions,
         market=market if market in {"JRA", "NAR"} else "all",
     )
-    return strategy_schemas.NetkeibaIngestResponse(
-        status=summary.get("status", "error"),
-        source=summary.get("source", "netkeiba"),
-        start_date=summary.get("start_date", ""),
-        end_date=summary.get("end_date", ""),
-        rows_found=summary.get("rows_found", 0),
-        races_found=summary.get("races_found", 0),
-        races_stored=summary.get("races_stored", 0),
-        auto_predictions=summary.get("auto_predictions", 0),
-        backfilled_predictions=summary.get("backfilled_predictions", 0),
-        message=summary.get("message", ""),
-    )
+    return _netkeiba_response(summary)
 
 
 @router.get("/jobs/ingest/netkeiba/preday", response_model=strategy_schemas.NetkeibaIngestResponse)
@@ -235,18 +241,7 @@ def netkeiba_preday_ingest_job(
         backfill_finished_predictions=False,
         market=market if market in {"JRA", "NAR"} else "all",
     )
-    return strategy_schemas.NetkeibaIngestResponse(
-        status=summary.get("status", "error"),
-        source=summary.get("source", "netkeiba"),
-        start_date=summary.get("start_date", ""),
-        end_date=summary.get("end_date", ""),
-        rows_found=summary.get("rows_found", 0),
-        races_found=summary.get("races_found", 0),
-        races_stored=summary.get("races_stored", 0),
-        auto_predictions=summary.get("auto_predictions", 0),
-        backfilled_predictions=summary.get("backfilled_predictions", 0),
-        message=summary.get("message", ""),
-    )
+    return _netkeiba_response(summary)
 
 
 @router.get("/jobs/ingest/netkeiba/jra-odds", response_model=strategy_schemas.NetkeibaIngestResponse)
@@ -269,18 +264,50 @@ def netkeiba_jra_odds_ingest_job(
         backfill_finished_predictions=False,
         market="JRA",
     )
-    return strategy_schemas.NetkeibaIngestResponse(
-        status=summary.get("status", "error"),
-        source=summary.get("source", "netkeiba"),
-        start_date=summary.get("start_date", ""),
-        end_date=summary.get("end_date", ""),
-        rows_found=summary.get("rows_found", 0),
-        races_found=summary.get("races_found", 0),
-        races_stored=summary.get("races_stored", 0),
-        auto_predictions=summary.get("auto_predictions", 0),
-        backfilled_predictions=summary.get("backfilled_predictions", 0),
-        message=summary.get("message", ""),
+    return _netkeiba_response(summary)
+
+
+@router.get("/jobs/ingest/netkeiba/manual-refresh", response_model=strategy_schemas.NetkeibaIngestResponse)
+def netkeiba_manual_refresh_job(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    days: int = 1,
+    days_ahead: int = 1,
+    max_requests: int | None = None,
+    delay: float | None = None,
+    prefer_results: bool = True,
+    market: str = "all",
+) -> strategy_schemas.NetkeibaIngestResponse:
+    global _MANUAL_REFRESH_LAST_AT
+
+    now = time.monotonic()
+    if now - _MANUAL_REFRESH_LAST_AT < 20:
+        return _netkeiba_response(
+            {
+                "status": "skipped",
+                "source": "netkeiba",
+                "start_date": start_date or "",
+                "end_date": end_date or "",
+                "message": "manual refresh is throttled; please retry shortly",
+            }
+        )
+    _MANUAL_REFRESH_LAST_AT = now
+
+    market_scope = market if market in {"JRA", "NAR"} else "all"
+    request_cap = 120 if market_scope == "all" else 90
+    summary = ingest_netkeiba_window(
+        start_date=start_date,
+        end_date=end_date,
+        days=max(1, min(days, 2)),
+        days_ahead=max(0, min(days_ahead, 2)),
+        max_requests=min(max_requests if max_requests is not None else request_cap, 160),
+        delay=max(delay if delay is not None else 0.12, 0.08),
+        refresh=True,
+        prefer_results=prefer_results,
+        backfill_finished_predictions=False,
+        market=market_scope,
     )
+    return _netkeiba_response(summary)
 
 
 @router.get("/jobs/ingest/netkeiba/results", response_model=strategy_schemas.NetkeibaIngestResponse)
@@ -305,18 +332,7 @@ def netkeiba_result_ingest_job(
         backfill_finished_predictions=backfill_finished_predictions,
         market=market if market in {"JRA", "NAR"} else "all",
     )
-    return strategy_schemas.NetkeibaIngestResponse(
-        status=summary.get("status", "error"),
-        source=summary.get("source", "netkeiba"),
-        start_date=summary.get("start_date", ""),
-        end_date=summary.get("end_date", ""),
-        rows_found=summary.get("rows_found", 0),
-        races_found=summary.get("races_found", 0),
-        races_stored=summary.get("races_stored", 0),
-        auto_predictions=summary.get("auto_predictions", 0),
-        backfilled_predictions=summary.get("backfilled_predictions", 0),
-        message=summary.get("message", ""),
-    )
+    return _netkeiba_response(summary)
 
 
 @router.post("/jobs/ingest/netkeiba/import", response_model=strategy_schemas.NetkeibaIngestResponse)
@@ -331,18 +347,7 @@ def netkeiba_import_job(
         source=request.source,
         auto_predict=request.auto_predict,
     )
-    return strategy_schemas.NetkeibaIngestResponse(
-        status=summary.get("status", "error"),
-        source=summary.get("source", request.source),
-        start_date=summary.get("start_date", ""),
-        end_date=summary.get("end_date", ""),
-        rows_found=summary.get("rows_found", 0),
-        races_found=summary.get("races_found", 0),
-        races_stored=summary.get("races_stored", 0),
-        auto_predictions=summary.get("auto_predictions", 0),
-        backfilled_predictions=summary.get("backfilled_predictions", 0),
-        message=summary.get("message", ""),
-    )
+    return _netkeiba_response({**summary, "source": summary.get("source", request.source)})
 
 
 @router.get("/jobs/backfill/history")

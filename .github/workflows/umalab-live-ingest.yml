@@ -30,11 +30,18 @@ jobs:
           base_url="${UMALAB_PROD_URL:-https://uma-lab.vercel.app}"
           hour_jst="$(TZ=Asia/Tokyo date +%H)"
           if [ "$hour_jst" -ge 18 ] || [ "$hour_jst" -le 10 ]; then
-            endpoint="/api/jobs/ingest/netkeiba/jra-odds?days=1&days_ahead=1&max_requests=260&delay=0.08"
+            endpoints=(
+              "/api/jobs/ingest/netkeiba/jra-odds?days=1&days_ahead=1&max_requests=260&delay=0.08"
+              "/api/jobs/ingest/netkeiba?days=1&days_ahead=1&max_requests=220&delay=0.10&refresh=true&prefer_results=false&market=NAR"
+            )
           else
-            endpoint="/api/jobs/ingest/netkeiba/results?days=1&days_ahead=1&max_requests=260&delay=0.18&backfill_finished_predictions=false"
+            endpoints=(
+              "/api/jobs/ingest/netkeiba/results?days=1&days_ahead=1&max_requests=260&delay=0.18&backfill_finished_predictions=false&market=all"
+            )
           fi
 
-          curl -fsS \
-            -H "Authorization: Bearer ${UMALAB_CRON_SECRET}" \
-            "${base_url}${endpoint}"
+          for endpoint in "${endpoints[@]}"; do
+            curl -fsS \
+              -H "Authorization: Bearer ${UMALAB_CRON_SECRET}" \
+              "${base_url}${endpoint}"
+          done

@@ -209,6 +209,7 @@ type RecommendationResult = {
 
 type ApiState = "loading" | "ready" | "empty" | "fallback";
 type DataPhase = "initial" | "today" | "range" | "ready";
+type ManualRefreshState = "idle" | "running" | "done" | "error";
 
 type ApiRunnerPrediction = {
   id: string;
@@ -627,6 +628,35 @@ function optionalText(value: unknown) {
   return text.length > 0 ? text : undefined;
 }
 
+function validPopularity(value: unknown) {
+  const number = optionalNumber(value);
+  if (number === undefined || number < 1 || number > 10000) {
+    return undefined;
+  }
+  return Math.round(number);
+}
+
+function payoutPopularityLimit(betType: string | undefined) {
+  const normalized = normalizedBetType(betType);
+  if (["win", "tansho", "単勝", "place", "fukusho", "複勝"].includes(normalized)) {
+    return 30;
+  }
+  if (["bracket_quinella", "wakuren", "枠連", "枠連複"].includes(normalized)) {
+    return 36;
+  }
+  return 10000;
+}
+
+function validPayoutPopularity(value: unknown, betType: string | undefined) {
+  const popularity = validPopularity(value);
+  return popularity && popularity <= payoutPopularityLimit(betType) ? popularity : undefined;
+}
+
+function payoutPopularityLabel(payout: Pick<RacePayout, "betType" | "popularity">) {
+  const popularity = validPayoutPopularity(payout.popularity, payout.betType);
+  return popularity ? `${popularity}番人気` : "-";
+}
+
 function trustedPlaceOdds(winOdds: number, value: unknown) {
   const placeOdds = optionalNumber(value);
   if (!placeOdds || placeOdds <= 1 || winOdds <= 1 || placeOdds > winOdds) {
@@ -852,12 +882,15 @@ function normalizeApiRace(item: any): Race {
       ? item.verificationStatus
       : "unverified",
     payouts: Array.isArray(item.payouts)
-      ? item.payouts.map((payout: any) => ({
-          betType: String(payout.betType ?? payout.bet_type ?? ""),
-          selection: String(payout.selection ?? ""),
-          payoutYen: safeNumber(payout.payoutYen ?? payout.payout_yen, 0),
-          popularity: optionalNumber(payout.popularity),
-        })).filter((payout: RacePayout) => payout.betType && payout.selection && payout.payoutYen > 0)
+      ? item.payouts.map((payout: any) => {
+          const betType = String(payout.betType ?? payout.bet_type ?? "");
+          return {
+            betType,
+            selection: String(payout.selection ?? ""),
+            payoutYen: safeNumber(payout.payoutYen ?? payout.payout_yen, 0),
+            popularity: validPayoutPopularity(payout.popularity, betType),
+          };
+        }).filter((payout: RacePayout) => payout.betType && payout.selection && payout.payoutYen > 0)
       : [],
     runners: normalizedRunners,
   };
@@ -979,6 +1012,29 @@ async function fetchHistoryRangeFromApi(startDate: string, endDate: string) {
     return [];
   }
   return normalizeApiHistory(await response.json());
+}
+
+async function triggerManualNetkeibaRefresh(centerDate: string, market: Market | "all") {
+  const params = new URLSearchParams({
+    start_date: centerDate,
+    end_date: addDays(centerDate, 1),
+    market,
+    max_requests: market === "all" ? "120" : "90",
+    delay: "0.10",
+    prefer_results: "true",
+  });
+  const response = await fetch(`${apiBaseUrl()}/jobs/ingest/netkeiba/manual-refresh?${params.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`manual-refresh ${response.status}`);
+  }
+  return response.json() as Promise<{
+    status: string;
+    races_stored?: number;
+    auto_predictions?: number;
+    message?: string;
+  }>;
 }
 
 function buildRaceRequest(race: Race, riskLevel: number, bankroll: number) {
@@ -1477,8 +1533,8 @@ function finishPosition(runner: Runner) {
 }
 
 function taggedPopularity(runner: Runner) {
-  const popularityTag = runner.tags?.find((tag) => /^\d+人気$/.test(tag));
-  return popularityTag ? Number(popularityTag.replace("人気", "")) : undefined;
+  const popularityTag = runner.tags?.find((tag) => /^\d+番?人気$/.test(tag));
+  return popularityTag ? validPopularity(popularityTag.replace(/番?人気/, "")) : undefined;
 }
 
 function oddsRankMap(race: Race) {
@@ -1509,10 +1565,10 @@ function runnerOddsMeta(runner: Runner, race: Race) {
     return inactive;
   }
   const popularity = runnerPopularity(runner, race);
-  const popularityLabel = popularity ? `${popularity}人気` : "人気不明";
+  const popularityText = popularity ? `${popularity}番人気` : "人気不明";
   const placeLabel = runner.placeOdds ? ` / 複${runner.placeOdds.toFixed(1)}倍` : "";
   const winLabel = hasRunnerWinOdds(runner) ? `単${runner.odds.toFixed(1)}倍` : "単勝未取得";
-  return `${winLabel}${placeLabel} / ${popularityLabel}`;
+  return `${winLabel}${placeLabel} / ${popularityText}`;
 }
 
 function marketWinProbability(race: Race, runnerNumber: number) {
@@ -2330,6 +2386,8 @@ export default function Home() {
   const [apiState, setApiState] = useState<ApiState>("loading");
   const [dataPhase, setDataPhase] = useState<DataPhase>("initial");
   const [apiPrediction, setApiPrediction] = useState<ApiRacePrediction | null>(null);
+  const [manualRefreshState, setManualRefreshState] = useState<ManualRefreshState>("idle");
+  const [manualRefreshMessage, setManualRefreshMessage] = useState("");
 
   const demoRacesEnabled = process.env.NEXT_PUBLIC_ENABLE_DEMO_RACES === "1";
   const rawAvailableRaces = apiRaces.length > 0 ? apiRaces : demoRacesEnabled ? races : [];
@@ -2482,11 +2540,11 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     async function loadPrediction() {
-      if (activeTab !== "predict" || !modelingRace || activeRaceRunners(modelingRace).length < 2) {
+      if (!modelingRace || activeRaceRunners(modelingRace).length < 2) {
         setApiPrediction(null);
         return;
       }
-      if (modelingRace.date !== todayDate || modelingRace.status === "finished") {
+      if (modelingRace.status === "finished") {
         setApiPrediction(null);
         return;
       }
@@ -2516,7 +2574,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [activeTab, modelingRace, riskLevel, todayDate]);
+  }, [modelingRace, riskLevel]);
 
   useEffect(() => {
     if (selectedDateRaces.length === 0) {
@@ -2598,6 +2656,43 @@ export default function Home() {
     }
   }
 
+  async function reloadRaceWindow(centerDate: string) {
+    const start = addDays(centerDate, -1);
+    const end = addDays(centerDate, 1);
+    const [racePayload, historyPayload] = await Promise.all([
+      fetchRaceRangeFromApi(start, end),
+      fetchHistoryRangeFromApi(start, end),
+    ]);
+    setApiRaces((current) => mergeRaceLists(current, racePayload));
+    setApiHistory((current) => mergeHistoryLists(current, historyPayload));
+    if (racePayload.length > 0) {
+      setApiState("ready");
+    }
+  }
+
+  async function handleManualRefresh() {
+    if (manualRefreshState === "running") {
+      return;
+    }
+    const centerDate = visibleRace?.date ?? selectedDate ?? todayDate;
+    const market = visibleRace?.market ?? "all";
+    setManualRefreshState("running");
+    setManualRefreshMessage("");
+    try {
+      const summary = await triggerManualNetkeibaRefresh(centerDate, market);
+      await reloadRaceWindow(centerDate);
+      setManualRefreshState("done");
+      setManualRefreshMessage(
+        summary.status === "skipped"
+          ? "連続更新を抑制中。少し待って再実行できます。"
+          : `更新完了: ${summary.races_stored ?? 0}R反映 / 予想${summary.auto_predictions ?? 0}件`,
+      );
+    } catch {
+      setManualRefreshState("error");
+      setManualRefreshMessage("更新に失敗。自動更新は継続しています。");
+    }
+  }
+
   return (
     <main className="umalab-shell">
       <div className="app-frame">
@@ -2630,12 +2725,25 @@ export default function Home() {
             <h1>{visibleRace ? displayRaceTitle(visibleRace) : "今日のAI競馬予想"}</h1>
             <p>{visibleRace ? raceStatusLead(visibleRace) : "単勝・枠連・馬連・ワイド・馬単・3連複・3連単の予想を固定表示します"}</p>
           </div>
-          <div className="race-pills">
-            <span>{publicMarketLabel(visibleRace?.market)}</span>
-            <span className={visibleRace?.verificationStatus === "verified" ? "verified" : ""}>
-              {visibleRace?.verificationStatus === "verified" ? "実データ" : "確認中"}
-            </span>
-            <span>{visibleRace?.status === "finished" ? "結果あり" : visibleRace && raceHasStartedByClock(visibleRace) ? "結果取得中" : "予想対象"}</span>
+          <div className="race-actions">
+            <div className="race-pills">
+              <span>{publicMarketLabel(visibleRace?.market)}</span>
+              <span className={visibleRace?.verificationStatus === "verified" ? "verified" : ""}>
+                {visibleRace?.verificationStatus === "verified" ? "実データ" : "確認中"}
+              </span>
+              <span>{visibleRace?.status === "finished" ? "結果あり" : visibleRace && raceHasStartedByClock(visibleRace) ? "結果取得中" : "予想対象"}</span>
+            </div>
+            <button
+              className={`manual-refresh-button ${manualRefreshState}`}
+              disabled={manualRefreshState === "running"}
+              onClick={handleManualRefresh}
+              type="button"
+            >
+              {manualRefreshState === "running" ? "更新中" : "最新に更新"}
+            </button>
+            {manualRefreshMessage && (
+              <small className={`manual-refresh-message ${manualRefreshState}`}>{manualRefreshMessage}</small>
+            )}
           </div>
         </section>
 
@@ -2679,6 +2787,7 @@ export default function Home() {
 
         {activeTab === "calendar" && (
           <CalendarPanel
+            apiPrediction={apiPrediction}
             historyByRaceId={historyByRaceId}
             monthAnchor={monthAnchor}
             monthCells={monthCells}
@@ -2690,6 +2799,7 @@ export default function Home() {
             selectedDateRaces={selectedDateRaces}
             selectedRaceId={selectedRaceId}
             selectedVenue={selectedVenue}
+            tickets={tickets}
             venueOptions={venueOptions}
             venueRaces={selectedVenueRaces}
           />
@@ -3091,7 +3201,7 @@ function ticketReasonRows(ticket: TicketProjection, race: Race, projections: Run
     { label: "券オッズ", value: ticketOddsLabel(ticket, oddsReady) },
     { label: "中心馬オッズ", value: `${anchor.number} ${formatOdds(anchor.odds)}` },
     { label: "AI平均との差", value: `${marketGap >= 0 ? "+" : ""}${formatPercent(marketGap, 1)}` },
-    { label: "人気との差", value: popularity ? `${popularity}人気をAI上位評価` : "人気不明" },
+    { label: "人気との差", value: popularity ? `${popularity}番人気をAI上位評価` : "人気不明" },
     { label: "不安要素", value: concern },
     { label: "推奨度", value: recommendation },
   ];
@@ -3549,7 +3659,11 @@ function RacePayoutGrid({
               <span role="cell">{highlighted ? `🎯 ${currentType}` : currentType === previousType ? "" : currentType}</span>
               <strong role="cell">{officialSelectionText(payout)}</strong>
               <b role="cell">{numberFormatter.format(Math.round(payout.payoutYen))}円</b>
-              <em role="cell">{highlighted ? `的中${payout.popularity ? ` / ${payout.popularity}人気` : ""}` : payout.popularity ? `${payout.popularity}人気` : "-"}</em>
+              <em role="cell">
+                {highlighted
+                  ? `的中${validPayoutPopularity(payout.popularity, payout.betType) ? ` / ${payoutPopularityLabel(payout)}` : ""}`
+                  : payoutPopularityLabel(payout)}
+              </em>
             </div>
           );
         })}
@@ -3644,6 +3758,7 @@ function PredictionResultDiff({
 }
 
 function CalendarPanel({
+  apiPrediction,
   historyByRaceId,
   monthAnchor,
   monthCells,
@@ -3655,9 +3770,11 @@ function CalendarPanel({
   selectedDateRaces,
   selectedRaceId,
   selectedVenue,
+  tickets,
   venueOptions,
   venueRaces,
 }: {
+  apiPrediction: ApiRacePrediction | null;
   historyByRaceId: Map<string, HistoricalPrediction>;
   monthAnchor: string;
   monthCells: MonthCell[];
@@ -3669,12 +3786,16 @@ function CalendarPanel({
   selectedDateRaces: Race[];
   selectedRaceId: string;
   selectedVenue: string;
+  tickets: TicketProjection[];
   venueOptions: VenueOption[];
   venueRaces: Race[];
 }) {
   const selectedCalendarRace =
     selectedDateRaces.find((item) => item.id === selectedRaceId) ?? venueRaces[0] ?? selectedDateRaces[0] ?? null;
   const selectedCalendarHistory = selectedCalendarRace ? historyByRaceId.get(selectedCalendarRace.id) ?? null : null;
+  const selectedApiPrediction =
+    selectedCalendarRace && apiPrediction?.race_id === selectedCalendarRace.id ? apiPrediction : null;
+  const selectedTickets = selectedApiPrediction ? tickets : [];
   function openCalendarRace(raceId: string) {
     onRaceSelect(raceId);
     window.requestAnimationFrame(() => {
@@ -3739,7 +3860,12 @@ function CalendarPanel({
       />
 
       {selectedCalendarRace && (
-        <CalendarRaceDetail race={selectedCalendarRace} raceHistory={selectedCalendarHistory} />
+        <CalendarRaceDetail
+          apiPrediction={selectedApiPrediction}
+          race={selectedCalendarRace}
+          raceHistory={selectedCalendarHistory}
+          tickets={selectedTickets}
+        />
       )}
 
       {!selectedCalendarRace && (
@@ -3760,16 +3886,21 @@ function CalendarPanel({
 }
 
 function CalendarRaceDetail({
+  apiPrediction,
   race,
   raceHistory,
+  tickets,
 }: {
+  apiPrediction: ApiRacePrediction | null;
   race: Race;
   raceHistory: HistoricalPrediction | null;
+  tickets: TicketProjection[];
 }) {
   const projections = useMemo(() => {
-    const merged = raceHistory?.prediction ? mergeApiProjections(raceHistory.prediction, race) : null;
+    const liveMerged = apiPrediction ? mergeApiProjections(apiPrediction, race) : null;
+    const merged = liveMerged ?? (raceHistory?.prediction ? mergeApiProjections(raceHistory.prediction, race) : null);
     return merged ?? buildRaceOnlyProjections(race);
-  }, [race, raceHistory]);
+  }, [apiPrediction, race, raceHistory]);
   const resultOrder = raceResultOrder(race);
   const isFinished = race.status === "finished";
 
@@ -3795,6 +3926,15 @@ function CalendarRaceDetail({
       ) : (
         <>
           <PredictionOrderCard projections={projections} race={race} />
+          {tickets.length > 0 && (
+            <section className="bet-plan-card compact-calendar">
+              <div className="section-heading compact">
+                <h2>券種別予想</h2>
+                <span>自動生成済み</span>
+              </div>
+              <TicketList projections={projections} race={race} tickets={tickets} />
+            </section>
+          )}
           <div className="result-strip">
             <strong>出馬表取得済み</strong>
             <span>発走前の自動予想対象</span>
@@ -4162,8 +4302,8 @@ function RunnerTable({ projections, race }: { projections: RunnerProjection[]; r
         <table className="runner-table">
           <thead>
             <tr>
-              <th>印</th>
-              <th>馬</th>
+              <th>AI印</th>
+              <th>馬番・馬名</th>
               <th>オッズ</th>
               <th>AI評価</th>
               <th>状態</th>
@@ -4190,11 +4330,15 @@ function RunnerTable({ projections, race }: { projections: RunnerProjection[]; r
                 key={runner.number}
               >
                 <td>
+                  <span className="ai-mark-label">AI</span>
                   <b>{sortKey === "prediction" ? index + 1 : predictionRank || index + 1}</b>
                   {result && <em>{result}着</em>}
                 </td>
                 <td>
-                  <strong>{runner.number}. {runner.name}</strong>
+                  <div className="runner-title">
+                    <span className="horse-number-badge">馬番 {runner.number}</span>
+                    <strong>{runner.name}</strong>
+                  </div>
                   <span>{staff || runner.jockey}</span>
                   <span className="runner-condition-inline">{profile} / {horseWeight}</span>
                 </td>
@@ -4208,7 +4352,7 @@ function RunnerTable({ projections, race }: { projections: RunnerProjection[]; r
                     <>
                       <strong>{hasRunnerWinOdds(runner) ? `単 ${runner.odds.toFixed(1)}倍` : "単勝 未取得"}</strong>
                       <span>{runner.placeOdds ? `複 ${runner.placeOdds.toFixed(1)}倍` : "複 未取得"}</span>
-                      <span>{popularity ? `${popularity}人気` : "人気不明"}</span>
+                      <span>{popularity ? `${popularity}番人気` : "人気不明"}</span>
                     </>
                   )}
                 </td>
