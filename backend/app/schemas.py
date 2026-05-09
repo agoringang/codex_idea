@@ -163,6 +163,13 @@ class RunnerInput(BaseModel):
     odds_delta_5m: float | None = None
     odds_delta_15m: float | None = None
     odds_volatility: float | None = Field(default=None, ge=0)
+    day_prev_races: float | None = Field(default=None, ge=0)
+    day_prev_upset_rate: float | None = Field(default=None, ge=0, le=1)
+    day_prev_favorite_win_rate: float | None = Field(default=None, ge=0, le=1)
+    day_prev_winner_avg_odds: float | None = Field(default=None, ge=0)
+    venue_day_prev_races: float | None = Field(default=None, ge=0)
+    venue_day_prev_upset_rate: float | None = Field(default=None, ge=0, le=1)
+    venue_day_prev_favorite_win_rate: float | None = Field(default=None, ge=0, le=1)
     ticket_pool_share: float | None = Field(default=None, ge=0, le=1)
     draw_bias: float | None = Field(default=None, ge=-1, le=1)
     body_weight_announced_minutes: float | None = Field(default=None, ge=0)

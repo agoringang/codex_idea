@@ -45,6 +45,13 @@ NUMERIC_COLUMNS = [
     "odds_delta",
     "ticket_pool_share",
     "draw_bias",
+    "day_prev_races",
+    "day_prev_upset_rate",
+    "day_prev_favorite_win_rate",
+    "day_prev_winner_avg_odds",
+    "venue_day_prev_races",
+    "venue_day_prev_upset_rate",
+    "venue_day_prev_favorite_win_rate",
     "lap_3f",
     "lap_4f",
     "market_odds",
@@ -221,6 +228,16 @@ def load_training_frame(csv_path: Path) -> pd.DataFrame:
         "gate",
         "field_size",
         "horse_name",
+        "market",
+        "payout_win",
+        "payout_place",
+        "payout_bracket_quinella",
+        "payout_quinella",
+        "payout_wide",
+        "payout_exacta",
+        "payout_trio",
+        "payout_trifecta",
+        "payouts_json",
         *ALL_FEATURES,
     }
 
@@ -398,6 +415,121 @@ def add_market_features(frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+def _safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    values = numerator / denominator.replace(0, np.nan)
+    return values.replace([np.inf, -np.inf], np.nan).fillna(0).astype("float32")
+
+
+def add_day_flow_features(frame: pd.DataFrame) -> pd.DataFrame:
+    required = {"race_id", "race_date", "finish_position", "market_odds"}
+    if not required.issubset(frame.columns):
+        return frame
+
+    work = frame.copy()
+    work["market_odds"] = pd.to_numeric(work["market_odds"], errors="coerce")
+    work["finish_position"] = pd.to_numeric(work["finish_position"], errors="coerce")
+    work["runner_number"] = pd.to_numeric(work["runner_number"], errors="coerce")
+    if "race_no" in work:
+        work["race_no"] = pd.to_numeric(work["race_no"], errors="coerce")
+    else:
+        work["race_no"] = np.nan
+    if "market" not in work:
+        work["market"] = "JRA"
+    if "venue" not in work:
+        work["venue"] = "unknown"
+
+    work["odds_rank_for_flow"] = work.groupby("race_id")["market_odds"].rank(
+        method="first",
+        ascending=True,
+    )
+    favorite = (
+        work.sort_values(["race_id", "market_odds", "runner_number"])
+        .groupby("race_id", sort=False)
+        .first()
+        .reset_index()[["race_id", "runner_number"]]
+        .rename(columns={"runner_number": "favorite_number"})
+    )
+    winner = (
+        work[work["finish_position"] == 1]
+        .sort_values(["race_id", "runner_number"])
+        .groupby("race_id", sort=False)
+        .first()
+        .reset_index()[["race_id", "runner_number", "market_odds", "odds_rank_for_flow"]]
+        .rename(
+            columns={
+                "runner_number": "winner_number",
+                "market_odds": "winner_odds",
+                "odds_rank_for_flow": "winner_odds_rank",
+            }
+        )
+    )
+    top3 = (
+        work[work["finish_position"] <= 3]
+        .groupby("race_id", sort=False)
+        .agg(top3_max_odds_rank=("odds_rank_for_flow", "max"))
+        .reset_index()
+    )
+    races = (
+        work.groupby("race_id", sort=False)
+        .agg(
+            race_date=("race_date", "first"),
+            market=("market", "first"),
+            venue=("venue", "first"),
+            race_no=("race_no", "first"),
+        )
+        .reset_index()
+        .merge(favorite, on="race_id", how="left")
+        .merge(winner, on="race_id", how="left")
+        .merge(top3, on="race_id", how="left")
+    )
+    races["favorite_won"] = (races["favorite_number"] == races["winner_number"]).astype("int8")
+    races["upset"] = (
+        (races["favorite_won"] == 0)
+        | (pd.to_numeric(races["winner_odds_rank"], errors="coerce") >= 4)
+        | (pd.to_numeric(races["top3_max_odds_rank"], errors="coerce") >= 7)
+        | (pd.to_numeric(races["winner_odds"], errors="coerce") >= 10)
+    ).astype("int8")
+    races["winner_odds"] = pd.to_numeric(races["winner_odds"], errors="coerce").fillna(0)
+    races = races.sort_values(["race_date", "market", "venue", "race_no", "race_id"]).copy()
+
+    def apply_group(prefix: str, group_columns: list[str]) -> None:
+        group = races.groupby(group_columns, dropna=False, sort=False)
+        prev_count = group.cumcount().astype("float32")
+        prev_upset = group["upset"].cumsum().shift().fillna(0).astype("float32")
+        prev_favorite_win = group["favorite_won"].cumsum().shift().fillna(0).astype("float32")
+        if len(group_columns) > 1:
+            # Plain shift crosses group boundaries, so reset the first row of each group.
+            first_in_group = prev_count == 0
+            prev_upset.loc[first_in_group] = 0
+            prev_favorite_win.loc[first_in_group] = 0
+        races[f"{prefix}prev_races"] = prev_count
+        races[f"{prefix}prev_upset_rate"] = _safe_divide(prev_upset, prev_count)
+        races[f"{prefix}prev_favorite_win_rate"] = _safe_divide(prev_favorite_win, prev_count)
+        if prefix == "day_":
+            prev_winner_odds = group["winner_odds"].cumsum().shift().fillna(0).astype("float32")
+            if len(group_columns) > 1:
+                prev_winner_odds.loc[prev_count == 0] = 0
+            races["day_prev_winner_avg_odds"] = _safe_divide(prev_winner_odds, prev_count)
+
+    apply_group("day_", ["race_date", "market"])
+    apply_group("venue_day_", ["race_date", "market", "venue"])
+
+    flow_columns = [
+        "day_prev_races",
+        "day_prev_upset_rate",
+        "day_prev_favorite_win_rate",
+        "day_prev_winner_avg_odds",
+        "venue_day_prev_races",
+        "venue_day_prev_upset_rate",
+        "venue_day_prev_favorite_win_rate",
+    ]
+    frame = frame.drop(columns=flow_columns, errors="ignore")
+    frame = frame.merge(races[["race_id", *flow_columns]], on="race_id", how="left")
+    for column in flow_columns:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0).astype("float32")
+    return frame
+
+
 def prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
     if "race_id" not in frame:
         raise ValueError("missing required column: race_id")
@@ -438,6 +570,7 @@ def prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.groupby("race_id", sort=False).filter(lambda group: len(group) >= 2)
     frame = add_market_features(frame)
     frame = add_historical_features(frame)
+    frame = add_day_flow_features(frame)
 
     for column in NUMERIC_FEATURES:
         if column not in frame:

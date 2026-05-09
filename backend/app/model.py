@@ -5,7 +5,7 @@ from itertools import combinations, permutations
 from .features import clamp, raw_probability_score
 from .runner_state import runner_is_inactive_model
 from .schemas import BetRecommendation, BetType, RacePrediction, RaceRequest, RunnerPrediction
-from .trained_model import predict_probabilities
+from .trained_model import predict_probabilities, ticket_policy
 
 
 PAYOUT_RATES: dict[BetType, float] = {
@@ -617,6 +617,24 @@ def fixed_type_recommendations(
 ) -> list[BetRecommendation]:
     enabled = set(request.enabled_bet_types) & RECOMMENDABLE_BET_TYPES
     by_type: dict[BetType, BetRecommendation] = {}
+    preferred_policy = ticket_policy(request.market)
+
+    def policy_bonus(item: BetRecommendation) -> float:
+        policy = preferred_policy.get(item.bet_type)
+        if not isinstance(policy, dict):
+            return 0.0
+        preferred = str(policy.get("strategy_label") or policy.get("strategy") or "")
+        if not preferred:
+            return 0.0
+        if preferred == "上位2頭" and item.strategy == "単勝2点":
+            return 0.30
+        if preferred in item.strategy:
+            return 0.30
+        if preferred == "軸流し" and "流し" in item.strategy:
+            return 0.24
+        if preferred == "BOX" and "ボックス" in item.strategy:
+            return 0.24
+        return 0.0
 
     def strategy_shape_bonus(item: BetRecommendation) -> float:
         strategy = item.strategy
@@ -661,7 +679,7 @@ def fixed_type_recommendations(
         base = risk_adjusted_score(item, request.risk_level)
         stability = item.probability * (1.25 if item.bet_type in {"trio", "trifecta"} else 1.12)
         return (
-            base + strategy_shape_bonus(item) + stability,
+            base + strategy_shape_bonus(item) + policy_bonus(item) + stability,
             item.probability,
             -float(item.tickets),
         )

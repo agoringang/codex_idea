@@ -1014,15 +1014,18 @@ async function fetchHistoryRangeFromApi(startDate: string, endDate: string) {
   return normalizeApiHistory(await response.json());
 }
 
-async function triggerManualNetkeibaRefresh(centerDate: string, market: Market | "all") {
+async function triggerManualNetkeibaRefresh(centerDate: string, market: Market | "all", raceId?: string) {
   const params = new URLSearchParams({
     start_date: centerDate,
-    end_date: addDays(centerDate, 1),
+    end_date: centerDate,
     market,
-    max_requests: market === "all" ? "120" : "90",
-    delay: "0.10",
+    max_requests: raceId ? "12" : market === "all" ? "72" : "48",
+    delay: "0.06",
     prefer_results: "true",
   });
+  if (raceId) {
+    params.set("race_id", raceId);
+  }
   const response = await fetch(`${apiBaseUrl()}/jobs/ingest/netkeiba/manual-refresh?${params.toString()}`, {
     cache: "no-store",
   });
@@ -1037,8 +1040,89 @@ async function triggerManualNetkeibaRefresh(centerDate: string, market: Market |
   }>;
 }
 
-function buildRaceRequest(race: Race, riskLevel: number, bankroll: number) {
+type RaceDayFlowFeatures = {
+  dayPrevRaces: number;
+  dayPrevUpsetRate: number;
+  dayPrevFavoriteWinRate: number;
+  dayPrevWinnerAvgOdds: number;
+  venueDayPrevRaces: number;
+  venueDayPrevUpsetRate: number;
+  venueDayPrevFavoriteWinRate: number;
+};
+
+function raceOutcomeForFlow(race: Race) {
+  if (race.status !== "finished") {
+    return null;
+  }
+  const runners = activeRaceRunners(race);
+  const winner = runners.find((runner) => finishPosition(runner) === 1);
+  if (!winner) {
+    return null;
+  }
+  const oddsReady = runners.filter(hasRunnerWinOdds);
+  const favorite = [...oddsReady].sort((a, b) => a.odds - b.odds)[0];
+  const oddsRank = new Map(
+    [...oddsReady].sort((a, b) => a.odds - b.odds).map((runner, index) => [runner.number, index + 1]),
+  );
+  const top3MaxRank = Math.max(
+    0,
+    ...runners
+      .filter((runner) => {
+        const position = finishPosition(runner);
+        return position !== undefined && position <= 3;
+      })
+      .map((runner) => oddsRank.get(runner.number) ?? 0),
+  );
+  const winnerRank = oddsRank.get(winner.number) ?? 0;
+  const winnerOdds = hasRunnerWinOdds(winner) ? winner.odds : 0;
+  const favoriteWon = favorite ? favorite.number === winner.number : false;
+  return {
+    upset: !favoriteWon || winnerRank >= 4 || top3MaxRank >= 7 || winnerOdds >= 10,
+    favoriteWon,
+    winnerOdds,
+  };
+}
+
+function average(values: number[]) {
+  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function raceDayFlowFeatures(race: Race, contextRaces: Race[]): RaceDayFlowFeatures {
+  const currentNo = raceNumberValue(race);
+  const prior = contextRaces
+    .filter((item) => (
+      item.id !== race.id &&
+      item.date === race.date &&
+      item.market === race.market &&
+      item.status === "finished" &&
+      raceNumberValue(item) > 0 &&
+      raceNumberValue(item) < currentNo
+    ))
+    .map((item) => ({ race: item, outcome: raceOutcomeForFlow(item) }))
+    .filter((item): item is { race: Race; outcome: NonNullable<ReturnType<typeof raceOutcomeForFlow>> } => Boolean(item.outcome));
+  const venuePrior = prior.filter((item) => item.race.venue === race.venue);
+  const flow = (items: typeof prior) => ({
+    count: items.length,
+    upsetRate: average(items.map((item) => (item.outcome.upset ? 1 : 0))),
+    favoriteWinRate: average(items.map((item) => (item.outcome.favoriteWon ? 1 : 0))),
+    winnerAvgOdds: average(items.map((item) => item.outcome.winnerOdds).filter((value) => value > 0)),
+  });
+  const day = flow(prior);
+  const venue = flow(venuePrior);
+  return {
+    dayPrevRaces: day.count,
+    dayPrevUpsetRate: day.upsetRate,
+    dayPrevFavoriteWinRate: day.favoriteWinRate,
+    dayPrevWinnerAvgOdds: day.winnerAvgOdds,
+    venueDayPrevRaces: venue.count,
+    venueDayPrevUpsetRate: venue.upsetRate,
+    venueDayPrevFavoriteWinRate: venue.favoriteWinRate,
+  };
+}
+
+function buildRaceRequest(race: Race, riskLevel: number, bankroll: number, contextRaces: Race[] = []) {
   const runnersForPrediction = activeRaceRunners(race);
+  const flow = raceDayFlowFeatures(race, contextRaces);
   const oddsRank = new Map(
     [...runnersForPrediction]
       .sort((a, b) => (hasRunnerWinOdds(a) ? a.odds : 9999) - (hasRunnerWinOdds(b) ? b.odds : 9999))
@@ -1135,6 +1219,13 @@ function buildRaceRequest(race: Race, riskLevel: number, bankroll: number) {
         odds_delta_5m: runner.oddsDelta5m,
         odds_delta_15m: runner.oddsDelta15m,
         odds_volatility: runner.oddsVolatility,
+        day_prev_races: flow.dayPrevRaces,
+        day_prev_upset_rate: flow.dayPrevUpsetRate,
+        day_prev_favorite_win_rate: flow.dayPrevFavoriteWinRate,
+        day_prev_winner_avg_odds: flow.dayPrevWinnerAvgOdds,
+        venue_day_prev_races: flow.venueDayPrevRaces,
+        venue_day_prev_upset_rate: flow.venueDayPrevUpsetRate,
+        venue_day_prev_favorite_win_rate: flow.venueDayPrevFavoriteWinRate,
         ticket_pool_share: runner.ticketPoolShare,
         scratched: false,
         runner_status: undefined,
@@ -2155,7 +2246,7 @@ function raceVolatilityProfile(race: Race, projections: RunnerProjection[]) {
     return {
       label: "波乱小",
       score,
-      reasons: [`勝率差 ${formatPercent(winGap, 1)}`, favoriteIsAiTop ? "AI1位=人気上位" : "人気とAIにズレ"],
+      reasons: [`勝率差 ${formatPercent(winGap, 1)}`, favoriteIsAiTop ? "予測1位=人気上位" : "人気とAIにズレ"],
     };
   }
   return {
@@ -2222,7 +2313,7 @@ function evaluateBettingHeat({
       volatilityLabel: "未判定",
       volatilityScore: 0,
       dataDepth,
-      reasons: ["単勝オッズ未取得", "AI評価未生成", "結果・オッズ更新待ち"],
+      reasons: ["単勝オッズ未取得", "予測未生成", "結果・オッズ更新待ち"],
     };
   }
 
@@ -2258,7 +2349,7 @@ function evaluateBettingHeat({
   );
 
   const reasons = [
-    `AI1位 ${top.number}. ${top.name}`,
+    `予測1位 ${top.number}. ${top.name}`,
     `荒れ度 ${Math.round(volatility.score)}`,
     `情報量 ${formatPercent(dataDepth, 0)}`,
     `勝率差 ${formatPercent(winGap, 1)}`,
@@ -2553,7 +2644,7 @@ export default function Home() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           cache: "no-store",
-          body: JSON.stringify(buildRaceRequest(modelingRace, riskLevel, activeBankroll)),
+          body: JSON.stringify(buildRaceRequest(modelingRace, riskLevel, activeBankroll, rawAvailableRaces)),
         });
         if (!response.ok) {
           throw new Error(`predict ${response.status}`);
@@ -2574,7 +2665,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [modelingRace, riskLevel]);
+  }, [modelingRace, riskLevel, rawAvailableRaces, activeBankroll]);
 
   useEffect(() => {
     if (selectedDateRaces.length === 0) {
@@ -2677,9 +2768,9 @@ export default function Home() {
     const centerDate = visibleRace?.date ?? selectedDate ?? todayDate;
     const market = visibleRace?.market ?? "all";
     setManualRefreshState("running");
-    setManualRefreshMessage("");
+    setManualRefreshMessage(visibleRace ? "このレースだけを優先更新しています" : "");
     try {
-      const summary = await triggerManualNetkeibaRefresh(centerDate, market);
+      const summary = await triggerManualNetkeibaRefresh(centerDate, market, visibleRace?.id);
       await reloadRaceWindow(centerDate);
       setManualRefreshState("done");
       setManualRefreshMessage(
@@ -2692,6 +2783,38 @@ export default function Home() {
       setManualRefreshMessage("更新に失敗。自動更新は継続しています。");
     }
   }
+
+  useEffect(() => {
+    if (!visibleRace || visibleRace.status === "finished" || !raceHasStartedByClock(visibleRace)) {
+      return;
+    }
+    let cancelled = false;
+    let busy = false;
+
+    async function refreshVisibleRace() {
+      if (busy || !visibleRace) {
+        return;
+      }
+      busy = true;
+      try {
+        await triggerManualNetkeibaRefresh(visibleRace.date, visibleRace.market, visibleRace.id);
+        if (!cancelled) {
+          await reloadRaceWindow(visibleRace.date);
+        }
+      } catch {
+        // Keep the screen usable; the next live tick or scheduled cron will retry.
+      } finally {
+        busy = false;
+      }
+    }
+
+    refreshVisibleRace();
+    const timer = window.setInterval(refreshVisibleRace, 90_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [visibleRace?.date, visibleRace?.id, visibleRace?.market, visibleRace?.status]);
 
   return (
     <main className="umalab-shell">
@@ -3042,7 +3165,7 @@ function DecisionCard({
     <section className={`decision-card ${shouldPass ? "pass" : heat.tone} ${marketClass(race.market)}`}>
       <div className="decision-main">
         <span>{isPendingOdds ? "オッズ公開待ち" : isTentative ? "オッズ未取得の暫定予想" : shouldPass ? "予想準備中" : "今日の券種別予想"}</span>
-        <h2>{isPendingOdds ? "AI評価は取得待ち" : shouldPass ? "予想生成待ち" : `${topTicket.type} ${topTicket.selection}`}</h2>
+        <h2>{isPendingOdds ? "予測は取得待ち" : shouldPass ? "予想生成待ち" : `${topTicket.type} ${topTicket.selection}`}</h2>
         <p>
           {isPendingOdds
             ? "出馬表は取得済み。単勝オッズ公開後に7券種の予想を自動生成します。"
@@ -3072,7 +3195,7 @@ function DecisionCard({
         ) : (
           <>
             <span>予想生成待ち</span>
-            <span>{isPendingOdds ? "オッズ未取得 / AI評価未生成" : heat.reasons.slice(0, 2).join(" / ")}</span>
+            <span>{isPendingOdds ? "オッズ未取得 / 予測未生成" : heat.reasons.slice(0, 2).join(" / ")}</span>
           </>
         )}
       </div>
@@ -3082,10 +3205,10 @@ function DecisionCard({
         {displayRunners.map((runner, index) => (
           <b key={runner.number}>
             {index + 1}. {runner.number} {runner.name}
-            <em>{isPendingOdds ? "評価待ち" : `AI ${displayAiIndex(runner, race)}`}</em>
+            <em>{isPendingOdds ? "評価待ち" : `予測 ${displayAiIndex(runner, race)}`}</em>
           </b>
         ))}
-        {oddsReady && topRunner && <small>AI1位と人気の差 {formatPercent(topRunner.winProbability - marketWinProbability(race, topRunner.number), 1)}</small>}
+        {oddsReady && topRunner && <small>予測1位と人気の差 {formatPercent(topRunner.winProbability - marketWinProbability(race, topRunner.number), 1)}</small>}
       </div>
     </section>
   );
@@ -3098,7 +3221,7 @@ function PredictionOrderCard({ projections, race }: { projections: RunnerProject
   return (
     <section className="prediction-order-card">
       <div className="section-heading">
-        <h2>AI評価順</h2>
+        <h2>予測順位</h2>
         <span>{publicMarketLabel(race.market)} / {volatility.label} / 情報量{formatPercent(depth, 0)}</span>
       </div>
       <div className="order-grid">
@@ -3110,7 +3233,7 @@ function PredictionOrderCard({ projections, race }: { projections: RunnerProject
               <span>{runner.jockey} / {runnerOddsMeta(runner, race)}</span>
             </div>
             <div className="order-probs">
-              <b>AI {displayAiIndex(runner, race)}</b>
+              <b>予測 {displayAiIndex(runner, race)}</b>
               <em>勝 {formatPercent(runner.winProbability)} / 3内 {formatPercent(runner.placeProbability)}</em>
             </div>
           </article>
@@ -3131,7 +3254,7 @@ function PredictionOrderCard({ projections, race }: { projections: RunnerProject
                 <em style={{ width: `${Math.min(runner.placeProbability * 100, 100)}%` }} />
               </div>
               <div className="chart-values">
-                <b>AI {displayAiIndex(runner, race)}</b>
+                <b>予測 {displayAiIndex(runner, race)}</b>
                 <b>勝 {formatPercent(runner.winProbability)}</b>
                 <b>3内 {formatPercent(runner.placeProbability)}</b>
               </div>
@@ -3147,7 +3270,7 @@ function MarketPendingCard({ race }: { race: Race }) {
   return (
     <section className={`prediction-order-card pending ${marketClass(race.market)}`}>
       <div className="section-heading">
-        <h2>AI評価は取得待ち</h2>
+        <h2>予測は取得待ち</h2>
         <span>{publicMarketLabel(race.market)} / {raceStartLabel(race)}</span>
       </div>
       <div className="pending-market-grid">
@@ -3172,7 +3295,7 @@ function ticketReasonRows(ticket: TicketProjection, race: Race, projections: Run
   const oddsReady = raceHasUsableWinOdds(race);
   if (!anchor) {
     return [
-      { label: "AI評価", value: "出走馬情報不足" },
+      { label: "予測", value: "出走馬情報不足" },
       { label: "買わない理由", value: "予測対象が足りない" },
     ];
   }
@@ -3197,11 +3320,11 @@ function ticketReasonRows(ticket: TicketProjection, race: Race, projections: Run
           : "控えめ";
   return [
     { label: "予想形", value: ticketCompactMethod(ticket) },
-    { label: "AI評価", value: `${anchor.number} ${anchor.name} / AI指数 ${displayAiIndex(anchor, race)}` },
+    { label: "予測", value: `${anchor.number} ${anchor.name} / 予測指数 ${displayAiIndex(anchor, race)}` },
     { label: "券オッズ", value: ticketOddsLabel(ticket, oddsReady) },
     { label: "中心馬オッズ", value: `${anchor.number} ${formatOdds(anchor.odds)}` },
-    { label: "AI平均との差", value: `${marketGap >= 0 ? "+" : ""}${formatPercent(marketGap, 1)}` },
-    { label: "人気との差", value: popularity ? `${popularity}番人気をAI上位評価` : "人気不明" },
+    { label: "予測平均との差", value: `${marketGap >= 0 ? "+" : ""}${formatPercent(marketGap, 1)}` },
+    { label: "人気との差", value: popularity ? `${popularity}番人気を予測上位評価` : "人気不明" },
     { label: "不安要素", value: concern },
     { label: "推奨度", value: recommendation },
   ];
@@ -3721,7 +3844,7 @@ function PredictionResultDiff({
 
       <div className="diff-grid">
         <div className="diff-lane">
-          <span>AI上位</span>
+          <span>予測上位</span>
           {predictedRows.slice(0, 3).map((runner, index) => {
             const actualPosition = positionByNumber.get(runner.number);
             const sourceRunner = runnerByNumber.get(runner.number);
@@ -3745,7 +3868,7 @@ function PredictionResultDiff({
             return (
               <article className={predictedIndex >= 0 && predictedIndex <= 2 ? "matched" : ""} key={runner.number}>
                 <strong>{position}着 {runner.number} {runner.name}</strong>
-                <em>{predictedIndex >= 0 ? `AI ${predictedIndex + 1}位` : "AI上位外"}</em>
+                <em>{predictedIndex >= 0 ? `予測 ${predictedIndex + 1}位` : "予測上位外"}</em>
                 <small>{runnerOddsMeta(runner, race)}</small>
               </article>
             );
@@ -4255,7 +4378,7 @@ function RunnerTable({ projections, race }: { projections: RunnerProjection[]; r
   const oddsReady = raceHasUsableWinOdds(race);
   const [sortKey, setSortKey] = useState<RunnerSortKey>(defaultSort);
   const sortOptions: [RunnerSortKey, string][] = [
-    ["prediction", "AI評価順"],
+    ["prediction", "予測順位"],
     ["number", "馬番順"],
     ["odds", "オッズ順"],
     ...(hasResultSort ? [["result", "着順"] as [RunnerSortKey, string]] : []),
@@ -4302,10 +4425,10 @@ function RunnerTable({ projections, race }: { projections: RunnerProjection[]; r
         <table className="runner-table">
           <thead>
             <tr>
-              <th>AI印</th>
+              <th>予測印</th>
               <th>馬番・馬名</th>
               <th>オッズ</th>
-              <th>AI評価</th>
+              <th>予測</th>
               <th>状態</th>
             </tr>
           </thead>
@@ -4330,7 +4453,7 @@ function RunnerTable({ projections, race }: { projections: RunnerProjection[]; r
                 key={runner.number}
               >
                 <td>
-                  <span className="ai-mark-label">AI</span>
+                  <span className="ai-mark-label">予測</span>
                   <b>{sortKey === "prediction" ? index + 1 : predictionRank || index + 1}</b>
                   {result && <em>{result}着</em>}
                 </td>
@@ -4364,7 +4487,7 @@ function RunnerTable({ projections, race }: { projections: RunnerProjection[]; r
                     </>
                   ) : oddsReady ? (
                     <>
-                      <strong>AI {displayAiIndex(runner, race)}</strong>
+                      <strong>予測 {displayAiIndex(runner, race)}</strong>
                       <span>勝 {formatPercent(runner.winProbability)} / 3内 {formatPercent(runner.placeProbability)}</span>
                     </>
                   ) : (

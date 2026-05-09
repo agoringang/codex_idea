@@ -198,6 +198,36 @@ def _artifact_models(artifact: dict[str, Any], market: str | None) -> tuple[dict
     return models if isinstance(models, dict) else {}, None
 
 
+def ticket_policy(market: str | None = None) -> dict[str, Any]:
+    model_path = configured_model_path()
+    try:
+        artifact = _load_configured_artifact(str(model_path))
+    except Exception:
+        return {}
+    if artifact is None:
+        return {}
+
+    market_key = str(market or "").upper()
+    segments = artifact.get("segment_models") or artifact.get("segments")
+    if market_key and isinstance(segments, dict):
+        segment = segments.get(market_key) or segments.get(market_key.lower())
+        if isinstance(segment, dict):
+            metrics = segment.get("metrics") if isinstance(segment.get("metrics"), dict) else segment
+            policy = metrics.get("ticket_policy") if isinstance(metrics, dict) else None
+            if isinstance(policy, dict):
+                return policy.get("best_by_bet_type") if isinstance(policy.get("best_by_bet_type"), dict) else policy
+
+    policy = artifact.get("ticket_policy")
+    if isinstance(policy, dict):
+        return policy.get("best_by_bet_type") if isinstance(policy.get("best_by_bet_type"), dict) else policy
+    metrics = artifact.get("metrics")
+    if isinstance(metrics, dict):
+        policy = metrics.get("ticket_policy")
+        if isinstance(policy, dict):
+            return policy.get("best_by_bet_type") if isinstance(policy.get("best_by_bet_type"), dict) else policy
+    return {}
+
+
 def predict_probabilities(
     runners: list[RunnerInput],
     market: str | None = None,

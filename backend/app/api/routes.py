@@ -271,6 +271,7 @@ def netkeiba_jra_odds_ingest_job(
 def netkeiba_manual_refresh_job(
     start_date: str | None = None,
     end_date: str | None = None,
+    race_id: str | None = None,
     days: int = 1,
     days_ahead: int = 1,
     max_requests: int | None = None,
@@ -294,14 +295,15 @@ def netkeiba_manual_refresh_job(
     _MANUAL_REFRESH_LAST_AT = now
 
     market_scope = market if market in {"JRA", "NAR"} else "all"
-    request_cap = 120 if market_scope == "all" else 90
+    request_cap = 12 if race_id else 72 if market_scope == "all" else 48
     summary = ingest_netkeiba_window(
         start_date=start_date,
         end_date=end_date,
+        race_id=race_id,
         days=max(1, min(days, 2)),
         days_ahead=max(0, min(days_ahead, 2)),
-        max_requests=min(max_requests if max_requests is not None else request_cap, 160),
-        delay=max(delay if delay is not None else 0.12, 0.08),
+        max_requests=min(max_requests if max_requests is not None else request_cap, 96),
+        delay=max(delay if delay is not None else 0.06, 0.04),
         refresh=True,
         prefer_results=prefer_results,
         backfill_finished_predictions=False,

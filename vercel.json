@@ -19,7 +19,7 @@
     },
     {
       "path": "/api/jobs/ingest/netkeiba/results",
-      "schedule": "30 12 * * *"
+      "schedule": "30 7 * * *"
     }
   ]
 }

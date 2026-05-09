@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .data_sources import build_race_dicts_from_rows
+from .data_sources import _collapse_duplicate_races, build_race_dicts_from_rows
 from .history import get_all_history, record_prediction
 from .model import predict_race
 from .race_storage import fetch_race_cards, race_storage_available, record_ingest_run, upsert_race_cards
@@ -371,6 +371,7 @@ def ingest_netkeiba_window(
     *,
     start_date: str | None = None,
     end_date: str | None = None,
+    race_id: str | None = None,
     days: int = 2,
     days_ahead: int = 0,
     max_requests: int | None = None,
@@ -385,24 +386,46 @@ def ingest_netkeiba_window(
         start_date, end_date = _date_range_for_days(days, days_ahead)
 
     market_scope = market if market in {"JRA", "NAR"} else "all"
+    explicit_race_ids = re.findall(r"20\d{10}", race_id or "")
+    raw_suffix = f"_{explicit_race_ids[0]}" if explicit_race_ids else ""
     raw_dir = (
         Path(os.getenv("NETKEIBA_RAW_DIR", "/tmp/umalab_netkeiba_raw"))
-        / f"{market_scope}_{start_date}_{end_date}"
+        / f"{market_scope}_{start_date}_{end_date}{raw_suffix}"
     )
     configured_output = os.getenv("NETKEIBA_INGEST_OUTPUT")
     output = (
         Path(configured_output)
         if configured_output
-        else Path("/tmp") / f"umalab_netkeiba_{market_scope}_{start_date}_{end_date}.csv"
+        else Path("/tmp") / f"umalab_netkeiba_{market_scope}_{start_date}_{end_date}{raw_suffix}.csv"
     )
     raw_dir.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
 
     scraper = _load_scraper_module()
+    race_meta: dict[str, dict[str, str]] = {}
+    race_page_urls: dict[str, str] = {}
+    if explicit_race_ids:
+        scraper_source = scraper.infer_source_from_race_id(explicit_race_ids[0])
+        race_date_text = start_date
+        if not race_date_text:
+            inferred_date = scraper.infer_local_date_from_race_id(explicit_race_ids[0])
+            race_date_text = inferred_date.isoformat() if inferred_date is not None else datetime.now(JST).date().isoformat()
+        try:
+            race_date = datetime.strptime(race_date_text, "%Y-%m-%d").date()
+        except ValueError:
+            race_date = datetime.now(JST).date()
+        race_meta[explicit_race_ids[0]] = {"date": race_date.isoformat(), "source": scraper_source}
+        race_page_urls[explicit_race_ids[0]] = scraper.race_url_for_dynamic_id(
+            explicit_race_ids[0],
+            source=scraper_source,
+            race_date=race_date,
+            prefer_results=prefer_results,
+        )
+
     args = argparse.Namespace(
         start_date=start_date,
         end_date=end_date,
-        race_id=[],
+        race_id=explicit_race_ids,
         race_ids_file=None,
         raw_dir=raw_dir,
         output=output,
@@ -415,7 +438,7 @@ def ingest_netkeiba_window(
         max_requests=max_requests if max_requests is not None else int(os.getenv("NETKEIBA_INGEST_MAX_REQUESTS", "120")),
         refresh=refresh,
         prefer_results=prefer_results,
-        no_calendar=False,
+        no_calendar=bool(explicit_race_ids),
         list_only=False,
         skip_import=False,
         skip_enrich=True,
@@ -427,6 +450,8 @@ def ingest_netkeiba_window(
             "NETKEIBA_USER_AGENT",
             getattr(scraper, "DEFAULT_USER_AGENT", "UmaLabResearch/0.2"),
         ),
+        race_meta=race_meta,
+        race_page_urls=race_page_urls,
     )
 
     fetcher = scraper.RateLimitedFetcher(
@@ -442,8 +467,12 @@ def ingest_netkeiba_window(
     race_results: list[dict[str, Any]] = []
     stop_reason = ""
     try:
-        calendar_ids, _calendar_results = scraper.scrape_calendar_pages(args, fetcher)
-        race_ids = sorted(set(calendar_ids))
+        calendar_ids, _calendar_results = (
+            ([], [])
+            if explicit_race_ids
+            else scraper.scrape_calendar_pages(args, fetcher)
+        )
+        race_ids = sorted(set([*explicit_race_ids, *calendar_ids]))
         race_results = scraper.scrape_race_pages(race_ids, args, fetcher)
         odds_results = scraper.scrape_odds_pages(race_ids, args, fetcher)
     except scraper.MaxRequestsReached as exc:
@@ -471,17 +500,23 @@ def ingest_netkeiba_window(
 
     odds_updates = _apply_live_odds_to_races(race_dicts, live_odds_rows)
     existing_races: list[dict[str, Any]] = []
-    if live_odds_rows:
-        try:
-            existing_races = fetch_race_cards(start_date, end_date)
-        except Exception:
-            existing_races = []
-        if market_scope in {"JRA", "NAR"}:
-            existing_races = [
-                race
-                for race in existing_races
-                if str(race.get("market") or "").upper() == market_scope
-            ]
+    try:
+        existing_races = fetch_race_cards(start_date, end_date)
+    except Exception:
+        existing_races = []
+    if market_scope in {"JRA", "NAR"}:
+        existing_races = [
+            race
+            for race in existing_races
+            if str(race.get("market") or "").upper() == market_scope
+        ]
+    if explicit_race_ids:
+        explicit_id_set = set(explicit_race_ids)
+        existing_races = [
+            race for race in existing_races if str(race.get("id") or "") in explicit_id_set
+        ]
+
+    if live_odds_rows and existing_races:
         existing_updates = _apply_live_odds_to_races(existing_races, live_odds_rows)
         if existing_updates:
             race_ids_from_rows = {str(race.get("id") or "") for race in race_dicts}
@@ -489,6 +524,9 @@ def ingest_netkeiba_window(
                 race for race in existing_races if str(race.get("id") or "") not in race_ids_from_rows
             )
             odds_updates += existing_updates
+
+    if existing_races and race_dicts:
+        race_dicts = _collapse_duplicate_races([*existing_races, *race_dicts])
 
     _attach_live_feature_deltas(race_dicts, start_date, end_date)
     races_stored = upsert_race_cards(race_dicts)
