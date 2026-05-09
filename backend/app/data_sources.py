@@ -403,17 +403,15 @@ def _horse_weight_diff_value(row: dict[str, Any], horse_weight: int | None) -> i
     return value
 
 
-def _race_payout_items(row: dict[str, Any]) -> list[dict[str, Any]]:
-    raw = row.get("payouts_json")
-    if not raw:
-        return []
-    try:
-        payload = json.loads(str(raw))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return []
-    if not isinstance(payload, list):
-        return []
+def _payout_popularity_limit(bet_type: str) -> int:
+    if bet_type in {"win", "place"}:
+        return 30
+    if bet_type == "bracket_quinella":
+        return 36
+    return 10000
 
+
+def _sanitize_payout_items(payload: list[Any]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     seen: set[tuple[str, str, float]] = set()
     for item in payload:
@@ -431,7 +429,7 @@ def _race_payout_items(row: dict[str, Any]) -> list[dict[str, Any]]:
         if key in seen:
             continue
         seen.add(key)
-        popularity_limit = 30 if bet_type in {"win", "place"} else 36 if bet_type == "bracket_quinella" else 10000
+        popularity_limit = _payout_popularity_limit(bet_type)
         popularity = _int_value({"popularity": item.get("popularity")}, "popularity", 0) or None
         if popularity is not None and not 1 <= popularity <= popularity_limit:
             popularity = None
@@ -444,6 +442,19 @@ def _race_payout_items(row: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return items
+
+
+def _race_payout_items(row: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = row.get("payouts_json")
+    if not raw:
+        return []
+    try:
+        payload = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    return _sanitize_payout_items(payload)
 
 
 def _runner_number(row: dict[str, Any], fallback: int) -> int:
@@ -1066,7 +1077,7 @@ def _merge_duplicate_race_payloads(first: dict[str, Any], second: dict[str, Any]
     merged["sourceCheckedAt"] = max(str(merged.get("sourceCheckedAt") or ""), str(result.get("sourceCheckedAt") or ""))
     result_payouts = result.get("payouts") if isinstance(result.get("payouts"), list) else []
     if result_payouts:
-        merged["payouts"] = result_payouts
+        merged["payouts"] = _sanitize_payout_items(result_payouts)
 
     finish_tags = _runner_finish_tags(result)
     payout_by_number = {
