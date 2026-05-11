@@ -178,6 +178,50 @@ def _race_card_entries(start_date: str, end_date: str) -> list[dict[str, Any]]:
     return schedule_entries_from_race_dicts([race.model_dump(mode="json") for race in races])
 
 
+def _race_card_metadata_entries(start_date: str, end_date: str) -> list[dict[str, Any]]:
+    try:
+        from .race_storage import fetch_race_card_schedule_rows
+
+        rows = fetch_race_card_schedule_rows(start_date, end_date)
+    except Exception:
+        return []
+
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    race_numbers: dict[tuple[str, str, str], set[int]] = defaultdict(set)
+    for row in rows:
+        entry_date = _clean_text(row.get("race_date") or row.get("date"))
+        market = _market(row.get("market"))
+        venue = _clean_text(row.get("venue"))
+        if not entry_date or not market or not venue:
+            continue
+        key = (entry_date, market, venue)
+        current = grouped.setdefault(
+            key,
+            {
+                "date": entry_date,
+                "market": market,
+                "venue": venue,
+                "raceCount": 0,
+                "gradeRaces": [],
+                "source": "race_cards",
+                "sourceCheckedAt": row.get("source_checked_at"),
+            },
+        )
+        try:
+            race_no = int(row.get("race_no") or 0)
+        except (TypeError, ValueError):
+            race_no = 0
+        if race_no > 0:
+            race_numbers[key].add(race_no)
+        checked_at = row.get("source_checked_at")
+        if checked_at and str(checked_at) > str(current.get("sourceCheckedAt") or ""):
+            current["sourceCheckedAt"] = checked_at
+
+    for key, numbers in race_numbers.items():
+        grouped[key]["raceCount"] = len(numbers)
+    return list(grouped.values())
+
+
 def _merge_entries(*entry_sets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: dict[tuple[str, str, str], dict[str, Any]] = {}
     for entries in entry_sets:
@@ -242,10 +286,11 @@ def _merge_entries(*entry_sets: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def get_race_schedule(start_date: str | None = None, end_date: str | None = None) -> list[dict[str, Any]]:
     start, end = _default_window(start_date, end_date)
-    # Priority: seed fallback < Supabase schedule rows < actual race cards.
+    # Priority: seed fallback < stored schedule < light race-card metadata < full race-card payloads.
     return _merge_entries(
         _load_seed_entries(start, end),
         _stored_entries(start, end),
+        _race_card_metadata_entries(start, end),
         _race_card_entries(start, end),
     )
 

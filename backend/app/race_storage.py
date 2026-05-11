@@ -102,6 +102,26 @@ def fetch_race_cards(start_date: str, end_date: str) -> list[dict[str, Any]]:
     return result
 
 
+def fetch_race_card_schedule_rows(start_date: str, end_date: str) -> list[dict[str, Any]]:
+    if _supabase_config() is None:
+        return []
+    cache_key = (f"{RACE_CARD_TABLE}:schedule", start_date, end_date)
+    cached = _cache_get(_RACE_SCHEDULE_CACHE, cache_key)
+    if cached is not None:
+        return cached
+
+    query = (
+        "select=race_date,venue,race_no,status,market,source_checked_at"
+        f"&race_date=gte.{start_date}"
+        f"&race_date=lte.{end_date}"
+        "&order=race_date.asc,market.asc,venue.asc,race_no.asc"
+    )
+    rows = _supabase_request(f"{RACE_CARD_TABLE}?{query}") or []
+    result = [row for row in rows if isinstance(row, dict)]
+    _cache_set(_RACE_SCHEDULE_CACHE, cache_key, result)
+    return result
+
+
 def upsert_race_cards(races: list[dict[str, Any]]) -> int:
     if _supabase_config() is None:
         return 0
