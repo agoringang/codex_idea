@@ -1144,14 +1144,20 @@ h1 {
   position: relative;
   display: grid;
   gap: 4px;
+  padding: 3px 0;
+  border-radius: 12px;
+  background:
+    linear-gradient(#e8eff7, #e8eff7) left 3px / 100% 7px no-repeat,
+    linear-gradient(#e8eff7, #e8eff7) left calc(100% - 10px) / 100% 7px no-repeat;
 }
 
 .chart-bars span,
 .chart-bars em {
   display: block;
-  height: 7px;
+  height: 8px;
   min-width: 3px;
   border-radius: 999px;
+  box-shadow: 0 2px 7px rgba(15, 23, 42, 0.08);
 }
 
 .chart-bars span {
@@ -1174,6 +1180,197 @@ h1 {
 .chart-values b {
   font-size: 0.7rem;
   font-weight: 860;
+}
+
+.chart-values small {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 860;
+}
+
+.chart-values small.positive {
+  color: var(--green);
+}
+
+.chart-values small.negative {
+  color: var(--red);
+}
+
+.graph-guide {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.graph-guide span {
+  padding: 5px 8px;
+  border: 1px solid rgba(47, 127, 231, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 860;
+}
+
+.market-nar .graph-guide span {
+  border-color: rgba(43, 140, 104, 0.12);
+}
+
+.visual-insight-panel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(47, 127, 231, 0.12);
+  border-radius: 22px;
+  background:
+    linear-gradient(135deg, rgba(237, 245, 255, 0.86), rgba(255, 255, 255, 0.94)),
+    #fff;
+}
+
+.visual-insight-panel.market-nar {
+  border-color: rgba(43, 140, 104, 0.14);
+  background:
+    linear-gradient(135deg, rgba(236, 251, 244, 0.78), rgba(255, 255, 255, 0.94)),
+    #fff;
+}
+
+.visual-insight-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(220px, 0.8fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.visual-side-stack {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.volatility-chart {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.volatility-chart div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.volatility-chart span,
+.volatility-chart em {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-style: normal;
+  font-weight: 840;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.volatility-chart strong {
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 930;
+}
+
+.volatility-chart i {
+  display: block;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8eff7;
+}
+
+.volatility-chart i span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4f8fff, #ffd166, #e14d61);
+}
+
+.ticket-mix-chart {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.ticket-mix-chart article {
+  display: grid;
+  grid-template-columns: minmax(84px, 0.8fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.ticket-mix-chart div {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.ticket-mix-chart strong,
+.ticket-mix-chart span,
+.ticket-mix-chart b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ticket-mix-chart strong {
+  color: var(--ink);
+  font-size: 0.76rem;
+  font-weight: 900;
+}
+
+.ticket-mix-chart span {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 820;
+}
+
+.ticket-mix-chart i {
+  display: block;
+  min-width: 0;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8eff7;
+}
+
+.ticket-mix-chart i span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--blue), var(--cyan));
+}
+
+.market-nar .ticket-mix-chart i span {
+  background: linear-gradient(90deg, var(--green), var(--cyan));
+}
+
+.ticket-mix-chart b {
+  color: var(--ink);
+  font-size: 0.7rem;
+  font-weight: 900;
+  text-align: right;
 }
 
 .ticket-list,
@@ -1231,9 +1428,9 @@ h1 {
 
 .ticket-list article {
   display: grid;
-  grid-template-columns: minmax(96px, 0.3fr) minmax(0, 1.7fr);
-  gap: 10px;
-  padding: 12px;
+  grid-template-columns: minmax(86px, 0.24fr) minmax(0, 1fr);
+  gap: 8px;
+  padding: 10px;
   border: 1px solid var(--line);
   border-radius: 24px;
   background: rgba(255, 255, 255, 0.9);
@@ -1252,6 +1449,25 @@ h1 {
   background:
     linear-gradient(135deg, rgba(234, 248, 241, 0.96), rgba(255, 255, 255, 0.95)),
     #fff;
+}
+
+.ticket-list article.probability-hot {
+  border-color: rgba(10, 143, 105, 0.26);
+  background:
+    linear-gradient(135deg, rgba(232, 250, 242, 0.98), rgba(255, 255, 255, 0.95)),
+    #fff;
+}
+
+.ticket-list article.probability-solid {
+  border-color: rgba(47, 127, 231, 0.18);
+}
+
+.ticket-list article.probability-watch {
+  border-color: rgba(216, 169, 40, 0.18);
+}
+
+.ticket-list article.probability-long {
+  border-color: rgba(225, 77, 97, 0.14);
 }
 
 .ticket-list article.disabled {
@@ -1275,7 +1491,7 @@ h1 {
 .ticket-name strong {
   min-width: 0;
   overflow: hidden;
-  font-size: 1rem;
+  font-size: 0.96rem;
   font-weight: 880;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1371,15 +1587,88 @@ h1 {
 
 .ticket-data {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 7px;
 }
 
 .ticket-data div {
   min-width: 0;
-  padding: 9px;
+  padding: 8px;
   border-radius: 18px;
   background: #f7fbff;
+}
+
+.ticket-mini-graph {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(15, 23, 42, 0.05);
+  border-radius: 17px;
+  background: rgba(248, 251, 255, 0.72);
+}
+
+.ticket-mini-graph span {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) 58px;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.ticket-mini-graph b,
+.ticket-mini-graph strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ticket-mini-graph b {
+  color: var(--muted);
+}
+
+.ticket-mini-graph strong {
+  color: var(--ink);
+  text-align: right;
+}
+
+.ticket-mini-graph i {
+  display: block;
+  height: 8px;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8eff7;
+}
+
+.ticket-mini-graph em {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--blue), var(--cyan));
+}
+
+.market-nar .ticket-mini-graph em {
+  background: linear-gradient(90deg, var(--green), var(--cyan));
+}
+
+.ticket-mini-graph span:nth-child(2) em {
+  background: linear-gradient(90deg, rgba(100, 116, 139, 0.72), rgba(100, 116, 139, 0.34));
+}
+
+.ticket-graph-guide {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(47, 127, 231, 0.1);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 820;
+  line-height: 1.45;
 }
 
 .ticket-reasons {
@@ -3671,7 +3960,9 @@ h1 {
 	  .ticket-data,
 	  .settled-ticket-metrics,
 	  .loading-banner,
+	  .visual-insight-grid,
 	  .probability-chart article,
+	  .ticket-mix-chart article,
 	  .results-hero,
 	  .result-note-strip,
 	  .runner-toolbar {
@@ -3688,6 +3979,22 @@ h1 {
 
   .decision-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ticket-list article {
+    grid-template-columns: minmax(72px, 0.28fr) minmax(0, 1fr);
+  }
+
+  .ticket-data {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .ticket-mini-graph span {
+    grid-template-columns: 52px minmax(0, 1fr) 52px;
+  }
+
+  .ticket-mix-chart article {
+    grid-template-columns: minmax(78px, 0.8fr) minmax(0, 1fr) auto;
   }
 
   .hit-payout-card {

@@ -2680,12 +2680,12 @@ function evaluateBettingHeat({
 }
 
 export default function Home() {
-  const initialUrl = readUrlState();
-  const [activeTab, setActiveTab] = useState<ViewTab>(initialUrl.tab ?? "predict");
-  const [selectedRaceId, setSelectedRaceId] = useState(initialUrl.race ?? "");
-  const [selectedDate, setSelectedDate] = useState(initialUrl.date ?? INITIAL_CALENDAR_DATE);
-  const [selectedVenue, setSelectedVenue] = useState(initialUrl.venue ?? "");
-  const [monthAnchor, setMonthAnchor] = useState(monthStart(initialUrl.month ?? initialUrl.date ?? INITIAL_CALENDAR_DATE));
+  const [activeTab, setActiveTab] = useState<ViewTab>("predict");
+  const [selectedRaceId, setSelectedRaceId] = useState("");
+  const [selectedDate, setSelectedDate] = useState(INITIAL_CALENDAR_DATE);
+  const [selectedVenue, setSelectedVenue] = useState("");
+  const [monthAnchor, setMonthAnchor] = useState(monthStart(INITIAL_CALENDAR_DATE));
+  const [urlStateReady, setUrlStateReady] = useState(false);
   const [todayDate, setTodayDate] = useState(INITIAL_CALENDAR_DATE);
   const [apiRaces, setApiRaces] = useState<Race[]>([]);
   const [apiHistory, setApiHistory] = useState<HistoricalPrediction[]>([]);
@@ -2801,11 +2801,13 @@ export default function Home() {
       const urlState = readUrlState();
       const centerDate = todayAtJst();
       const focusDate = urlState.date ?? centerDate;
+      setActiveTab(urlState.tab ?? "predict");
       setTodayDate(centerDate);
       setSelectedDate(focusDate);
       setMonthAnchor(monthStart(urlState.month ?? focusDate));
       setSelectedVenue(urlState.venue ?? "");
       setSelectedRaceId(urlState.race ?? "");
+      setUrlStateReady(true);
       setDataPhase("today");
       const historyStartDate = addDays(centerDate, -30);
       const nearFutureEndDate = addDays(centerDate, 3);
@@ -2872,6 +2874,9 @@ export default function Home() {
     if (typeof window === "undefined") {
       return;
     }
+    if (!urlStateReady) {
+      return;
+    }
     const nextUrl = buildUrlFromState({
       tab: activeTab,
       date: selectedDate,
@@ -2883,7 +2888,7 @@ export default function Home() {
     if (nextUrl !== currentUrl) {
       window.history.replaceState(null, "", nextUrl);
     }
-  }, [activeTab, monthAnchor, selectedDate, selectedRaceId, selectedVenue]);
+  }, [activeTab, monthAnchor, selectedDate, selectedRaceId, selectedVenue, urlStateReady]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -3318,7 +3323,7 @@ export default function Home() {
             onDateSelect={selectDate}
             onMarketFilter={setMarketFilter}
             onMonthChange={setMonthAnchor}
-            onRaceSelect={(raceId) => selectRace(raceId, selectedDate === todayDate ? "predict" : "calendar")}
+            onRaceSelect={(raceId) => selectRace(raceId, "calendar")}
             onStatusFilter={setStatusFilter}
             onVenueSelect={setSelectedVenue}
             selectedDate={selectedDate}
@@ -3391,7 +3396,7 @@ function QuickJumpBar({
     },
     {
       key: "hit",
-      label: "的中済み",
+      label: "🎯 的中",
       value: hitHistory ? `${hitHistory.venue} ${hitRecommendationText(hitHistory)}` : "なし",
       disabled: !hitHistory,
       onClick: () => hitHistory && onRaceSelect(hitHistory.id, "calendar"),
@@ -3554,6 +3559,7 @@ function PredictPanel({
             <Metric label="方式" value="自動選択" />
           </div>
           <TicketOptimizationSummary tickets={tickets} heat={bettingHeat} />
+          <PredictionVisualPanel projections={projections} race={race} tickets={tickets} />
           <TicketList projections={projections} race={race} tickets={tickets} />
         </section>
       )}
@@ -3628,6 +3634,97 @@ function TicketOptimizationSummary({ heat, tickets }: { heat: BettingHeat; ticke
         <span>3連系</span>
         <strong>{tripleTickets[0] ?? "生成待ち"}</strong>
         <em>{tripleTickets[1] ?? "レース条件で方式変更"}</em>
+      </div>
+    </section>
+  );
+}
+
+function PredictionVisualPanel({
+  projections,
+  race,
+  tickets,
+}: {
+  projections: RunnerProjection[];
+  race: Race;
+  tickets: TicketProjection[];
+}) {
+  const topRunners = projections.slice(0, 5);
+  const maxWin = Math.max(0.01, ...topRunners.map((runner) => runner.winProbability));
+  const maxPlace = Math.max(0.01, ...topRunners.map((runner) => runner.placeProbability));
+  const totalTickets = Math.max(1, tickets.reduce((sum, ticket) => sum + ticket.tickets, 0));
+  const volatility = raceVolatilityProfile(race, projections);
+
+  if (topRunners.length === 0 && tickets.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className={`visual-insight-panel ${marketClass(race.market)}`} aria-label="予想分布">
+      <div className="section-heading compact">
+        <h2>予想分布</h2>
+        <span>勝率 / 3着内 / 荒れ度 / 券種配分</span>
+      </div>
+      <div className="graph-guide" aria-label="グラフの読み方">
+        <span>青=勝率</span>
+        <span>緑=3着内率</span>
+        <span>±=人気とのズレ</span>
+        <span>長い棒ほど強いシグナル</span>
+      </div>
+      <div className="visual-insight-grid">
+        <div className="probability-chart" aria-label="上位馬の確率分布">
+          {topRunners.map((runner, index) => {
+            const marketGap = runner.winProbability - marketWinProbability(race, runner.number);
+            return (
+              <article key={runner.number}>
+                <div className="chart-label">
+                  <strong>{index + 1}. {runner.number} {runner.name}</strong>
+                  <span>{runnerOddsMeta(runner, race)}</span>
+                </div>
+                <div className="chart-bars" aria-hidden="true">
+                  <span style={{ width: `${Math.max(3, (runner.winProbability / maxWin) * 100)}%` }} />
+                  <em style={{ width: `${Math.max(3, (runner.placeProbability / maxPlace) * 100)}%` }} />
+                </div>
+                <div className="chart-values">
+                  <b>勝 {formatPercent(runner.winProbability)}</b>
+                  <b>3内 {formatPercent(runner.placeProbability)}</b>
+                  <small className={marketGap >= 0 ? "positive" : "negative"}>
+                    人気差 {formatSignedPercent(marketGap, 1)}
+                  </small>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+        <div className="visual-side-stack">
+          <div className="volatility-chart" aria-label={`荒れ度 ${Math.round(volatility.score)}`}>
+            <div>
+              <span>荒れ度メーター</span>
+              <strong>{volatility.label}</strong>
+            </div>
+            <i aria-hidden="true">
+              <span style={{ width: `${Math.max(4, Math.min(100, volatility.score))}%` }} />
+            </i>
+            <em>{volatility.reasons.slice(0, 2).join(" / ")}</em>
+          </div>
+          <div className="ticket-mix-chart" aria-label="券種別の点数配分">
+            {tickets.slice(0, PUBLIC_BET_TYPE_GUIDES.length).map((ticket) => {
+              const share = ticket.tickets / totalTickets;
+              return (
+                <article key={`${ticket.type}-${ticket.selection}`}>
+                  <div>
+                    <strong>{ticket.type}</strong>
+                    <span>{ticketCompactMethod(ticket)}</span>
+                  </div>
+                  <i aria-hidden="true">
+                    <span style={{ width: `${Math.max(4, share * 100)}%` }} />
+                  </i>
+                  <b>{ticket.tickets}点</b>
+                </article>
+              );
+            })}
+            {tickets.length === 0 && <div className="empty-inline">買い目生成待ち</div>}
+          </div>
+        </div>
       </div>
     </section>
   );
@@ -3797,6 +3894,36 @@ function ticketReasonRows(ticket: TicketProjection, race: Race, projections: Run
   ];
 }
 
+function ticketRecommendationLabel(ticket: TicketProjection, race: Race, projections: RunnerProjection[]) {
+  const anchor = ticketAnchorRunner(ticket, projections);
+  if (!anchor) {
+    return "情報不足";
+  }
+  if (ticket.edge >= 0.12 && anchor.placeProbability >= 0.45) {
+    return "強め";
+  }
+  if (ticket.edge >= 0.04) {
+    return "候補";
+  }
+  if (ticket.probability >= 0.5) {
+    return "保険寄り";
+  }
+  return "控えめ";
+}
+
+function ticketProbabilityTone(ticket: TicketProjection) {
+  if (ticket.probability >= 0.55) {
+    return "hot";
+  }
+  if (ticket.probability >= 0.32) {
+    return "solid";
+  }
+  if (ticket.probability >= 0.16) {
+    return "watch";
+  }
+  return "long";
+}
+
 function TicketList({
   projections,
   race,
@@ -3826,6 +3953,7 @@ function TicketList({
     }
     await navigator.clipboard?.writeText(text);
   }
+  const maxTicketCount = Math.max(1, ...tickets.map((ticket) => ticket.tickets));
 
   return (
     <div className="ticket-list">
@@ -3854,13 +3982,13 @@ function TicketList({
             </article>
           );
         }
-        const reasons = ticketReasonRows(ticket, race, projections);
         const oddsReady = raceHasUsableWinOdds(race);
         const oddsLabel = ticketOddsLabel(ticket, oddsReady);
-        const payoutLabel = ticketPayoutPer100Label(ticket, oddsReady);
         const isPrimary = tickets[0]?.type === ticket.type && tickets[0]?.selection === ticket.selection;
+        const recommendation = ticketRecommendationLabel(ticket, race, projections);
+        const probabilityTone = ticketProbabilityTone(ticket);
         return (
-          <article className={isPrimary ? "primary" : ""} key={`${guide.id}-${ticket.selection}`}>
+          <article className={[isPrimary ? "primary" : "", `probability-${probabilityTone}`].filter(Boolean).join(" ")} key={`${guide.id}-${ticket.selection}`}>
             <div className="ticket-name">
               <span>{isPrimary ? "最優先" : guide.summary}</span>
               <strong>{ticket.type}</strong>
@@ -3868,31 +3996,38 @@ function TicketList({
             </div>
             <div className="ticket-body">
               <TicketLegs legs={ticket.legs} />
-	              <div className="ticket-meta">
-	                <span>{ticket.tickets}通り</span>
-	                <span>{oddsLabel}</span>
-	              </div>
-	              <div className="ticket-actions">
-	                <button onClick={() => copyTicket(ticket)} type="button">コピー</button>
-	                <button onClick={() => shareTicket(ticket)} type="button">共有</button>
-	              </div>
-	              <div className="ticket-data">
-                <Value label="的中率" value={formatPercent(ticket.probability)} />
-                <Value label="券オッズ" value={oddsLabel} />
-                <Value label="予想点数" value={`${ticket.tickets}点`} />
+              <div className="ticket-meta">
+                <span>{ticket.tickets}通り</span>
+                <span>{oddsLabel}</span>
               </div>
-              <div className="ticket-reasons">
-                {reasons.map((reason) => (
-                  <span key={reason.label}>
-                    <b>{reason.label}</b>
-                    {reason.value}
-                  </span>
-                ))}
+              <div className="ticket-actions">
+                <button onClick={() => copyTicket(ticket)} type="button">コピー</button>
+                <button onClick={() => shareTicket(ticket)} type="button">共有</button>
+              </div>
+              <div className="ticket-data">
+                <Value label="予想形" value={ticketCompactMethod(ticket)} />
+                <Value label="券オッズ" value={oddsLabel} />
+                <Value label="推奨度" value={recommendation} />
+              </div>
+              <div className="ticket-mini-graph" aria-label={`${ticket.type} の的中率と点数バランス`}>
+                <span>
+                  <b>的中率</b>
+                  <i aria-hidden="true"><em style={{ width: `${Math.max(4, Math.min(100, ticket.probability * 100))}%` }} /></i>
+                  <strong>{formatPercent(ticket.probability)}</strong>
+                </span>
+                <span>
+                  <b>点数</b>
+                  <i aria-hidden="true"><em style={{ width: `${Math.max(4, Math.min(100, (ticket.tickets / maxTicketCount) * 100))}%` }} /></i>
+                  <strong>{ticket.tickets}点</strong>
+                </span>
               </div>
             </div>
           </article>
         );
       })}
+      <p className="ticket-graph-guide">
+        横棒は「当たりやすさ」と「買い広げ量」です。的中率が高い券ほどカードを強く、点数が多い券ほど2本目の棒を長く表示します。
+      </p>
     </div>
   );
 }
@@ -3971,7 +4106,7 @@ function SettledTicketList({
               </div>
               <div className="settled-ticket-foot">
                 <span>{ticket ? `${ticketCompactMethod(ticket)} / ${formatYen(result?.stake ?? ticket.stake)}投資` : publicStrategyLabel(result?.strategy)}</span>
-                <b>{result?.winningTickets ? `的中 ${result.winningTickets}点` : result?.refundedTickets ? `返還 ${result.refundedTickets}点` : statusLabel}</b>
+                <b>{result?.winningTickets ? `🎯 ${result.winningTickets}点` : result?.refundedTickets ? `返還 ${result.refundedTickets}点` : statusLabel}</b>
               </div>
             </article>
           );
@@ -4098,7 +4233,7 @@ function RacePicker({
               onClick={() => onRaceSelect(item.id)}
               type="button"
             >
-              {history?.hit && <em aria-label="的中">的中</em>}
+              {history?.hit && <em aria-label="的中">🎯</em>}
               <strong>{raceNumberValue(item)}R</strong>
               <span>{raceStartLabel(item)}</span>
               <i>{publicMarketShortLabel(item.market)} / {raceStatusLabel(item)}</i>
@@ -4311,12 +4446,12 @@ function RacePayoutGrid({
               key={`${payout.betType}-${payout.selection}-${index}`}
               role="row"
             >
-              <span role="cell">{highlighted ? `的中 ${currentType}` : currentType}</span>
+              <span role="cell">{highlighted ? `🎯 ${currentType}` : currentType}</span>
               <strong role="cell">{officialSelectionText(payout)}</strong>
               <b role="cell">{numberFormatter.format(Math.round(payout.payoutYen))}円</b>
               <em role="cell">
                 {highlighted
-                  ? `的中${validPayoutPopularity(payout.popularity, payout.betType) ? ` / ${payoutPopularityLabel(payout)}` : ""}`
+                  ? `🎯${validPayoutPopularity(payout.popularity, payout.betType) ? ` / ${payoutPopularityLabel(payout)}` : ""}`
                   : payoutPopularityLabel(payout)}
               </em>
             </div>
@@ -4337,7 +4472,7 @@ function RacePayoutGrid({
               className={highlighted ? "hit" : ""}
               key={`card-${payout.betType}-${payout.selection}-${index}`}
             >
-              <span>{highlighted ? "的中払戻" : currentType}</span>
+              <span>{highlighted ? "🎯 的中" : currentType}</span>
               <strong>{currentType} {officialSelectionText(payout)}</strong>
               <b>{numberFormatter.format(Math.round(payout.payoutYen))}円</b>
               <em>{payoutPopularityLabel(payout)}</em>
@@ -4483,9 +4618,9 @@ function CalendarPanel({
   const selectedTickets = selectedApiPrediction ? tickets : [];
   function openCalendarRace(raceId: string) {
     onRaceSelect(raceId);
-    window.requestAnimationFrame(() => {
+    window.setTimeout(() => {
       document.getElementById("calendar-race-detail")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
+    }, 60);
   }
 
   return (
@@ -4531,7 +4666,7 @@ function CalendarPanel({
                 {day.narCount > 0 ? `地方${day.narCount}` : ""}
               </small>
             )}
-            {day.hitCount > 0 && <em>的中</em>}
+            {day.hitCount > 0 && <em aria-label="的中">🎯</em>}
           </button>
         ))}
       </div>
@@ -4626,6 +4761,7 @@ function CalendarRaceDetail({
         </>
       ) : (
         <>
+          <PredictionVisualPanel projections={projections} race={race} tickets={tickets} />
           {tickets.length > 0 && (
             <section className="bet-plan-card compact-calendar">
               <div className="section-heading compact">
@@ -4766,7 +4902,7 @@ function ResultsPanel({
         {daySummary.map((item) => (
           <article className={item.hits > 0 ? "hit" : ""} key={item.date}>
             <strong>{item.date.slice(5)}</strong>
-            <span>{item.hits}/{item.total}R</span>
+            <span>{item.hits > 0 ? `🎯 ${item.hits}` : "0"}/{item.total}R</span>
             <b>{formatPercent(item.roi, 0)}</b>
           </article>
         ))}
@@ -4781,6 +4917,13 @@ function ResultsPanel({
               <b>{formatPercent(item.roi, 0)}</b>
             </article>
           ))}
+        </div>
+      )}
+      {daySummary.length > 0 && (
+        <div className="graph-guide results" aria-label="実績グラフの読み方">
+          <span>棒=日別回収率</span>
+          <span>🎯=的中レース数</span>
+          <span>参考データは集計外</span>
         </div>
       )}
 
