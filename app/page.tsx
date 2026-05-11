@@ -3275,6 +3275,33 @@ export default function Home() {
     }
   }
 
+  function selectVenueForDate(venue: string, date: string, nextTab: ViewTab) {
+    const filteredRace = availableRaces
+      .filter((item) => item.date === date && item.venue === venue && raceMatchesFilters(item, marketFilter, statusFilter))
+      .sort(sortRaceCards)[0];
+    const fallbackRace = availableRaces
+      .filter((item) => item.date === date && item.venue === venue)
+      .sort(sortRaceCards)[0];
+    const nextRace = filteredRace ?? fallbackRace;
+
+    pushUrlState({
+      tab: nextTab,
+      date,
+      venue,
+      race: nextRace?.id ?? "",
+      month: monthStart(date),
+    });
+    setSelectedDate(date);
+    setSelectedVenue(venue);
+    setMonthAnchor(monthStart(date));
+    setActiveTab(nextTab);
+    if (nextRace) {
+      setSelectedRaceId(nextRace.id);
+    } else {
+      setSelectedRaceId("");
+    }
+  }
+
   async function reloadRaceWindow(centerDate: string) {
     const [racePayload, historyPayload, schedulePayload] = await Promise.all([
       fetchRaceRangeFromApi(centerDate, centerDate),
@@ -3443,7 +3470,7 @@ export default function Home() {
             onRaceSelect={(raceId) => selectRace(raceId)}
             onMarketFilter={setMarketFilter}
             onStatusFilter={setStatusFilter}
-            onVenueSelect={setSelectedVenue}
+            onVenueSelect={(venue) => selectVenueForDate(venue, todayDate, "predict")}
             projections={projections}
             race={predictionRace}
             historyByRaceId={historyByRaceId}
@@ -3473,7 +3500,7 @@ export default function Home() {
             onMonthChange={setMonthAnchor}
             onRaceSelect={(raceId) => selectRace(raceId, "calendar")}
             onStatusFilter={setStatusFilter}
-            onVenueSelect={setSelectedVenue}
+            onVenueSelect={(venue) => selectVenueForDate(venue, selectedDate, "calendar")}
             selectedDate={selectedDate}
             selectedDateRaces={filteredSelectedDateRaces}
             selectedRaceId={selectedRaceId}
