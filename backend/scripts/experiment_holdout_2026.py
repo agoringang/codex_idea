@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from itertools import combinations, permutations
+from itertools import combinations, permutations, product
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +64,23 @@ MARKET_DIRECT_FEATURES = {
     "market_place_probability",
     "odds_rank",
     "odds_delta",
+    "odds_delta_5m",
+    "odds_delta_15m",
+    "odds_volatility",
     "ticket_pool_share",
+    "log_market_odds",
+    "odds_to_favorite",
+    "favorite_market_odds",
+    "market_top3_probability",
+    "market_entropy",
+    "market_rank_pct",
+}
+
+MARKET_BASELINE_SUPPORT_FEATURES = {
+    "runner_number",
+    "bracket",
+    "field_size",
+    *MARKET_DIRECT_FEATURES,
 }
 
 
@@ -200,6 +217,71 @@ def _jra30_variants(base_specs: list[ModelSpec], *, include_hgb: bool) -> list[M
     return variants
 
 
+def _objective_value_variants(
+    base_specs: list[ModelSpec],
+    *,
+    include_hgb: bool,
+    limit: int,
+) -> list[ModelSpec]:
+    variants: list[ModelSpec] = []
+
+    # These are deliberately fundamental-only probability models. The market
+    # blend is optimized inside calibrate_and_blend, so we do not retrain the
+    # same base model just to test another odds weight cap.
+    for alpha in (1e-3, 3e-4, 1e-4, 3e-5, 1e-5, 3e-6):
+        for weighted in (False, True):
+            variants.append(
+                ModelSpec(
+                    name=(
+                        f"sgd_{'weighted' if weighted else 'unweighted'}_"
+                        f"alpha_{alpha:g}_fundamental"
+                    ),
+                    family="sgd",
+                    alpha=alpha,
+                    use_positive_weight=weighted,
+                    feature_mode="fundamental",
+                )
+            )
+
+    if include_hgb:
+        hgb_grid = [
+            (0.03, 15, 0.03, False),
+            (0.03, 31, 0.03, True),
+            (0.04, 31, 0.01, False),
+            (0.04, 63, 0.01, True),
+            (0.05, 15, 0.08, False),
+            (0.05, 31, 0.03, True),
+            (0.06, 31, 0.08, False),
+            (0.06, 63, 0.03, True),
+            (0.08, 15, 0.12, False),
+            (0.08, 31, 0.12, True),
+            (0.10, 15, 0.18, False),
+            (0.10, 31, 0.18, True),
+            (0.12, 15, 0.24, False),
+            (0.12, 31, 0.24, True),
+            (0.03, 63, 0.08, False),
+            (0.05, 63, 0.12, True),
+            (0.02, 31, 0.03, False),
+            (0.02, 63, 0.03, True),
+        ]
+        for index, (learning_rate, leaves, l2, weighted) in enumerate(hgb_grid, start=1):
+            variants.append(
+                ModelSpec(
+                    name=(
+                        f"hgb_{index:02d}_lr{learning_rate:g}_leaf{leaves}_"
+                        f"l2{l2:g}_{'weighted' if weighted else 'unweighted'}_fundamental"
+                    ),
+                    family="hgb",
+                    use_positive_weight=weighted,
+                    learning_rate=learning_rate,
+                    max_leaf_nodes=leaves,
+                    l2_regularization=l2,
+                    feature_mode="fundamental",
+                )
+            )
+    return variants[:limit]
+
+
 def model_specs(include_hgb: bool, zoo_profile: str = "default") -> list[ModelSpec]:
     specs = [
         ModelSpec("sgd_weighted_alpha_1e-4", "sgd", alpha=1e-4, use_positive_weight=True),
@@ -220,16 +302,27 @@ def model_specs(include_hgb: bool, zoo_profile: str = "default") -> list[ModelSp
         )
     if zoo_profile == "jra30":
         return _jra30_variants(specs, include_hgb=include_hgb)[:30]
+    if zoo_profile == "objective30":
+        return _objective_value_variants(specs, include_hgb=include_hgb, limit=30)
+    if zoo_profile == "objective50":
+        return _objective_value_variants(specs, include_hgb=include_hgb, limit=50)
     return specs
 
 
 def load_holdout_frame(train_csv: Path, holdout_csv: Path) -> pd.DataFrame:
+    print(f"[load] train_csv={train_csv}", flush=True)
     train = load_training_frame(train_csv)
+    print(f"[load] holdout_csv={holdout_csv}", flush=True)
     holdout = load_training_frame(holdout_csv)
+    print(f"[prepare] rows train={len(train)} holdout={len(holdout)}", flush=True)
     frame = pd.concat([train, holdout], ignore_index=True, sort=False)
     frame = prepare_frame(frame)
     frame["finish_position"] = pd.to_numeric(frame["finish_position"], errors="coerce")
     frame["is_top2"] = (frame["finish_position"] <= 2).astype("int8")
+    print(
+        f"[prepare] done rows={len(frame)} races={frame['race_id'].nunique()} columns={len(frame.columns)}",
+        flush=True,
+    )
     return frame
 
 
@@ -587,6 +680,25 @@ def choose_best(
     return best
 
 
+def sort_candidate_key(
+    item: dict[str, Any],
+    *,
+    favorite_rate_cap: float,
+    favorite_penalty: float,
+) -> tuple[float, float, float, float]:
+    selection = model_selection_utility(
+        item,
+        favorite_rate_cap=favorite_rate_cap,
+        favorite_penalty=favorite_penalty,
+    )
+    return (
+        selection["utility"],
+        -selection["favorite_rate"],
+        -item["holdout_2026"]["brier"],
+        -item["holdout_2026"]["calibration"]["ece"],
+    )
+
+
 def legacy_choose_best(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     def key(item: dict[str, Any]) -> tuple[float, float, float, float]:
         rank = item.get("rank_holdout_2026", {})
@@ -714,13 +826,20 @@ def apply_feature_mode(
     categorical_features: list[str],
     feature_mode: str,
 ) -> tuple[list[str], list[str], list[str], list[str]]:
-    if feature_mode == "anti_market":
+    if feature_mode in {"fundamental", "anti_market"}:
         removed = [feature for feature in features if feature in MARKET_DIRECT_FEATURES]
         numeric_features = [
             feature for feature in numeric_features if feature not in MARKET_DIRECT_FEATURES
         ]
         features = [feature for feature in features if feature not in MARKET_DIRECT_FEATURES]
         return features, numeric_features, categorical_features, removed
+    if feature_mode == "market_only":
+        kept = [feature for feature in features if feature in MARKET_BASELINE_SUPPORT_FEATURES]
+        numeric_features = [
+            feature for feature in numeric_features if feature in MARKET_BASELINE_SUPPORT_FEATURES
+        ]
+        removed = [feature for feature in features if feature not in set(kept)]
+        return kept, numeric_features, [], removed
     if feature_mode == "odds_rank_only":
         direct_odds = {
             "market_odds",
@@ -835,6 +954,63 @@ def unique_gates(rows: list[dict[str, int | float]]) -> list[int]:
     return gates
 
 
+def strategy_int(strategy: str, prefix: str, default: int) -> int:
+    if not strategy.startswith(prefix):
+        return default
+    try:
+        return int(strategy.removeprefix(prefix).split("_", 1)[0])
+    except (TypeError, ValueError):
+        return default
+
+
+def ticket_strategy_family(strategy: str) -> str:
+    if strategy.startswith("formation_"):
+        return "formation"
+    if strategy.startswith("box_"):
+        return "box"
+    if "multi" in strategy:
+        return "multi"
+    if strategy.startswith("two_axis_"):
+        return "two_axis"
+    if "axis" in strategy:
+        return "axis"
+    if strategy.startswith("top"):
+        return strategy
+    return strategy
+
+
+def ticket_strategy_label(bet_type: str, strategy: str) -> str:
+    if strategy.startswith("top"):
+        count = strategy_int(strategy, "top", 2)
+        return "単勝" if count == 1 else f"単勝{count}点"
+    if strategy.startswith("axis_multi_"):
+        count = strategy_int(strategy, "axis_multi_", 4)
+        points = count * 2 if bet_type == "exacta" else math.comb(count, 2) * 6
+        return f"1頭軸マルチ{points}点"
+    if strategy.startswith("axis_"):
+        count = strategy_int(strategy, "axis_", 4)
+        return f"軸流し{count}点"
+    if strategy.startswith("box_"):
+        count = strategy_int(strategy, "box_", 4)
+        return f"{count}頭BOX"
+    if strategy.startswith("one_axis_"):
+        count = strategy_int(strategy, "one_axis_", 5)
+        return f"1頭軸流し{math.comb(count, 2)}点"
+    if strategy.startswith("two_axis_multi_"):
+        count = strategy_int(strategy, "two_axis_multi_", 3)
+        return f"2頭軸マルチ{count * 6}点"
+    if strategy.startswith("two_axis_"):
+        count = strategy_int(strategy, "two_axis_", 3)
+        return f"2頭軸流し{count}点"
+    if strategy.startswith("first_axis_"):
+        count = strategy_int(strategy, "first_axis_", 4)
+        return f"1着軸流し{count * (count - 1)}点"
+    if strategy.startswith("formation_"):
+        shape = strategy.removeprefix("formation_").replace("_", "-")
+        return f"フォーメーション{shape}"
+    return strategy
+
+
 def ticket_entries_for_strategy(
     rows: list[dict[str, int | float]],
     bet_type: str,
@@ -843,35 +1019,59 @@ def ticket_entries_for_strategy(
     numbers = [int(row["number"]) for row in rows]
     gates = unique_gates(rows)
     if bet_type == "win":
-        return [(number,) for number in numbers[:2]]
+        count = strategy_int(strategy, "top", 2)
+        return [(number,) for number in numbers[: max(count, 1)]]
     if bet_type == "bracket_quinella":
-        if strategy == "box":
-            return [tuple(sorted(pair)) for pair in combinations(gates[:4], 2)]
+        if strategy.startswith("box_"):
+            count = strategy_int(strategy, "box_", 4)
+            return [tuple(sorted(pair)) for pair in combinations(gates[:count], 2)]
+        opponent_count = strategy_int(strategy, "axis_", 4)
         axis = gates[0] if gates else 0
-        return [tuple(sorted((axis, gate))) for gate in gates[1:5] if gate != axis]
+        return [tuple(sorted((axis, gate))) for gate in gates[1 : 1 + opponent_count] if gate != axis]
     if bet_type in {"quinella", "wide"}:
-        if strategy == "box":
-            return [tuple(sorted(pair)) for pair in combinations(numbers[:4], 2)]
+        if strategy.startswith("box_"):
+            count = strategy_int(strategy, "box_", 4)
+            return [tuple(sorted(pair)) for pair in combinations(numbers[:count], 2)]
+        opponent_count = strategy_int(strategy, "axis_", 5)
         axis = numbers[0] if numbers else 0
-        return [tuple(sorted((axis, number))) for number in numbers[1:6]]
+        return [tuple(sorted((axis, number))) for number in numbers[1 : 1 + opponent_count]]
     if bet_type == "exacta":
-        if strategy == "box":
-            return [tuple(pair) for pair in permutations(numbers[:4], 2)]
+        if strategy.startswith("box_"):
+            count = strategy_int(strategy, "box_", 4)
+            return [tuple(pair) for pair in permutations(numbers[:count], 2)]
         axis = numbers[0] if numbers else 0
-        opponents = numbers[1:5]
-        return [(axis, number) for number in opponents] + [(number, axis) for number in opponents]
+        opponent_count = strategy_int(
+            strategy,
+            "axis_multi_",
+            strategy_int(strategy, "axis_", 4),
+        )
+        opponents = numbers[1 : 1 + opponent_count]
+        entries = [(axis, number) for number in opponents]
+        if strategy.startswith("axis_multi_"):
+            entries += [(number, axis) for number in opponents]
+        return entries
     if bet_type == "trio":
-        if strategy == "box":
-            return [tuple(sorted(combo)) for combo in combinations(numbers[:5], 3)]
+        if strategy.startswith("box_"):
+            count = strategy_int(strategy, "box_", 5)
+            return [tuple(sorted(combo)) for combo in combinations(numbers[:count], 3)]
         axis = numbers[0] if numbers else 0
-        return [tuple(sorted((axis, *pair))) for pair in combinations(numbers[1:6], 2)]
+        if strategy.startswith("two_axis_"):
+            opponent_count = strategy_int(strategy, "two_axis_", 3)
+            if len(numbers) < 2:
+                return []
+            return [tuple(sorted((numbers[0], numbers[1], number))) for number in numbers[2 : 2 + opponent_count]]
+        opponent_count = strategy_int(strategy, "one_axis_", 5)
+        return [tuple(sorted((axis, *pair))) for pair in combinations(numbers[1 : 1 + opponent_count], 2)]
     if bet_type == "trifecta":
-        if strategy == "box":
-            return [tuple(combo) for combo in permutations(numbers[:4], 3)]
-        if strategy == "formation":
-            first = numbers[:2]
-            second = numbers[:4]
-            third = numbers[:5]
+        if strategy.startswith("box_"):
+            count = strategy_int(strategy, "box_", 4)
+            return [tuple(combo) for combo in permutations(numbers[:count], 3)]
+        if strategy.startswith("formation_"):
+            parts = strategy.removeprefix("formation_").split("_")
+            first_count, second_count, third_count = (int(parts[0]), int(parts[1]), int(parts[2]))
+            first = numbers[:first_count]
+            second = numbers[:second_count]
+            third = numbers[:third_count]
             return [
                 (a, b, c)
                 for a in first
@@ -880,9 +1080,23 @@ def ticket_entries_for_strategy(
                 if len({a, b, c}) == 3
             ]
         axis = numbers[0] if numbers else 0
+        if strategy.startswith("two_axis_multi_"):
+            opponent_count = strategy_int(strategy, "two_axis_multi_", 3)
+            if len(numbers) < 2:
+                return []
+            axis1, axis2 = numbers[0], numbers[1]
+            return [
+                combo
+                for opponent in numbers[2 : 2 + opponent_count]
+                for combo in permutations((axis1, axis2, opponent), 3)
+            ]
+        if strategy.startswith("first_axis_"):
+            opponent_count = strategy_int(strategy, "first_axis_", 4)
+            return [(axis, *pair) for pair in permutations(numbers[1 : 1 + opponent_count], 2)]
+        opponent_count = strategy_int(strategy, "axis_multi_", 4)
         return [
             combo
-            for pair in permutations(numbers[1:5], 2)
+            for pair in permutations(numbers[1 : 1 + opponent_count], 2)
             for combo in ((axis, *pair), (pair[0], axis, pair[1]), (*pair, axis))
         ]
     return []
@@ -910,71 +1124,122 @@ def ticket_strategy_metrics(
         "place_model": "ticket_place_score",
     }
     strategies = {
-        "win": ["top2"],
-        "bracket_quinella": ["axis", "box"],
-        "quinella": ["axis", "box"],
-        "wide": ["axis", "box"],
-        "exacta": ["axis_multi", "box"],
-        "trio": ["axis", "box"],
-        "trifecta": ["axis_multi", "formation", "box"],
-    }
-    labels = {
-        "top2": "上位2頭",
-        "axis": "軸流し",
-        "axis_multi": "1頭軸マルチ",
-        "formation": "フォーメーション",
-        "box": "BOX",
+        "win": ["top1", "top2", "top3"],
+        "bracket_quinella": ["axis_2", "axis_3", "axis_4", "box_3", "box_4"],
+        "quinella": ["axis_2", "axis_3", "axis_5", "box_3", "box_4", "box_5"],
+        "wide": ["axis_2", "axis_3", "axis_5", "box_3", "box_4", "box_5"],
+        "exacta": ["axis_2", "axis_3", "axis_multi_2", "axis_multi_3", "axis_multi_4", "box_3", "box_4"],
+        "trio": ["one_axis_3", "one_axis_4", "one_axis_5", "two_axis_2", "two_axis_3", "box_4", "box_5", "box_6"],
+        "trifecta": [
+            "first_axis_2",
+            "first_axis_3",
+            "first_axis_5",
+            "axis_multi_2",
+            "axis_multi_3",
+            "axis_multi_4",
+            "two_axis_multi_2",
+            "two_axis_multi_3",
+            "formation_1_3_5",
+            "formation_2_3_5",
+            "formation_2_4_6",
+            "box_3",
+            "box_4",
+            "box_5",
+        ],
     }
 
     results: dict[str, list[dict[str, Any]]] = {bet_type: [] for bet_type in TICKET_BET_TYPES}
+    by_profile_results: dict[str, dict[str, list[dict[str, Any]]]] = {
+        bucket: {bet_type: [] for bet_type in TICKET_BET_TYPES}
+        for bucket in ("stable", "balanced", "chaotic")
+    }
+
+    def ticket_profile_bucket(rows: list[dict[str, int | float]]) -> str:
+        scores = [max(float(row["score"]), 1e-9) for row in rows]
+        if len(scores) < 3:
+            return "balanced"
+        total = sum(scores)
+        shares = [score / total for score in scores] if total > 0 else []
+        entropy = -sum(value * np.log(value) for value in shares) / np.log(len(shares))
+        top_share = shares[0]
+        gap = shares[0] - shares[1]
+        if top_share >= 0.24 and gap >= 0.055 and entropy < 0.82:
+            return "stable"
+        if top_share < 0.17 or gap < 0.025 or entropy >= 0.93:
+            return "chaotic"
+        return "balanced"
+
+    def empty_stat() -> dict[str, float]:
+        return {"races": 0, "hits": 0, "stake": 0.0, "payout": 0.0, "tickets": 0}
+
+    def finalize_stat(selector_name: str, strategy: str, stat: dict[str, float]) -> dict[str, Any]:
+        races = int(stat["races"])
+        hits = int(stat["hits"])
+        stake = float(stat["stake"])
+        payout = float(stat["payout"])
+        avg_tickets = float(stat["tickets"]) / races if races > 0 else 0.0
+        roi = payout / stake if stake > 0 else 0.0
+        hit_rate = hits / races if races > 0 else 0.0
+        profit_rate = roi - 1.0
+        clipped_profit = min(max(profit_rate, -1.0), 3.0)
+        utility = clipped_profit * 0.58 + hit_rate * 0.34 - min(avg_tickets / 60, 1.0) * 0.08
+        return {
+            "selector": selector_name,
+            "strategy": strategy,
+            "strategy_label": ticket_strategy_label(bet_type, strategy),
+            "strategy_family": ticket_strategy_family(strategy),
+            "races": races,
+            "hits": hits,
+            "hit_rate": round(float(hit_rate), 6),
+            "stake": int(stake),
+            "payout": int(payout),
+            "roi": round(float(roi), 6),
+            "avg_tickets": round(float(avg_tickets), 3),
+            "utility": round(float(utility), 6),
+        }
+
+    race_cache: dict[str, list[tuple[list[dict[str, int | float]], str, dict[tuple[str, tuple[int, ...]], float]]]] = {}
+    for selector_name, score_column in selectors.items():
+        cached_races: list[tuple[list[dict[str, int | float]], str, dict[tuple[str, tuple[int, ...]], float]]] = []
+        for _, race in holdout.groupby("race_id", sort=False):
+            lookup = race_payout_lookup(race)
+            if not lookup:
+                continue
+            ordered_rows = ordered_runners_for_ticket(race, score_column)
+            cached_races.append((ordered_rows, ticket_profile_bucket(ordered_rows), lookup))
+        race_cache[selector_name] = cached_races
+
     for bet_type in TICKET_BET_TYPES:
-        for selector_name, score_column in selectors.items():
+        for selector_name in selectors:
             for strategy in strategies[bet_type]:
-                races = 0
-                hits = 0
-                stake = 0.0
-                payout = 0.0
-                total_tickets = 0
-                for _, race in holdout.groupby("race_id", sort=False):
-                    lookup = race_payout_lookup(race)
-                    if not lookup:
-                        continue
+                total_stat = empty_stat()
+                profile_stats = {bucket: empty_stat() for bucket in by_profile_results}
+                for ordered_rows, bucket, lookup in race_cache[selector_name]:
                     entries = ticket_entries_for_strategy(
-                        ordered_runners_for_ticket(race, score_column),
+                        ordered_rows,
                         bet_type,
                         strategy,
                     )
                     entries = list(dict.fromkeys(entries))
                     if not entries:
                         continue
-                    races += 1
-                    total_tickets += len(entries)
-                    stake += len(entries) * 100
+                    total_stat["races"] += 1
+                    total_stat["tickets"] += len(entries)
+                    total_stat["stake"] += len(entries) * 100
+                    profile_stats[bucket]["races"] += 1
+                    profile_stats[bucket]["tickets"] += len(entries)
+                    profile_stats[bucket]["stake"] += len(entries) * 100
                     race_payout = 0.0
                     for entry in entries:
                         race_payout += lookup.get((bet_type, normalized_ticket_key(bet_type, entry)), 0.0)
-                    payout += race_payout
+                    total_stat["payout"] += race_payout
+                    profile_stats[bucket]["payout"] += race_payout
                     if race_payout > 0:
-                        hits += 1
-                roi = payout / stake if stake > 0 else 0.0
-                hit_rate = hits / races if races > 0 else 0.0
-                avg_tickets = total_tickets / races if races > 0 else 0.0
-                utility = hit_rate * 0.72 + min(roi, 3.0) * 0.16 - min(avg_tickets / 60, 1.0) * 0.04
-                results[bet_type].append(
-                    {
-                        "selector": selector_name,
-                        "strategy": strategy,
-                        "strategy_label": labels[strategy],
-                        "races": races,
-                        "hits": hits,
-                        "hit_rate": round(float(hit_rate), 6),
-                        "stake": int(stake),
-                        "payout": int(payout),
-                        "roi": round(float(roi), 6),
-                        "avg_tickets": round(float(avg_tickets), 3),
-                        "utility": round(float(utility), 6),
-                    }
-                )
+                        total_stat["hits"] += 1
+                        profile_stats[bucket]["hits"] += 1
+                results[bet_type].append(finalize_stat(selector_name, strategy, total_stat))
+                for bucket, stat in profile_stats.items():
+                    by_profile_results[bucket][bet_type].append(finalize_stat(selector_name, strategy, stat))
 
     best = {
         bet_type: max(
@@ -984,13 +1249,183 @@ def ticket_strategy_metrics(
         for bet_type, rows in results.items()
         if rows
     }
+    by_profile = {
+        bucket: {
+            bet_type: max(
+                [row for row in rows if row["races"] > 0] or rows,
+                key=lambda row: (row["utility"], row["hit_rate"], row["roi"], -row["avg_tickets"]),
+            )
+            for bet_type, rows in bucket_results.items()
+            if rows
+        }
+        for bucket, bucket_results in by_profile_results.items()
+    }
     return {
         "status": "ok",
         "unit_stake_yen": 100,
-        "selection_note": "Each bet type is compared by selector model and strategy on the 2026 holdout.",
+        "selection_note": "Each bet type is compared by selector model, ticket count, and strategy shape on the 2026 holdout. by_profile stores stable/balanced/chaotic race policies.",
         "best_by_bet_type": best,
+        "by_profile": by_profile,
         "all": results,
+        "all_by_profile": by_profile_results,
     }
+
+
+def ticket_item_utility(item: dict[str, Any], *, bet_type: str) -> float:
+    roi = float(item.get("roi") or 0.0)
+    hit_rate = float(item.get("hit_rate") or 0.0)
+    avg_tickets = float(item.get("avg_tickets") or 0.0)
+    races = int(item.get("races") or 0)
+    if races <= 0:
+        return -10.0
+
+    # ROI is primary. A high hit rate can still lose after point count, so hit
+    # rate is a stability term and point count is a mild penalty.
+    exotic_bonus = 0.0
+    if bet_type in {"trio", "trifecta", "exacta"}:
+        exotic_bonus = max(0.0, roi - 0.82) * 0.24
+    return (
+        (roi - 0.72) * 0.78
+        + hit_rate * 0.20
+        + exotic_bonus
+        - min(avg_tickets / 72.0, 1.0) * 0.08
+    )
+
+
+def ticket_policy_utility(ticket_policy: dict[str, Any], rank_metrics: dict[str, Any]) -> dict[str, Any]:
+    best_by_bet_type = ticket_policy.get("best_by_bet_type", {})
+    by_profile = ticket_policy.get("by_profile", {})
+    bet_weights = {
+        "win": 0.25,
+        "bracket_quinella": 0.28,
+        "quinella": 0.42,
+        "wide": 0.34,
+        "exacta": 0.54,
+        "trio": 0.68,
+        "trifecta": 0.78,
+    }
+    profile_weights = {"stable": 0.22, "balanced": 0.46, "chaotic": 0.32}
+
+    total = 0.0
+    details: dict[str, float] = {}
+    for bet_type, weight in bet_weights.items():
+        item = best_by_bet_type.get(bet_type)
+        if not item:
+            continue
+        value = ticket_item_utility(item, bet_type=bet_type)
+        details[bet_type] = round(value, 6)
+        total += weight * value
+
+    profile_total = 0.0
+    for profile, profile_weight in profile_weights.items():
+        profile_items = by_profile.get(profile, {})
+        if not profile_items:
+            continue
+        profile_score = 0.0
+        profile_weight_sum = 0.0
+        for bet_type, weight in bet_weights.items():
+            item = profile_items.get(bet_type)
+            if not item:
+                continue
+            profile_score += weight * ticket_item_utility(item, bet_type=bet_type)
+            profile_weight_sum += weight
+        if profile_weight_sum > 0:
+            profile_total += profile_weight * (profile_score / profile_weight_sum)
+
+    market_dependency = rank_metrics.get("market_dependency", {})
+    favorite_rate = market_dependency.get("predicted_top1_favorite_rate")
+    favorite_penalty = max(0.0, float(favorite_rate or 0.0) - 0.86) * 0.10
+    top1_rate = float(rank_metrics.get("winner_top1_rate") or 0.0)
+    top3_rate = float(rank_metrics.get("winner_in_top3_rate") or 0.0)
+    rank_bonus = top1_rate * 0.06 + top3_rate * 0.04
+    utility = total + profile_total * 0.55 + rank_bonus - favorite_penalty
+    return {
+        "utility": round(float(utility), 6),
+        "overall_ticket_score": round(float(total), 6),
+        "profile_ticket_score": round(float(profile_total), 6),
+        "rank_bonus": round(float(rank_bonus), 6),
+        "favorite_penalty": round(float(favorite_penalty), 6),
+        "bet_type_scores": details,
+    }
+
+
+def choose_models_by_ticket_policy(
+    all_metrics: dict[str, list[dict[str, Any]]],
+    trained_models: dict[str, dict[str, CalibratedBlendModel]],
+    frame: pd.DataFrame,
+    holdout_index: pd.Index,
+    *,
+    favorite_rate_cap: float,
+    favorite_penalty: float,
+    top_n: int,
+) -> dict[str, Any]:
+    top_candidates: dict[str, list[dict[str, Any]]] = {}
+    for target, metrics in all_metrics.items():
+        ranked = sorted(
+            metrics,
+            key=lambda item: sort_candidate_key(
+                item,
+                favorite_rate_cap=favorite_rate_cap,
+                favorite_penalty=favorite_penalty,
+            ),
+            reverse=True,
+        )
+        for item in ranked:
+            item["selection_policy"] = model_selection_utility(
+                item,
+                favorite_rate_cap=favorite_rate_cap,
+                favorite_penalty=favorite_penalty,
+            )
+            item["selection_policy"].update(
+                {
+                    "favorite_rate_cap": float(favorite_rate_cap),
+                    "favorite_penalty": float(favorite_penalty),
+                }
+            )
+        top_candidates[target] = ranked[: max(1, top_n)]
+
+    best_bundle: dict[str, Any] | None = None
+    combinations_checked = 0
+    for win_item, top2_item, place_item in product(
+        top_candidates["is_win"],
+        top_candidates["is_top2"],
+        top_candidates["is_place"],
+    ):
+        models = {
+            "is_win": trained_models["is_win"][win_item["model"]],
+            "is_top2": trained_models["is_top2"][top2_item["model"]],
+            "is_place": trained_models["is_place"][place_item["model"]],
+        }
+        rank_metrics = rank_holdout_metrics(frame, holdout_index, models)
+        ticket_policy = ticket_strategy_metrics(frame, holdout_index, models)
+        utility = ticket_policy_utility(ticket_policy, rank_metrics)
+        combinations_checked += 1
+        if best_bundle is None or utility["utility"] > best_bundle["bundle_utility"]["utility"]:
+            best_bundle = {
+                "models": models,
+                "best_metrics": {
+                    "is_win": win_item,
+                    "is_top2": top2_item,
+                    "is_place": place_item,
+                },
+                "rank_holdout_2026": rank_metrics,
+                "ticket_policy": ticket_policy,
+                "bundle_utility": utility,
+                "combinations_checked": combinations_checked,
+            }
+
+    if best_bundle is None:
+        raise ValueError("ticket bundle selection produced no candidates")
+    best_bundle["bundle_selection"] = {
+        "mode": "ticket",
+        "top_n_per_target": int(max(1, top_n)),
+        "combinations_checked": int(combinations_checked),
+        "candidate_models": {
+            target: [item["model"] for item in candidates]
+            for target, candidates in top_candidates.items()
+        },
+    }
+    return best_bundle
 
 
 def train_best_bundle(
@@ -1049,30 +1484,63 @@ def train_best_bundle(
             all_metrics[target].append(metrics)
             trained_models[target][spec.name] = model
 
-    best_metrics = {
-        target: choose_best(
-            metrics,
+    if args.bundle_selection == "ticket":
+        bundle_choice = choose_models_by_ticket_policy(
+            all_metrics,
+            trained_models,
+            frame,
+            holdout_index,
             favorite_rate_cap=args.favorite_rate_cap,
             favorite_penalty=args.favorite_penalty,
+            top_n=args.bundle_top_n,
         )
-        for target, metrics in all_metrics.items()
-    }
-    best_models = {
-        target: trained_models[target][metrics["model"]]
-        for target, metrics in best_metrics.items()
-    }
+        best_metrics = bundle_choice["best_metrics"]
+        best_models = bundle_choice["models"]
+        rank_metrics = bundle_choice["rank_holdout_2026"]
+        ticket_policy = bundle_choice["ticket_policy"]
+        bundle_selection = bundle_choice["bundle_selection"]
+        bundle_utility = bundle_choice["bundle_utility"]
+    else:
+        best_metrics = {
+            target: choose_best(
+                metrics,
+                favorite_rate_cap=args.favorite_rate_cap,
+                favorite_penalty=args.favorite_penalty,
+            )
+            for target, metrics in all_metrics.items()
+        }
+        best_models = {
+            target: trained_models[target][metrics["model"]]
+            for target, metrics in best_metrics.items()
+        }
+        rank_metrics = rank_holdout_metrics(frame, holdout_index, best_models)
+        ticket_policy = ticket_strategy_metrics(frame, holdout_index, best_models)
+        bundle_selection = {
+            "mode": "rank",
+            "top_n_per_target": None,
+            "combinations_checked": 1,
+        }
+        bundle_utility = ticket_policy_utility(ticket_policy, rank_metrics)
     return {
         "targets": all_metrics,
         "best": best_metrics,
         "models": best_models,
-        "rank_holdout_2026": rank_holdout_metrics(frame, holdout_index, best_models),
-        "ticket_policy": ticket_strategy_metrics(frame, holdout_index, best_models),
+        "rank_holdout_2026": rank_metrics,
+        "ticket_policy": ticket_policy,
+        "bundle_selection": bundle_selection,
+        "bundle_utility": bundle_utility,
         "risk_router": risk_router(best_metrics),
         "numeric_features": base_numeric_features,
         "categorical_features": base_categorical_features,
         "features": base_features,
         "removed_market_features": sorted(removed_features_union),
         "model_candidate_count": len(specs),
+        "probability_model_contract": {
+            "feature_mode": args.feature_mode,
+            "objective_only_probability": args.feature_mode in {"fundamental", "anti_market"},
+            "market_features_used_only_for_blending": args.feature_mode in {"fundamental", "anti_market"},
+            "removed_market_features": sorted(removed_features_union),
+        },
     }
 
 
@@ -1105,13 +1573,17 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "ticket_policy": {
             "status": payload.get("ticket_policy", {}).get("status"),
             "best_by_bet_type": payload.get("ticket_policy", {}).get("best_by_bet_type", {}),
+            "by_profile": payload.get("ticket_policy", {}).get("by_profile", {}),
         },
+        "bundle_selection": payload.get("bundle_selection", {}),
+        "bundle_utility": payload.get("bundle_utility", {}),
         "risk_router": payload["risk_router"],
         "segment_metrics": {
             market: metrics.get("rank_holdout_2026", {})
             for market, metrics in payload.get("segment_metrics", {}).items()
         },
         "model_candidate_count": payload.get("model_candidate_count"),
+        "probability_model_contract": payload.get("probability_model_contract", {}),
         "metrics_path": payload["metrics_path"],
         "artifact_path": payload["artifact_path"],
     }
@@ -1151,15 +1623,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(include_hgb=True)
     parser.add_argument(
         "--feature-mode",
-        choices=["all", "anti_market", "odds_rank_only"],
-        default="all",
-        help="anti_market removes direct odds/popularity features from the trained model.",
+        choices=["all", "objective", "fundamental", "anti_market", "odds_rank_only", "market_only"],
+        default="fundamental",
+        help=(
+            "fundamental removes odds/popularity features from the probability model; "
+            "market odds are blended only after calibration."
+        ),
     )
     parser.add_argument(
         "--zoo-profile",
-        choices=["default", "jra30"],
+        choices=["default", "jra30", "objective30", "objective50"],
         default="default",
-        help="jra30 compares 30 central-oriented variants across odds-free, odds-rank-only, and low-market models.",
+        help=(
+            "objective30/objective50 compare fundamental-only probability models "
+            "with different model families and hyperparameters."
+        ),
     )
     parser.add_argument(
         "--market-weight-cap",
@@ -1179,6 +1657,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.36,
         help="Penalty strength applied to favorite-rate excess during model selection.",
+    )
+    parser.add_argument(
+        "--bundle-selection",
+        choices=["rank", "ticket"],
+        default="rank",
+        help=(
+            "rank selects each target model by rank metrics; ticket also searches "
+            "target-model combinations by bet-type strategy backtest utility."
+        ),
+    )
+    parser.add_argument(
+        "--bundle-top-n",
+        type=int,
+        default=3,
+        help="Top candidates per target to combine when --bundle-selection=ticket.",
     )
     return parser
 
@@ -1201,10 +1694,17 @@ def main() -> None:
         holdout_index = filter_index_by_market(frame, holdout_index, args.holdout_market)
     if len(fit_index) == 0 or len(calibration_index) == 0 or len(holdout_index) == 0:
         raise ValueError("market filters produced an empty fit/calibration/holdout split")
+    print(
+        "[split] "
+        f"fit_rows={len(fit_index)} calibration_rows={len(calibration_index)} "
+        f"holdout_rows={len(holdout_index)}",
+        flush=True,
+    )
     bundle = train_best_bundle(frame, fit_index, calibration_index, holdout_index, args)
     segment_bundles: dict[str, dict[str, Any]] = {}
     if args.segment_by_market:
         for market in ("JRA", "NAR"):
+            print(f"[segment] market={market}", flush=True)
             segment_fit = filter_index_by_market(frame, fit_index, market)
             segment_calibration = filter_index_by_market(frame, calibration_index, market)
             segment_holdout = filter_index_by_market(frame, holdout_index, market)
@@ -1253,12 +1753,17 @@ def main() -> None:
         "best": bundle["best"],
         "rank_holdout_2026": bundle["rank_holdout_2026"],
         "ticket_policy": bundle["ticket_policy"],
+        "bundle_selection": bundle["bundle_selection"],
+        "bundle_utility": bundle["bundle_utility"],
         "risk_router": bundle["risk_router"],
+        "probability_model_contract": bundle["probability_model_contract"],
         "segment_metrics": {
             market: {
                 "best": segment["best"],
                 "rank_holdout_2026": segment["rank_holdout_2026"],
                 "ticket_policy": segment["ticket_policy"],
+                "bundle_selection": segment["bundle_selection"],
+                "bundle_utility": segment["bundle_utility"],
                 "risk_router": segment["risk_router"],
                 "active_numeric_features": segment["numeric_features"],
                 "active_categorical_features": segment["categorical_features"],
@@ -1279,6 +1784,8 @@ def main() -> None:
                     "best": segment["best"],
                     "rank_holdout_2026": segment["rank_holdout_2026"],
                     "ticket_policy": segment["ticket_policy"],
+                    "bundle_selection": segment["bundle_selection"],
+                    "bundle_utility": segment["bundle_utility"],
                     "risk_router": segment["risk_router"],
                 },
                 "numeric_features": segment["numeric_features"],
@@ -1291,6 +1798,9 @@ def main() -> None:
         "categorical_features": bundle["categorical_features"],
         "rank_probability_columns": ["p_win", "p_second", "p_third", "p_out"],
         "ticket_policy": bundle["ticket_policy"],
+        "bundle_selection": bundle["bundle_selection"],
+        "bundle_utility": bundle["bundle_utility"],
+        "probability_model_contract": bundle["probability_model_contract"],
         "feature_mode": args.feature_mode,
         "removed_market_features": bundle["removed_market_features"],
         "market_weight_cap": args.market_weight_cap,

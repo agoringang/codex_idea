@@ -315,6 +315,84 @@ def shifted_expanding_mean(series: pd.Series, min_periods: int = 3) -> pd.Series
     return series.shift().expanding(min_periods=min_periods).mean()
 
 
+def shifted_rolling_median(series: pd.Series, window: int, min_periods: int = 1) -> pd.Series:
+    return series.shift().rolling(window=window, min_periods=min_periods).median()
+
+
+def shifted_previous(series: pd.Series) -> pd.Series:
+    return series.shift()
+
+
+def race_zscore(frame: pd.DataFrame, column: str) -> pd.Series:
+    values = pd.to_numeric(frame.get(column), errors="coerce")
+    group = values.groupby(frame["race_id"])
+    mean = group.transform("mean")
+    std = group.transform("std").replace(0, np.nan)
+    return ((values - mean) / std).replace([np.inf, -np.inf], np.nan).astype("float32")
+
+
+def add_race_context_features(frame: pd.DataFrame) -> pd.DataFrame:
+    if "race_id" not in frame:
+        return frame
+
+    odds = pd.to_numeric(
+        frame["market_odds"] if "market_odds" in frame else pd.Series(np.nan, index=frame.index),
+        errors="coerce",
+    ).replace(0, np.nan)
+    frame["log_market_odds"] = np.log(odds.clip(lower=1.01)).astype("float32")
+    favorite_odds = odds.groupby(frame["race_id"]).transform("min")
+    frame["favorite_market_odds"] = favorite_odds.astype("float32")
+    frame["odds_to_favorite"] = (odds / favorite_odds.replace(0, np.nan)).replace(
+        [np.inf, -np.inf],
+        np.nan,
+    ).astype("float32")
+
+    if "market_win_probability" in frame:
+        market_probability = pd.to_numeric(frame["market_win_probability"], errors="coerce").fillna(0)
+    else:
+        implied = (1 / odds).replace([np.inf, -np.inf], np.nan).fillna(0)
+        race_total = implied.groupby(frame["race_id"]).transform("sum").replace(0, np.nan)
+        market_probability = (implied / race_total).fillna(0)
+    frame["market_entropy"] = (
+        (-market_probability * np.log(market_probability.clip(lower=1e-9)))
+        .groupby(frame["race_id"])
+        .transform("sum")
+        .astype("float32")
+    )
+    frame["market_top3_probability"] = (
+        market_probability.where(
+            market_probability.groupby(frame["race_id"]).rank(method="first", ascending=False) <= 3,
+            0,
+        )
+        .groupby(frame["race_id"])
+        .transform("sum")
+        .astype("float32")
+    )
+    if "odds_rank" in frame:
+        odds_rank = pd.to_numeric(frame["odds_rank"], errors="coerce")
+        if "field_size" in frame:
+            field_size = pd.to_numeric(frame["field_size"], errors="coerce").replace(0, np.nan)
+        else:
+            field_size = frame.groupby("race_id")["race_id"].transform("size").replace(0, np.nan)
+        frame["market_rank_pct"] = (odds_rank / field_size).astype("float32")
+
+    relative_columns = {
+        "carried_weight": "carried_weight_vs_field",
+        "horse_weight": "horse_weight_vs_field",
+        "age": "age_vs_field",
+        "days_since_last_run": "rest_vs_field",
+        "avg_last3_speed": "avg_speed_vs_field",
+        "horse_recent_place_rate": "recent_place_vs_field",
+        "jockey_win_rate": "jockey_win_vs_field",
+        "trainer_win_rate": "trainer_win_vs_field",
+        "draw_bias": "draw_bias_vs_field",
+    }
+    for source, output in relative_columns.items():
+        if source in frame:
+            frame[output] = race_zscore(frame, source)
+    return frame
+
+
 def add_historical_features(frame: pd.DataFrame) -> pd.DataFrame:
     sort_columns = ["race_date", "race_id"]
     if "race_no" in frame:
@@ -349,6 +427,87 @@ def add_historical_features(frame: pd.DataFrame) -> pd.DataFrame:
             .transform(lambda series: shifted_rolling_mean(series, window=3))
             .astype("float32")
         )
+        frame["horse_recent_win_rate_5"] = (
+            frame.groupby("horse_name")["is_win"]
+            .transform(lambda series: shifted_rolling_mean(series, window=5))
+            .astype("float32")
+        )
+        frame["horse_recent_place_rate_5"] = (
+            frame.groupby("horse_name")["is_place"]
+            .transform(lambda series: shifted_rolling_mean(series, window=5))
+            .astype("float32")
+        )
+        frame["horse_win_rate_lifetime"] = (
+            frame.groupby("horse_name")["is_win"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=3))
+            .astype("float32")
+        )
+        frame["horse_place_rate_lifetime"] = (
+            frame.groupby("horse_name")["is_place"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=3))
+            .astype("float32")
+        )
+
+        if "finish_position" in frame:
+            frame["horse_avg_finish_last3"] = (
+                frame.groupby("horse_name")["finish_position"]
+                .transform(lambda series: shifted_rolling_mean(series, window=3))
+                .astype("float32")
+            )
+            frame["horse_avg_finish_last5"] = (
+                frame.groupby("horse_name")["finish_position"]
+                .transform(lambda series: shifted_rolling_mean(series, window=5))
+                .astype("float32")
+            )
+        if "odds_rank" in frame:
+            frame["horse_avg_odds_rank_last3"] = (
+                frame.groupby("horse_name")["odds_rank"]
+                .transform(lambda series: shifted_rolling_mean(series, window=3))
+                .astype("float32")
+            )
+        if "market_odds" in frame:
+            frame["horse_avg_odds_last3"] = (
+                frame.groupby("horse_name")["market_odds"]
+                .transform(lambda series: shifted_rolling_median(series, window=3))
+                .astype("float32")
+            )
+
+        if "horse_weight" in frame:
+            previous_weight = frame.groupby("horse_name")["horse_weight"].transform(shifted_previous)
+            current_weight = pd.to_numeric(frame["horse_weight"], errors="coerce")
+            frame["horse_weight_change_from_last"] = (current_weight - previous_weight).astype(
+                "float32"
+            )
+            frame["horse_weight_change_rate"] = (
+                (current_weight - previous_weight) / previous_weight.replace(0, np.nan)
+            ).astype("float32")
+        if "distance" in frame:
+            current_distance = pd.to_numeric(frame["distance"], errors="coerce")
+            previous_distance = frame.groupby("horse_name")["distance"].transform(shifted_previous)
+            frame["distance_change"] = (current_distance - previous_distance).astype("float32")
+            frame["distance_abs_change"] = frame["distance_change"].abs().astype("float32")
+        if "surface" in frame:
+            previous_surface = frame.groupby("horse_name")["surface"].transform(shifted_previous)
+            frame["surface_switch"] = (
+                (frame["surface"].astype(str) != previous_surface.astype(str))
+                .where(previous_surface.notna())
+                .astype("float32")
+            )
+        if "jockey" in frame:
+            previous_jockey = frame.groupby("horse_name")["jockey"].transform(shifted_previous)
+            frame["jockey_switch"] = (
+                (frame["jockey"].astype(str) != previous_jockey.astype(str))
+                .where(previous_jockey.notna())
+                .astype("float32")
+            )
+        if "carried_weight" in frame:
+            current_carried = pd.to_numeric(frame["carried_weight"], errors="coerce")
+            previous_carried = frame.groupby("horse_name")["carried_weight"].transform(
+                shifted_previous
+            )
+            frame["carried_weight_change"] = (current_carried - previous_carried).astype(
+                "float32"
+            )
 
         if "distance" in frame:
             distance = pd.to_numeric(frame["distance"], errors="coerce")
@@ -372,10 +531,100 @@ def add_historical_features(frame: pd.DataFrame) -> pd.DataFrame:
             .transform(lambda series: shifted_expanding_mean(series, min_periods=10))
             .astype("float32")
         )
+        frame["jockey_recent_win_rate_50"] = (
+            frame.groupby("jockey", dropna=False)["is_win"]
+            .transform(lambda series: shifted_rolling_mean(series, window=50, min_periods=10))
+            .astype("float32")
+        )
+        frame["jockey_recent_place_rate_50"] = (
+            frame.groupby("jockey", dropna=False)["is_place"]
+            .transform(lambda series: shifted_rolling_mean(series, window=50, min_periods=10))
+            .astype("float32")
+        )
     if "trainer" in frame:
         frame["trainer_win_rate"] = (
             frame.groupby("trainer", dropna=False)["is_win"]
             .transform(lambda series: shifted_expanding_mean(series, min_periods=10))
+            .astype("float32")
+        )
+        frame["trainer_recent_win_rate_50"] = (
+            frame.groupby("trainer", dropna=False)["is_win"]
+            .transform(lambda series: shifted_rolling_mean(series, window=50, min_periods=10))
+            .astype("float32")
+        )
+        frame["trainer_recent_place_rate_50"] = (
+            frame.groupby("trainer", dropna=False)["is_place"]
+            .transform(lambda series: shifted_rolling_mean(series, window=50, min_periods=10))
+            .astype("float32")
+        )
+
+    if {"horse_name", "jockey"}.issubset(frame.columns):
+        frame["horse_jockey_win_rate"] = (
+            frame.groupby(["horse_name", "jockey"], dropna=False)["is_win"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=2))
+            .astype("float32")
+        )
+        frame["horse_jockey_place_rate"] = (
+            frame.groupby(["horse_name", "jockey"], dropna=False)["is_place"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=2))
+            .astype("float32")
+        )
+    if {"jockey", "trainer"}.issubset(frame.columns):
+        frame["jockey_trainer_win_rate"] = (
+            frame.groupby(["jockey", "trainer"], dropna=False)["is_win"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=10))
+            .astype("float32")
+        )
+        frame["jockey_trainer_place_rate"] = (
+            frame.groupby(["jockey", "trainer"], dropna=False)["is_place"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=10))
+            .astype("float32")
+        )
+
+    if "sire" in frame:
+        frame["sire_win_rate"] = (
+            frame.groupby("sire", dropna=False)["is_win"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=20))
+            .astype("float32")
+        )
+        frame["sire_place_rate"] = (
+            frame.groupby("sire", dropna=False)["is_place"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=20))
+            .astype("float32")
+        )
+    if "dam_sire" in frame:
+        frame["dam_sire_win_rate"] = (
+            frame.groupby("dam_sire", dropna=False)["is_win"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=20))
+            .astype("float32")
+        )
+        frame["dam_sire_place_rate"] = (
+            frame.groupby("dam_sire", dropna=False)["is_place"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=20))
+            .astype("float32")
+        )
+    if {"sire", "surface"}.issubset(frame.columns):
+        frame["sire_surface_place_rate"] = (
+            frame.groupby(["sire", "surface"], dropna=False)["is_place"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=15))
+            .astype("float32")
+        )
+    if {"dam_sire", "surface"}.issubset(frame.columns):
+        frame["dam_sire_surface_place_rate"] = (
+            frame.groupby(["dam_sire", "surface"], dropna=False)["is_place"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=15))
+            .astype("float32")
+        )
+    if {"sire", "__distance_bucket"}.issubset(frame.columns):
+        frame["sire_distance_place_rate"] = (
+            frame.groupby(["sire", "__distance_bucket"], dropna=False)["is_place"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=15))
+            .astype("float32")
+        )
+    if {"dam_sire", "__distance_bucket"}.issubset(frame.columns):
+        frame["dam_sire_distance_place_rate"] = (
+            frame.groupby(["dam_sire", "__distance_bucket"], dropna=False)["is_place"]
+            .transform(lambda series: shifted_expanding_mean(series, min_periods=15))
             .astype("float32")
         )
 
@@ -571,18 +820,33 @@ def prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
     frame = add_market_features(frame)
     frame = add_historical_features(frame)
     frame = add_day_flow_features(frame)
+    frame = add_race_context_features(frame)
 
+    missing_numeric = [column for column in NUMERIC_FEATURES if column not in frame]
+    if missing_numeric:
+        frame = pd.concat(
+            [
+                frame,
+                pd.DataFrame(np.nan, index=frame.index, columns=missing_numeric),
+            ],
+            axis=1,
+        )
     for column in NUMERIC_FEATURES:
-        if column not in frame:
-            frame[column] = np.nan
-        else:
-            frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("float32")
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("float32")
 
+    missing_categorical = [column for column in CATEGORICAL_FEATURES if column not in frame]
+    if missing_categorical:
+        frame = pd.concat(
+            [
+                frame,
+                pd.DataFrame("unknown", index=frame.index, columns=missing_categorical),
+            ],
+            axis=1,
+        )
     for column in CATEGORICAL_FEATURES:
-        if column not in frame:
-            frame[column] = pd.Series("unknown", index=frame.index, dtype="category")
-        else:
-            frame[column] = frame[column].replace("", pd.NA).fillna("unknown").astype("category")
+        frame[column] = frame[column].replace("", pd.NA).fillna("unknown").astype("category")
+
+    frame = frame.copy()
 
     if "race_date" in frame:
         frame["race_date"] = frame["race_date"].fillna("")

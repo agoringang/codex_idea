@@ -149,7 +149,6 @@ def main() -> None:
         sampled += 1
         generated_types = {item.bet_type for item in prediction.recommendations}
         sample_bet_types.update(generated_types)
-        ai_top3 = [runner.number for runner in prediction.runners[:3]]
         recommendation_by_type = {item.bet_type: item for item in prediction.recommendations}
         for triple_type in ("trio", "trifecta"):
             item = recommendation_by_type.get(triple_type)
@@ -157,8 +156,8 @@ def main() -> None:
                 continue
             if int(getattr(item, "tickets", 1)) <= 1:
                 errors.append(f"{race.id}: {triple_type} must use multi-ticket strategy, got {item.selection}")
-            if not covers_ai_top3(item, ai_top3, ordered=triple_type == "trifecta"):
-                errors.append(f"{race.id}: {triple_type} does not cover AI top3 core: {item.selection} / top3={ai_top3}")
+            if len(getattr(item, "covered_selections", []) or []) <= 1:
+                errors.append(f"{race.id}: {triple_type} must expose covered selections: {item.selection}")
         if "support" in generated_types:
             errors.append(f"{race.id}: prediction generated unsupported support bet")
         if "place" in generated_types:

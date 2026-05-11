@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from .feature_catalog import CATEGORICAL_FEATURES, NUMERIC_FEATURES
-from .ml_pipeline import load_artifact
+from .ml_pipeline import add_race_context_features, load_artifact
 from .schemas import RunnerInput
 
 
@@ -150,6 +150,8 @@ def runner_frame(runners: list[RunnerInput]) -> pd.DataFrame:
         frame["race_id"] = "inference"
     if not frame.empty and "market_odds" in frame:
         odds = pd.to_numeric(frame["market_odds"], errors="coerce").replace(0, np.nan)
+        if "odds_rank" not in frame or frame["odds_rank"].isna().all():
+            frame["odds_rank"] = odds.rank(method="first", ascending=True).astype("float32")
         implied = (1 / odds).replace([np.inf, -np.inf], np.nan)
         total = float(implied.sum(skipna=True))
         win_probability = (implied / total).fillna(0) if total else pd.Series(0, index=frame.index)
@@ -157,6 +159,8 @@ def runner_frame(runners: list[RunnerInput]) -> pd.DataFrame:
         frame["market_place_probability"] = (
             win_probability * min(len(frame), 3)
         ).clip(lower=1e-6, upper=0.95).astype("float32")
+    if not frame.empty:
+        frame = add_race_context_features(frame)
     return frame
 
 
@@ -215,15 +219,21 @@ def ticket_policy(market: str | None = None) -> dict[str, Any]:
             metrics = segment.get("metrics") if isinstance(segment.get("metrics"), dict) else segment
             policy = metrics.get("ticket_policy") if isinstance(metrics, dict) else None
             if isinstance(policy, dict):
+                if isinstance(policy.get("by_profile"), dict):
+                    return policy
                 return policy.get("best_by_bet_type") if isinstance(policy.get("best_by_bet_type"), dict) else policy
 
     policy = artifact.get("ticket_policy")
     if isinstance(policy, dict):
+        if isinstance(policy.get("by_profile"), dict):
+            return policy
         return policy.get("best_by_bet_type") if isinstance(policy.get("best_by_bet_type"), dict) else policy
     metrics = artifact.get("metrics")
     if isinstance(metrics, dict):
         policy = metrics.get("ticket_policy")
         if isinstance(policy, dict):
+            if isinstance(policy.get("by_profile"), dict):
+                return policy
             return policy.get("best_by_bet_type") if isinstance(policy.get("best_by_bet_type"), dict) else policy
     return {}
 

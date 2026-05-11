@@ -122,6 +122,18 @@ def stake_size(bankroll: float, risk_level: float, max_exposure: float, kelly: f
     return round(bankroll * stake_ratio / 100) * 100
 
 
+def combination_count(n: int, r: int) -> int:
+    if r < 0 or n < r:
+        return 0
+    return math.comb(n, r)
+
+
+def permutation_count(n: int, r: int) -> int:
+    if r < 0 or n < r:
+        return 0
+    return math.perm(n, r)
+
+
 def value_bias(runners: Iterable[RunnerPrediction], bonus: float = 0) -> float:
     runners = list(runners)
     if not runners:
@@ -637,36 +649,214 @@ PUBLIC_FIXED_BET_TYPES: tuple[BetType, ...] = (
 )
 
 
+def race_strategy_profile(runners: Sequence[RunnerPrediction]) -> dict[str, float]:
+    if not runners:
+        return {"volatility": 0.5, "confidence": 0.4, "gap": 0.0, "favorite": 0.0}
+
+    ordered = sorted(runners, key=lambda item: item.win_probability, reverse=True)
+    favorite = ordered[0].win_probability
+    second = ordered[1].win_probability if len(ordered) > 1 else 0.0
+    gap = favorite - second
+    probabilities = [max(item.win_probability, 1e-9) for item in ordered]
+    total = sum(probabilities)
+    normalized = [value / total for value in probabilities] if total > 0 else []
+    entropy = 0.0
+    if len(normalized) > 1:
+        entropy = -sum(value * math.log(value) for value in normalized) / math.log(len(normalized))
+    top3_place = sum(item.place_probability for item in ordered[:3]) / max(len(ordered[:3]), 1)
+    value_depth = sum(1 for item in ordered if item.market_odds >= 5 and item.edge > 0.015)
+    volatility = clamp(
+        entropy * 0.38
+        + max(0.0, 0.34 - favorite) * 1.45
+        + max(0.0, 0.115 - gap) * 2.25
+        + min(value_depth, 4) * 0.035,
+        0.0,
+        1.0,
+    )
+    confidence = clamp(
+        favorite * 1.55
+        + gap * 2.65
+        + top3_place * 0.22
+        - volatility * 0.18,
+        0.0,
+        1.0,
+    )
+    return {"volatility": volatility, "confidence": confidence, "gap": gap, "favorite": favorite}
+
+
+def target_ticket_count(bet_type: BetType, profile: dict[str, float]) -> float:
+    volatility = profile["volatility"]
+    confidence = profile["confidence"]
+    stable = confidence >= 0.60 and volatility < 0.42
+    chaotic = volatility >= 0.66
+    if bet_type == "win":
+        if stable:
+            return 1
+        return 3 if chaotic else 2
+    if bet_type in {"bracket_quinella", "wide", "quinella"}:
+        if stable:
+            return 2.5
+        return 10 if chaotic else 5
+    if bet_type == "exacta":
+        if stable:
+            return 4
+        return 20 if chaotic else 8
+    if bet_type == "trio":
+        if stable:
+            return 3
+        return 20 if chaotic else 10
+    if bet_type == "trifecta":
+        if stable:
+            return 8
+        return 60 if chaotic else 24
+    return 1
+
+
+def strategy_family(strategy: str) -> str:
+    if "フォーメーション" in strategy:
+        return "formation"
+    if "ボックス" in strategy or "BOX" in strategy:
+        return "box"
+    if "マルチ" in strategy:
+        return "multi"
+    if "2頭軸" in strategy:
+        return "two_axis"
+    if "軸" in strategy or "流し" in strategy:
+        return "axis"
+    if "2点" in strategy:
+        return "top2"
+    return "single"
+
+
+def strategy_profile_bucket(profile: dict[str, float]) -> str:
+    if profile["confidence"] >= 0.60 and profile["volatility"] < 0.42:
+        return "stable"
+    if profile["volatility"] >= 0.66:
+        return "chaotic"
+    return "balanced"
+
+
+def strategy_profile_bonus(item: BetRecommendation, profile: dict[str, float]) -> float:
+    strategy = item.strategy
+    volatility = profile["volatility"]
+    confidence = profile["confidence"]
+    bucket = strategy_profile_bucket(profile)
+    stable = bucket == "stable"
+    chaotic = bucket == "chaotic"
+    mixed = not stable and not chaotic
+    bonus = 0.0
+
+    if item.bet_type != "win" and item.tickets <= 1:
+        bonus -= 0.88
+    if item.bet_type in {"trio", "trifecta"} and item.tickets <= 1:
+        bonus -= 1.35
+
+    if stable:
+        if item.bet_type == "win":
+            bonus += 0.22 if item.tickets == 1 else -0.10
+        if item.bet_type == "trifecta":
+            if "1着軸流し" in strategy:
+                bonus += 0.55
+            if "2着軸" in strategy or "3着軸" in strategy:
+                bonus -= 0.48
+        if "1着軸" in strategy or "2頭軸" in strategy or "軸流し" in strategy:
+            bonus += 0.30
+        if "マルチ" in strategy:
+            bonus += 0.04
+        if "ボックス" in strategy:
+            bonus -= 0.22
+    elif chaotic:
+        if item.bet_type == "win" and item.tickets >= 2:
+            bonus += 0.16
+        if "ボックス" in strategy:
+            bonus += 0.38
+        if "マルチ" in strategy:
+            bonus += 0.34
+        if "フォーメーション" in strategy:
+            bonus += 0.28
+        if "1着軸流し" in strategy:
+            bonus -= 0.22
+        if item.tickets < target_ticket_count(item.bet_type, profile) * 0.55:
+            bonus -= 0.26
+    elif mixed:
+        if "フォーメーション" in strategy:
+            bonus += 0.32
+        if "マルチ" in strategy:
+            bonus += 0.24
+        if "軸流し" in strategy:
+            bonus += 0.14
+
+    target = target_ticket_count(item.bet_type, profile)
+    if target > 0:
+        distance = abs(item.tickets - target) / target
+        bonus += max(-0.32, 0.18 - distance * 0.24)
+        if stable and item.tickets > target:
+            bonus -= min(1.15, ((item.tickets - target) / target) * 0.46)
+    if item.tickets > target * 1.75:
+        bonus -= min(0.34, (item.tickets / max(target, 1) - 1.75) * 0.10)
+
+    return bonus
+
+
+def strategy_profile_label(profile: dict[str, float]) -> str:
+    bucket = strategy_profile_bucket(profile)
+    if bucket == "stable":
+        return "堅めの隊列: 軸中心で点数を抑制"
+    if bucket == "chaotic":
+        return "荒れ警戒: BOX/マルチで相手抜けを抑制"
+    return "拮抗: フォーメーション/流しで点数調整"
+
+
 def fixed_type_recommendations(
-    recommendations: list[BetRecommendation], request: RaceRequest
+    recommendations: list[BetRecommendation],
+    request: RaceRequest,
+    runner_predictions: Sequence[RunnerPrediction] | None = None,
 ) -> list[BetRecommendation]:
     enabled = set(request.enabled_bet_types) & RECOMMENDABLE_BET_TYPES
     by_type: dict[BetType, BetRecommendation] = {}
     preferred_policy = ticket_policy(request.market)
+    profile = race_strategy_profile(runner_predictions or [])
+    profile_label = strategy_profile_label(profile)
 
     def policy_bonus(item: BetRecommendation) -> float:
-        policy = preferred_policy.get(item.bet_type)
+        bucket_policy = preferred_policy.get("by_profile") if isinstance(preferred_policy, dict) else None
+        bucket = strategy_profile_bucket(profile)
+        policy_source = preferred_policy
+        if isinstance(bucket_policy, dict):
+            scoped = bucket_policy.get(bucket)
+            if isinstance(scoped, dict):
+                policy_source = scoped
+        policy = policy_source.get(item.bet_type) if isinstance(policy_source, dict) else None
+        if not isinstance(policy, dict) and isinstance(preferred_policy, dict):
+            global_policy = preferred_policy.get("best_by_bet_type")
+            if isinstance(global_policy, dict):
+                policy = global_policy.get(item.bet_type)
         if not isinstance(policy, dict):
             return 0.0
         preferred = str(policy.get("strategy_label") or policy.get("strategy") or "")
+        preferred_family = str(policy.get("strategy_family") or "")
+        if preferred_family and preferred_family == strategy_family(item.strategy):
+            return 0.15
         if not preferred:
             return 0.0
         if preferred == "上位2頭" and item.strategy == "単勝2点":
-            return 0.30
+            return 0.16
         if preferred in item.strategy:
-            return 0.30
+            return 0.16
         if preferred == "軸流し" and "流し" in item.strategy:
-            return 0.24
+            return 0.13
         if preferred == "BOX" and "ボックス" in item.strategy:
-            return 0.24
+            return 0.13
+        if preferred == strategy_family(item.strategy):
+            return 0.13
         return 0.0
 
     def strategy_shape_bonus(item: BetRecommendation) -> float:
         strategy = item.strategy
         tickets = max(item.tickets, 1)
         if item.bet_type in {"trio", "trifecta"}:
-            coverage_base = 12 if item.bet_type == "trio" else 24
-            soft_limit = 18 if item.bet_type == "trio" else 36
+            coverage_base = 12 if item.bet_type == "trio" else 30
+            soft_limit = 22 if item.bet_type == "trio" else 48
             single_penalty = -0.72
         elif item.bet_type == "win":
             return 0.0
@@ -674,8 +864,11 @@ def fixed_type_recommendations(
             coverage_base = 6 if item.bet_type in {"bracket_quinella", "quinella", "wide"} else 8
             soft_limit = 8 if item.bet_type in {"bracket_quinella", "quinella", "wide"} else 12
             single_penalty = -0.58
-        coverage = min(tickets / coverage_base, 1.0)
+        dynamic_target = target_ticket_count(item.bet_type, profile)
+        coverage = min(tickets / max(coverage_base, dynamic_target * 0.75), 1.0)
         ticket_penalty = max(0.0, (tickets - soft_limit) * 0.004)
+        if strategy_profile_bucket(profile) == "stable" and tickets > dynamic_target:
+            ticket_penalty += (tickets - dynamic_target) * 0.025
         if item.bet_type == "trifecta" and "1頭軸マルチ" in strategy:
             shape = 0.42
         elif item.bet_type == "trifecta" and "フォーメーション" in strategy:
@@ -704,7 +897,11 @@ def fixed_type_recommendations(
         base = risk_adjusted_score(item, request.risk_level)
         stability = item.probability * (1.25 if item.bet_type in {"trio", "trifecta"} else 1.12)
         return (
-            base + strategy_shape_bonus(item) + policy_bonus(item) + stability,
+            base
+            + strategy_shape_bonus(item)
+            + strategy_profile_bonus(item, profile)
+            + policy_bonus(item)
+            + stability,
             item.probability,
             -float(item.tickets),
         )
@@ -713,7 +910,9 @@ def fixed_type_recommendations(
         if item.bet_type not in PUBLIC_FIXED_BET_TYPES or item.bet_type not in enabled:
             continue
         if item.bet_type not in by_type:
-            by_type[item.bet_type] = item
+            by_type[item.bet_type] = item.model_copy(
+                update={"note": f"{item.note} / 最適化 {profile_label}"}
+            )
     return [by_type[bet_type] for bet_type in PUBLIC_FIXED_BET_TYPES if bet_type in by_type]
 
 
@@ -873,6 +1072,29 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                 edge_floor=0.0,
                 force_display=True,
             )
+        if len(top_candidates) >= 3:
+            win_pack = top_candidates[:3]
+            raw_probability = sum(runner.win_probability for runner in win_pack)
+            weighted_odds = sum(runner.win_probability * runner.market_odds for runner in win_pack)
+            probability = clamp(raw_probability, 0.001, 0.84)
+            effective_odds = clamp(weighted_odds / max(raw_probability, 0.0001) / len(win_pack), 1.01, 32)
+            add_candidate(
+                recommendations,
+                request=request,
+                bet_type="win",
+                selection_text=selection(win_pack),
+                note_text=f"単勝3点 / {note(win_pack)}",
+                probability=probability,
+                odds=effective_odds,
+                odds_min=min(runner.market_odds for runner in win_pack),
+                odds_max=max(runner.market_odds for runner in win_pack),
+                strategy="単勝3点",
+                tickets=len(win_pack),
+                covered_selections=[str(runner.number) for runner in win_pack],
+                legs=[leg("単勝", win_pack)],
+                edge_floor=0.0,
+                force_display=True,
+            )
         for runner in top_candidates:
             add_candidate(
                 recommendations,
@@ -897,35 +1119,40 @@ def predict_race(request: RaceRequest) -> RacePrediction:
             bracket_opponents = unique_gate_runners(
                 runner for runner in pair_opponents if runner.gate != axis.gate
             )
-            if len(bracket_opponents) >= 2:
+            for opponent_count in (2, 3, 4):
+                selected_opponents = bracket_opponents[:opponent_count]
+                if len(selected_opponents) < 2:
+                    continue
                 add_combo_strategy(
                     recommendations,
                     request=request,
                     bet_type="bracket_quinella",
-                    strategy="枠連軸流し",
-                    selection_text=f"軸枠 {axis.gate} / 相手 {gate_selection(bracket_opponents)}",
-                    combos=pair_axis_flow(axis, bracket_opponents),
+                    strategy=f"枠連軸流し{len(selected_opponents)}点",
+                    selection_text=f"軸枠 {axis.gate} / 相手 {gate_selection(selected_opponents)}",
+                    combos=pair_axis_flow(axis, selected_opponents),
                     probability_fn=lambda pair: clamp(quinella_probability(pair) * 1.12, 0.006, 0.42),
                     bonus=0.08,
                     max_probability=0.54,
                     unordered=True,
                     max_odds=80,
-                    legs=[gate_leg("軸枠", [axis]), gate_leg("相手", bracket_opponents)],
+                    legs=[gate_leg("軸枠", [axis]), gate_leg("相手", selected_opponents)],
                     covered_selection_fn=gate_selection,
                     force_display=True,
                 )
-            bracket_top = unique_gate_runners(top_four)
-            bracket_box = [
-                pair
-                for pair in combinations(bracket_top, 2)
-                if pair[0].gate != pair[1].gate
-            ]
-            if len(bracket_box) >= 3:
+            for box_size in (3, 4, 5):
+                bracket_top = unique_gate_runners(pair_candidates[:box_size])
+                bracket_box = [
+                    pair
+                    for pair in combinations(bracket_top, 2)
+                    if pair[0].gate != pair[1].gate
+                ]
+                if len(bracket_box) < 3:
+                    continue
                 add_combo_strategy(
                     recommendations,
                     request=request,
                     bet_type="bracket_quinella",
-                    strategy="枠連BOX",
+                    strategy=f"枠連{len(bracket_top)}枠BOX",
                     selection_text=f"BOX {gate_selection(bracket_top)}",
                     combos=bracket_box,
                     probability_fn=lambda pair: clamp(quinella_probability(pair) * 1.08, 0.006, 0.44),
@@ -960,36 +1187,42 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                 )
 
         if "wide" in enabled_bet_types:
-            if len(pair_opponents) >= 2:
+            for opponent_count in (2, 3, 5):
+                selected_opponents = pair_opponents[:opponent_count]
+                if len(selected_opponents) < 2:
+                    continue
                 add_combo_strategy(
                     recommendations,
                     request=request,
                     bet_type="wide",
-                    strategy="ワイド軸流し",
-                    selection_text=f"軸 {axis.number} / 相手 {selection(pair_opponents)}",
-                    combos=pair_axis_flow(axis, pair_opponents),
+                    strategy=f"ワイド軸流し{len(selected_opponents)}点",
+                    selection_text=f"軸 {axis.number} / 相手 {selection(selected_opponents)}",
+                    combos=pair_axis_flow(axis, selected_opponents),
                     probability_fn=wide_probability,
                     bonus=0.08,
                     max_probability=0.82,
                     unordered=True,
                     max_odds=70,
-                    legs=[leg("軸", [axis]), leg("相手", pair_opponents)],
+                    legs=[leg("軸", [axis]), leg("相手", selected_opponents)],
                     force_display=True,
                 )
-            if len(top_four) >= 4:
+            for box_size in (3, 4, 5):
+                box_runners = pair_candidates[:box_size]
+                if len(box_runners) < 3:
+                    continue
                 add_combo_strategy(
                     recommendations,
                     request=request,
                     bet_type="wide",
-                    strategy="ワイドBOX",
-                    selection_text=f"BOX {selection(top_four)}",
-                    combos=combinations(top_four, 2),
+                    strategy=f"ワイド{len(box_runners)}頭BOX",
+                    selection_text=f"BOX {selection(box_runners)}",
+                    combos=combinations(box_runners, 2),
                     probability_fn=wide_probability,
                     bonus=0.06,
                     max_probability=0.86,
                     unordered=True,
                     max_odds=70,
-                    legs=[leg("BOX", top_four)],
+                    legs=[leg("BOX", box_runners)],
                     force_display=True,
                 )
             for pair in combinations(pair_candidates, 2):
@@ -1009,36 +1242,42 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                 )
 
         if "quinella" in enabled_bet_types:
-            if len(pair_opponents) >= 2:
+            for opponent_count in (2, 3, 5):
+                selected_opponents = pair_opponents[:opponent_count]
+                if len(selected_opponents) < 2:
+                    continue
                 add_combo_strategy(
                     recommendations,
                     request=request,
                     bet_type="quinella",
-                    strategy="馬連軸流し",
-                    selection_text=f"軸 {axis.number} / 相手 {selection(pair_opponents)}",
-                    combos=pair_axis_flow(axis, pair_opponents),
+                    strategy=f"馬連軸流し{len(selected_opponents)}点",
+                    selection_text=f"軸 {axis.number} / 相手 {selection(selected_opponents)}",
+                    combos=pair_axis_flow(axis, selected_opponents),
                     probability_fn=quinella_probability,
                     bonus=0.10,
                     max_probability=0.64,
                     unordered=True,
                     max_odds=120,
-                    legs=[leg("軸", [axis]), leg("相手", pair_opponents)],
+                    legs=[leg("軸", [axis]), leg("相手", selected_opponents)],
                     force_display=True,
                 )
-            if len(top_four) >= 4:
+            for box_size in (3, 4, 5):
+                box_runners = pair_candidates[:box_size]
+                if len(box_runners) < 3:
+                    continue
                 add_combo_strategy(
                     recommendations,
                     request=request,
                     bet_type="quinella",
-                    strategy="馬連BOX",
-                    selection_text=f"BOX {selection(top_four)}",
-                    combos=combinations(top_four, 2),
+                    strategy=f"馬連{len(box_runners)}頭BOX",
+                    selection_text=f"BOX {selection(box_runners)}",
+                    combos=combinations(box_runners, 2),
                     probability_fn=quinella_probability,
                     bonus=0.08,
                     max_probability=0.68,
                     unordered=True,
                     max_odds=110,
-                    legs=[leg("BOX", top_four)],
+                    legs=[leg("BOX", box_runners)],
                     force_display=True,
                 )
             for pair in combinations(pair_candidates[:5], 2):
@@ -1058,54 +1297,64 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                 )
 
         if "exacta" in enabled_bet_types:
-            if len(pair_opponents) >= 2:
+            for opponent_count in (2, 3, 5):
+                selected_opponents = pair_opponents[:opponent_count]
+                if len(selected_opponents) < 2:
+                    continue
                 add_combo_strategy(
                     recommendations,
                     request=request,
                     bet_type="exacta",
-                    strategy="馬単1着軸流し",
-                    selection_text=f"1着 {axis.number} / 2着 {selection(pair_opponents)}",
-                    combos=exacta_axis_flow(axis, pair_opponents, 0),
+                    strategy=f"馬単1着軸流し{len(selected_opponents)}点",
+                    selection_text=f"1着 {axis.number} / 2着 {selection(selected_opponents)}",
+                    combos=exacta_axis_flow(axis, selected_opponents, 0),
                     probability_fn=exacta_probability,
                     bonus=0.12,
                     max_probability=0.50,
                     unordered=False,
                     max_odds=160,
-                    legs=[leg("1着", [axis]), leg("2着", pair_opponents)],
+                    legs=[leg("1着", [axis]), leg("2着", selected_opponents)],
                     force_display=True,
                 )
+            for opponent_count in (2, 3, 4):
+                selected_opponents = pair_opponents[:opponent_count]
+                if len(selected_opponents) < 2:
+                    continue
                 add_combo_strategy(
                     recommendations,
                     request=request,
                     bet_type="exacta",
-                    strategy="馬単1頭軸マルチ",
-                    selection_text=f"軸 {axis.number} / 相手 {selection(pair_opponents[:4])}",
+                    strategy=f"馬単1頭軸マルチ{len(selected_opponents) * 2}点",
+                    selection_text=f"軸 {axis.number} / 相手 {selection(selected_opponents)}",
                     combos=[
-                        *exacta_axis_flow(axis, pair_opponents[:4], 0),
-                        *exacta_axis_flow(axis, pair_opponents[:4], 1),
+                        *exacta_axis_flow(axis, selected_opponents, 0),
+                        *exacta_axis_flow(axis, selected_opponents, 1),
                     ],
                     probability_fn=exacta_probability,
                     bonus=0.10,
                     max_probability=0.58,
                     unordered=False,
                     max_odds=150,
-                    legs=[leg("軸", [axis]), leg("相手", pair_opponents[:4])],
+                    legs=[leg("軸", [axis]), leg("相手", selected_opponents)],
                     force_display=True,
                 )
-            if len(top_four) >= 4:
+            for box_size in (3, 4):
+                box_runners = pair_candidates[:box_size]
+                if len(box_runners) < 3:
+                    continue
                 add_combo_strategy(
                     recommendations,
                     request=request,
                     bet_type="exacta",
-                    strategy="馬単BOX",
-                    selection_text=f"BOX {selection(top_four)}",
-                    combos=permutations(top_four, 2),
+                    strategy=f"馬単{len(box_runners)}頭BOX",
+                    selection_text=f"BOX {selection(box_runners)}",
+                    combos=permutations(box_runners, 2),
                     probability_fn=exacta_probability,
                     bonus=0.08,
                     max_probability=0.62,
                     unordered=False,
                     max_odds=150,
-                    legs=[leg("BOX", top_four)],
+                    legs=[leg("BOX", box_runners)],
                     force_display=True,
                 )
             for ordered_pair in permutations(pair_candidates[:5], 2):
@@ -1142,63 +1391,68 @@ def predict_race(request: RaceRequest) -> RacePrediction:
     if len(top_candidates) >= 3:
         axis = top_candidates[0]
         trio_opponents = top_candidates[1:6]
-        add_combo_strategy(
-            recommendations,
-            request=request,
-            bet_type="trio",
-            strategy="3連複1頭軸流し",
-            selection_text=f"軸 {axis.number} / 相手 {selection(trio_opponents)}",
-            combos=trio_one_axis_flow(axis, trio_opponents),
-            probability_fn=trio_probability,
-            bonus=0.20,
-            max_probability=0.56,
-            unordered=True,
-            max_odds=160,
-            legs=[leg("軸", [axis]), leg("相手", trio_opponents)],
-            force_display=True,
-        )
-        add_combo_strategy(
-            recommendations,
-            request=request,
-            bet_type="trio",
-            strategy="3連複2頭軸流し",
-            selection_text=f"軸 {selection(top_candidates[:2])} / 相手 {selection(top_candidates[2:6])}",
-            combos=trio_two_axis_flow(top_candidates[0], top_candidates[1], top_candidates[2:6]),
-            probability_fn=trio_probability,
-            bonus=0.18,
-            max_probability=0.42,
-            unordered=True,
-            max_odds=160,
-            legs=[
-                leg("軸1", [top_candidates[0]]),
-                leg("軸2", [top_candidates[1]]),
-                leg("相手", top_candidates[2:6]),
-            ],
-            force_display=True,
-        )
-        if len(top_candidates) >= 5:
+        for opponent_count in (3, 4, 5):
+            selected_opponents = trio_opponents[:opponent_count]
+            if len(selected_opponents) < 3:
+                continue
             add_combo_strategy(
                 recommendations,
                 request=request,
                 bet_type="trio",
-                strategy="3連複5頭ボックス",
-                selection_text=f"BOX {selection(top_candidates[:5])}",
-                combos=combinations(top_candidates[:5], 3),
+                strategy=f"3連複1頭軸流し{combination_count(len(selected_opponents), 2)}点",
+                selection_text=f"軸 {axis.number} / 相手 {selection(selected_opponents)}",
+                combos=trio_one_axis_flow(axis, selected_opponents),
                 probability_fn=trio_probability,
-                bonus=0.14,
-                max_probability=0.62,
+                bonus=0.20,
+                max_probability=0.56,
                 unordered=True,
-                max_odds=140,
-                legs=[leg("BOX", top_candidates[:5])],
+                max_odds=160,
+                legs=[leg("軸", [axis]), leg("相手", selected_opponents)],
                 force_display=True,
             )
-            formation = [
-                (first, second, third)
-                for first in top_candidates[:2]
-                for second in top_candidates[1:5]
-                for third in top_candidates[2:6]
-                if len({first.id, second.id, third.id}) == 3
-            ]
+        for opponent_count in (2, 3, 4):
+            selected_opponents = top_candidates[2 : 2 + opponent_count]
+            if len(selected_opponents) < 2:
+                continue
+            add_combo_strategy(
+                recommendations,
+                request=request,
+                bet_type="trio",
+                strategy=f"3連複2頭軸流し{len(selected_opponents)}点",
+                selection_text=f"軸 {selection(top_candidates[:2])} / 相手 {selection(selected_opponents)}",
+                combos=trio_two_axis_flow(top_candidates[0], top_candidates[1], selected_opponents),
+                probability_fn=trio_probability,
+                bonus=0.18,
+                max_probability=0.42,
+                unordered=True,
+                max_odds=160,
+                legs=[
+                    leg("軸1", [top_candidates[0]]),
+                    leg("軸2", [top_candidates[1]]),
+                    leg("相手", selected_opponents),
+                ],
+                force_display=True,
+            )
+        if len(top_candidates) >= 4:
+            for box_size in (4, 5, 6):
+                box_runners = top_candidates[:box_size]
+                if len(box_runners) < 4:
+                    continue
+                add_combo_strategy(
+                    recommendations,
+                    request=request,
+                    bet_type="trio",
+                    strategy=f"3連複{len(box_runners)}頭ボックス",
+                    selection_text=f"BOX {selection(box_runners)}",
+                    combos=combinations(box_runners, 3),
+                    probability_fn=trio_probability,
+                    bonus=0.14,
+                    max_probability=0.62,
+                    unordered=True,
+                    max_odds=140,
+                    legs=[leg("BOX", box_runners)],
+                    force_display=True,
+                )
             add_combo_strategy(
                 recommendations,
                 request=request,
@@ -1207,7 +1461,13 @@ def predict_race(request: RaceRequest) -> RacePrediction:
                 selection_text=(
                     f"軸候補 {selection(top_candidates[:2])} / 相手 {selection(top_candidates[1:6])}"
                 ),
-                combos=formation,
+                combos=[
+                    (first, second, third)
+                    for first in top_candidates[:2]
+                    for second in top_candidates[1:5]
+                    for third in top_candidates[2:6]
+                    if len({first.id, second.id, third.id}) == 3
+                ],
                 probability_fn=trio_probability,
                 bonus=0.16,
                 max_probability=0.58,
@@ -1235,83 +1495,95 @@ def predict_race(request: RaceRequest) -> RacePrediction:
     if len(top_candidates) >= 3:
         axis = top_candidates[0]
         trifecta_opponents = top_candidates[1:6]
-        add_trifecta_strategy(
-            recommendations,
-            request=request,
-            strategy="3連単1着軸流し",
-            selection_text=f"1着 {axis.number} / 2-3着 {selection(trifecta_opponents)}",
-            combos=trifecta_fixed_axis_flow(axis, trifecta_opponents, 0),
-            bonus=0.22,
-            legs=[leg("1着", [axis]), leg("2着", trifecta_opponents), leg("3着", trifecta_opponents)],
-            force_display=True,
-        )
-        add_trifecta_strategy(
-            recommendations,
-            request=request,
-            strategy="3連単2着軸流し",
-            selection_text=f"1着 {selection(trifecta_opponents)} / 2着 {axis.number} / 3着 相手",
-            combos=trifecta_fixed_axis_flow(axis, trifecta_opponents, 1),
-            bonus=0.18,
-            legs=[leg("1着", trifecta_opponents), leg("2着", [axis]), leg("3着", trifecta_opponents)],
-            force_display=True,
-        )
-        add_trifecta_strategy(
-            recommendations,
-            request=request,
-            strategy="3連単3着軸流し",
-            selection_text=f"1-2着 {selection(trifecta_opponents)} / 3着 {axis.number}",
-            combos=trifecta_fixed_axis_flow(axis, trifecta_opponents, 2),
-            bonus=0.16,
-            legs=[leg("1着", trifecta_opponents), leg("2着", trifecta_opponents), leg("3着", [axis])],
-            force_display=True,
-        )
+        for opponent_count in (2, 3, 5):
+            selected_opponents = trifecta_opponents[:opponent_count]
+            if len(selected_opponents) < 2:
+                continue
+            add_trifecta_strategy(
+                recommendations,
+                request=request,
+                strategy=f"3連単1着軸流し{permutation_count(len(selected_opponents), 2)}点",
+                selection_text=f"1着 {axis.number} / 2-3着 {selection(selected_opponents)}",
+                combos=trifecta_fixed_axis_flow(axis, selected_opponents, 0),
+                bonus=0.22,
+                legs=[leg("1着", [axis]), leg("2着", selected_opponents), leg("3着", selected_opponents)],
+                force_display=True,
+            )
+            add_trifecta_strategy(
+                recommendations,
+                request=request,
+                strategy=f"3連単2着軸流し{permutation_count(len(selected_opponents), 2)}点",
+                selection_text=f"1着 {selection(selected_opponents)} / 2着 {axis.number} / 3着 相手",
+                combos=trifecta_fixed_axis_flow(axis, selected_opponents, 1),
+                bonus=0.18,
+                legs=[leg("1着", selected_opponents), leg("2着", [axis]), leg("3着", selected_opponents)],
+                force_display=True,
+            )
+            add_trifecta_strategy(
+                recommendations,
+                request=request,
+                strategy=f"3連単3着軸流し{permutation_count(len(selected_opponents), 2)}点",
+                selection_text=f"1-2着 {selection(selected_opponents)} / 3着 {axis.number}",
+                combos=trifecta_fixed_axis_flow(axis, selected_opponents, 2),
+                bonus=0.16,
+                legs=[leg("1着", selected_opponents), leg("2着", selected_opponents), leg("3着", [axis])],
+                force_display=True,
+            )
 
     if len(top_candidates) >= 5:
         top = top_candidates
-        add_trifecta_strategy(
-            recommendations,
-            request=request,
-            strategy="3連単フォーメーション",
-            selection_text=(
-                f"1着 {selection(top[:2])} / 2着 {selection(top[:4])} / 3着 {selection(top[:6])}"
-            ),
-            combos=formation_combos(top[:2], top[:4], top[:6]),
-            bonus=0.19,
-            legs=[leg("1着", top[:2]), leg("2着", top[:4]), leg("3着", top[:6])],
-            force_display=True,
-        )
-        add_trifecta_strategy(
-            recommendations,
-            request=request,
-            strategy="3連単1頭軸マルチ",
-            selection_text=f"軸 {top[0].number} / 相手 {selection(top[1:5])}",
-            combos=one_axis_multi_combos(top[0], top[1:5]),
-            bonus=0.16,
-            legs=[leg("軸", [top[0]]), leg("相手", top[1:5])],
-            force_display=True,
-        )
-        add_trifecta_strategy(
-            recommendations,
-            request=request,
-            strategy="3連単2頭軸マルチ",
-            selection_text=f"軸 {selection(top[:2])} / 相手 {selection(top[2:6])}",
-            combos=two_axis_multi_combos(top[0], top[1], top[2:6]),
-            bonus=0.18,
-            legs=[leg("軸1", [top[0]]), leg("軸2", [top[1]]), leg("相手", top[2:6])],
-            force_display=True,
-        )
-        add_trifecta_strategy(
-            recommendations,
-            request=request,
-            strategy="3連単4頭ボックス",
-            selection_text=f"BOX {selection(top[:4])}",
-            combos=permutations(top[:4], 3),
-            bonus=0.14,
-            legs=[leg("BOX", top[:4])],
-            force_display=True,
-        )
+        for formation_size in ((1, 3, 5), (2, 3, 5), (2, 4, 6)):
+            first_count, second_count, third_count = formation_size
+            add_trifecta_strategy(
+                recommendations,
+                request=request,
+                strategy=f"3連単フォーメーション{first_count}-{second_count}-{third_count}",
+                selection_text=(
+                    f"1着 {selection(top[:first_count])} / 2着 {selection(top[:second_count])} / 3着 {selection(top[:third_count])}"
+                ),
+                combos=formation_combos(top[:first_count], top[:second_count], top[:third_count]),
+                bonus=0.19,
+                legs=[leg("1着", top[:first_count]), leg("2着", top[:second_count]), leg("3着", top[:third_count])],
+                force_display=True,
+            )
+        for opponent_count in (2, 3, 4):
+            selected_opponents = top[1 : 1 + opponent_count]
+            add_trifecta_strategy(
+                recommendations,
+                request=request,
+                strategy=f"3連単1頭軸マルチ{combination_count(len(selected_opponents), 2) * 6}点",
+                selection_text=f"軸 {top[0].number} / 相手 {selection(selected_opponents)}",
+                combos=one_axis_multi_combos(top[0], selected_opponents),
+                bonus=0.16,
+                legs=[leg("軸", [top[0]]), leg("相手", selected_opponents)],
+                force_display=True,
+            )
+        for opponent_count in (2, 3, 4):
+            selected_opponents = top[2 : 2 + opponent_count]
+            add_trifecta_strategy(
+                recommendations,
+                request=request,
+                strategy=f"3連単2頭軸マルチ{len(selected_opponents) * 6}点",
+                selection_text=f"軸 {selection(top[:2])} / 相手 {selection(selected_opponents)}",
+                combos=two_axis_multi_combos(top[0], top[1], selected_opponents),
+                bonus=0.18,
+                legs=[leg("軸1", [top[0]]), leg("軸2", [top[1]]), leg("相手", selected_opponents)],
+                force_display=True,
+            )
+        for box_size in (3, 4, 5):
+            box_runners = top[:box_size]
+            add_trifecta_strategy(
+                recommendations,
+                request=request,
+                strategy=f"3連単{len(box_runners)}頭ボックス",
+                selection_text=f"BOX {selection(box_runners)}",
+                combos=permutations(box_runners, 3),
+                bonus=0.14,
+                legs=[leg("BOX", box_runners)],
+                force_display=True,
+            )
 
-    recommendations = fixed_type_recommendations(recommendations, request)
+    recommendations = fixed_type_recommendations(recommendations, request, runner_predictions)
 
     total_stake = sum(item.stake for item in recommendations)
     expected_return = sum(item.stake * item.odds * item.probability for item in recommendations)

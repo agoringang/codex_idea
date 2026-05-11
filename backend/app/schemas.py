@@ -28,6 +28,37 @@ class Runner(BaseModel):
     horseRecentPlaceRate: float | None = None
     horseDistancePlaceRate: float | None = None
     horseSurfacePlaceRate: float | None = None
+    horseRecentWinRate5: float | None = None
+    horseRecentPlaceRate5: float | None = None
+    horseAvgFinishLast3: float | None = None
+    horseAvgFinishLast5: float | None = None
+    horseWinRateLifetime: float | None = None
+    horsePlaceRateLifetime: float | None = None
+    horseAvgOddsRankLast3: float | None = None
+    horseAvgOddsLast3: float | None = None
+    horseWeightChangeFromLast: float | None = None
+    horseWeightChangeRate: float | None = None
+    distanceChange: float | None = None
+    distanceAbsChange: float | None = None
+    surfaceSwitch: float | None = None
+    jockeySwitch: float | None = None
+    carriedWeightChange: float | None = None
+    jockeyRecentWinRate50: float | None = None
+    jockeyRecentPlaceRate50: float | None = None
+    trainerRecentWinRate50: float | None = None
+    trainerRecentPlaceRate50: float | None = None
+    horseJockeyWinRate: float | None = None
+    horseJockeyPlaceRate: float | None = None
+    jockeyTrainerWinRate: float | None = None
+    jockeyTrainerPlaceRate: float | None = None
+    sireWinRate: float | None = None
+    sirePlaceRate: float | None = None
+    damSireWinRate: float | None = None
+    damSirePlaceRate: float | None = None
+    sireSurfacePlaceRate: float | None = None
+    damSireSurfacePlaceRate: float | None = None
+    sireDistancePlaceRate: float | None = None
+    damSireDistancePlaceRate: float | None = None
     trainingScore: float | None = None
     bloodlineScore: float | None = None
     paddockScore: float | None = None
@@ -35,6 +66,21 @@ class Runner(BaseModel):
     oddsDelta5m: float | None = None
     oddsDelta15m: float | None = None
     oddsVolatility: float | None = None
+    logMarketOdds: float | None = None
+    oddsToFavorite: float | None = None
+    favoriteMarketOdds: float | None = None
+    marketTop3Probability: float | None = None
+    marketEntropy: float | None = None
+    marketRankPct: float | None = None
+    carriedWeightVsField: float | None = None
+    horseWeightVsField: float | None = None
+    ageVsField: float | None = None
+    restVsField: float | None = None
+    avgSpeedVsField: float | None = None
+    recentPlaceVsField: float | None = None
+    jockeyWinVsField: float | None = None
+    trainerWinVsField: float | None = None
+    drawBiasVsField: float | None = None
     ticketPoolShare: float | None = None
     lap3f: float | None = None
     lap4f: float | None = None
@@ -153,6 +199,37 @@ class RunnerInput(BaseModel):
     horse_recent_place_rate: float | None = Field(default=None, ge=0, le=1)
     horse_distance_place_rate: float | None = Field(default=None, ge=0, le=1)
     horse_surface_place_rate: float | None = Field(default=None, ge=0, le=1)
+    horse_recent_win_rate_5: float | None = Field(default=None, ge=0, le=1)
+    horse_recent_place_rate_5: float | None = Field(default=None, ge=0, le=1)
+    horse_avg_finish_last3: float | None = Field(default=None, ge=0)
+    horse_avg_finish_last5: float | None = Field(default=None, ge=0)
+    horse_win_rate_lifetime: float | None = Field(default=None, ge=0, le=1)
+    horse_place_rate_lifetime: float | None = Field(default=None, ge=0, le=1)
+    horse_avg_odds_rank_last3: float | None = Field(default=None, ge=0)
+    horse_avg_odds_last3: float | None = Field(default=None, ge=0)
+    horse_weight_change_from_last: float | None = None
+    horse_weight_change_rate: float | None = None
+    distance_change: float | None = None
+    distance_abs_change: float | None = Field(default=None, ge=0)
+    surface_switch: float | None = Field(default=None, ge=0, le=1)
+    jockey_switch: float | None = Field(default=None, ge=0, le=1)
+    carried_weight_change: float | None = None
+    jockey_recent_win_rate_50: float | None = Field(default=None, ge=0, le=1)
+    jockey_recent_place_rate_50: float | None = Field(default=None, ge=0, le=1)
+    trainer_recent_win_rate_50: float | None = Field(default=None, ge=0, le=1)
+    trainer_recent_place_rate_50: float | None = Field(default=None, ge=0, le=1)
+    horse_jockey_win_rate: float | None = Field(default=None, ge=0, le=1)
+    horse_jockey_place_rate: float | None = Field(default=None, ge=0, le=1)
+    jockey_trainer_win_rate: float | None = Field(default=None, ge=0, le=1)
+    jockey_trainer_place_rate: float | None = Field(default=None, ge=0, le=1)
+    sire_win_rate: float | None = Field(default=None, ge=0, le=1)
+    sire_place_rate: float | None = Field(default=None, ge=0, le=1)
+    dam_sire_win_rate: float | None = Field(default=None, ge=0, le=1)
+    dam_sire_place_rate: float | None = Field(default=None, ge=0, le=1)
+    sire_surface_place_rate: float | None = Field(default=None, ge=0, le=1)
+    dam_sire_surface_place_rate: float | None = Field(default=None, ge=0, le=1)
+    sire_distance_place_rate: float | None = Field(default=None, ge=0, le=1)
+    dam_sire_distance_place_rate: float | None = Field(default=None, ge=0, le=1)
     training_score: float | None = Field(default=None, ge=0, le=100)
     bloodline_score: float | None = Field(default=None, ge=0, le=100)
     paddock_score: float | None = Field(default=None, ge=0, le=100)
@@ -160,6 +237,21 @@ class RunnerInput(BaseModel):
     lap_4f: float | None = Field(default=None, ge=0)
     odds_rank: int | None = Field(default=None, ge=1)
     odds_delta: float | None = None
+    log_market_odds: float | None = Field(default=None, ge=0)
+    odds_to_favorite: float | None = Field(default=None, ge=0)
+    favorite_market_odds: float | None = Field(default=None, ge=0)
+    market_top3_probability: float | None = Field(default=None, ge=0, le=1)
+    market_entropy: float | None = Field(default=None, ge=0)
+    market_rank_pct: float | None = Field(default=None, ge=0)
+    carried_weight_vs_field: float | None = None
+    horse_weight_vs_field: float | None = None
+    age_vs_field: float | None = None
+    rest_vs_field: float | None = None
+    avg_speed_vs_field: float | None = None
+    recent_place_vs_field: float | None = None
+    jockey_win_vs_field: float | None = None
+    trainer_win_vs_field: float | None = None
+    draw_bias_vs_field: float | None = None
     odds_delta_5m: float | None = None
     odds_delta_15m: float | None = None
     odds_volatility: float | None = Field(default=None, ge=0)
