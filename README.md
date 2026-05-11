@@ -132,7 +132,7 @@ uv run python scripts/render_prediction_card.py \
 backend/docs/supabase_prediction_history.sql
 ```
 
-Vercelには `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`CRON_SECRET` を設定します。Cronは `vercel.json` で毎日 `/api/jobs/ingest/netkeiba` を実行し、直近2日分のnetkeiba公開ページを低頻度で取得して `race_cards` にUpsertします。
+Vercelには `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`CRON_SECRET` を設定します。Cronは `vercel.json` で前日出馬表と結果取得を実行し、netkeiba公開ページから取得した `race_cards` と開催予定用の `race_schedule` にUpsertします。画面側は `/api/races` と `/api/schedule` を1分間隔で再取得します。
 
 ## Vercel
 
@@ -152,6 +152,7 @@ npm run upload:model -- backend/models/racequant_holdout_2026/holdout_artifact.j
 - `GET /status`
 - `GET /status/product`
 - `GET /races?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`
+- `GET /schedule?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`
 - `GET /live/{race_id}`
 - `GET /history`
 - `GET /jobs/ingest/netkeiba`

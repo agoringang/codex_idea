@@ -19,6 +19,7 @@ from app.history import get_all_history, get_history_for_date, record_prediction
 from app.ingestion import import_netkeiba_race_cards, ingest_netkeiba_window
 from app.jobs import plan_sync_job, plan_training_job
 from app.live import default_live_snapshot
+from app.race_schedule import get_race_schedule
 from app.settlement import settle_history
 from app.services.ingest import ingest_csv
 from app.services.status import get_status
@@ -50,8 +51,18 @@ def races(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> list[strategy_schemas.Race]:
-    response.headers["Cache-Control"] = "s-maxage=15, stale-while-revalidate=30"
+    response.headers["Cache-Control"] = "s-maxage=45, stale-while-revalidate=60"
     return get_races(start_date=start_date, end_date=end_date)
+
+
+@router.get("/schedule")
+def race_schedule(
+    response: Response,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> list[dict]:
+    response.headers["Cache-Control"] = "s-maxage=60, stale-while-revalidate=120"
+    return get_race_schedule(start_date=start_date, end_date=end_date)
 
 
 @router.get("/live/{race_id}", response_model=strategy_schemas.LiveSnapshot)
@@ -83,7 +94,7 @@ def prediction_history(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict:
-    response.headers["Cache-Control"] = "s-maxage=15, stale-while-revalidate=30"
+    response.headers["Cache-Control"] = "s-maxage=45, stale-while-revalidate=60"
     today = date.today()
     start = start_date or (today - timedelta(days=30)).isoformat()
     end = end_date or today.isoformat()

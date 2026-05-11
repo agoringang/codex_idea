@@ -1,0 +1,111 @@
+[
+  {
+    "date": "2026-05-09",
+    "market": "JRA",
+    "venues": ["東京", "京都", "新潟"],
+    "gradeRaces": ["エプソムC", "京都新聞杯"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-05-10",
+    "market": "JRA",
+    "venues": ["東京", "京都", "新潟"],
+    "gradeRaces": ["NHKマイルC"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-05-16",
+    "market": "JRA",
+    "venues": ["東京", "京都", "新潟"],
+    "gradeRaces": ["京都ハイジャンプ", "新潟大賞典"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-05-17",
+    "market": "JRA",
+    "venues": ["東京", "京都", "新潟"],
+    "gradeRaces": ["ヴィクトリアマイル"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-05-23",
+    "market": "JRA",
+    "venues": ["東京", "京都", "新潟"],
+    "gradeRaces": ["平安S"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-05-24",
+    "market": "JRA",
+    "venues": ["東京", "京都", "新潟"],
+    "gradeRaces": ["オークス"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-05-30",
+    "market": "JRA",
+    "venues": ["東京", "京都"],
+    "gradeRaces": ["葵S"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-05-31",
+    "market": "JRA",
+    "venues": ["東京", "京都"],
+    "gradeRaces": ["日本ダービー", "目黒記念"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-06-06",
+    "market": "JRA",
+    "venues": ["東京", "阪神"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-06-07",
+    "market": "JRA",
+    "venues": ["東京", "阪神"],
+    "gradeRaces": ["安田記念"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-06-13",
+    "market": "JRA",
+    "venues": ["東京", "阪神", "函館"],
+    "gradeRaces": ["東京ジャンプS", "函館スプリントS"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-06-14",
+    "market": "JRA",
+    "venues": ["東京", "阪神", "函館"],
+    "gradeRaces": ["宝塚記念"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-06-20",
+    "market": "JRA",
+    "venues": ["東京", "阪神", "函館"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-06-21",
+    "market": "JRA",
+    "venues": ["東京", "阪神", "函館"],
+    "gradeRaces": ["府中牝馬S", "しらさぎS"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-06-27",
+    "market": "JRA",
+    "venues": ["福島", "小倉", "函館"],
+    "source": "seed"
+  },
+  {
+    "date": "2026-06-28",
+    "market": "JRA",
+    "venues": ["福島", "小倉", "函館"],
+    "gradeRaces": ["ラジオNIKKEI賞", "函館記念"],
+    "source": "seed"
+  }
+]

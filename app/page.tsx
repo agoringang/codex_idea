@@ -202,9 +202,21 @@ type MonthCell = CalendarDay & {
   jraCount: number;
   narCount: number;
   plannedCount: number;
+  plannedJraCount: number;
+  plannedNarCount: number;
   historyCount: number;
   hitCount: number;
   isToday: boolean;
+};
+
+type RaceSchedule = {
+  date: string;
+  market: Market;
+  venues: string[];
+  gradeRaces: string[];
+  raceCount: number;
+  source: string;
+  sourceCheckedAt?: string;
 };
 
 type VenueOption = {
@@ -610,25 +622,6 @@ const yenFormatter = new Intl.NumberFormat("ja-JP", {
 
 const numberFormatter = new Intl.NumberFormat("ja-JP");
 const weekdayFormatter = new Intl.DateTimeFormat("ja-JP", { weekday: "short" });
-const INITIAL_CALENDAR_DATE = "2026-05-07";
-const JRA_FUTURE_SCHEDULE: Record<string, { venues: string[]; gradeRaces?: string[] }> = {
-  "2026-05-09": { venues: ["東京", "京都", "新潟"], gradeRaces: ["エプソムC", "京都新聞杯"] },
-  "2026-05-10": { venues: ["東京", "京都", "新潟"], gradeRaces: ["NHKマイルC"] },
-  "2026-05-16": { venues: ["東京", "京都", "新潟"], gradeRaces: ["京都ハイジャンプ", "新潟大賞典"] },
-  "2026-05-17": { venues: ["東京", "京都", "新潟"], gradeRaces: ["ヴィクトリアマイル"] },
-  "2026-05-23": { venues: ["東京", "京都", "新潟"], gradeRaces: ["平安S"] },
-  "2026-05-24": { venues: ["東京", "京都", "新潟"], gradeRaces: ["オークス"] },
-  "2026-05-30": { venues: ["東京", "京都"], gradeRaces: ["葵S"] },
-  "2026-05-31": { venues: ["東京", "京都"], gradeRaces: ["日本ダービー", "目黒記念"] },
-  "2026-06-06": { venues: ["東京", "阪神"] },
-  "2026-06-07": { venues: ["東京", "阪神"], gradeRaces: ["安田記念"] },
-  "2026-06-13": { venues: ["東京", "阪神", "函館"], gradeRaces: ["東京ジャンプS", "函館スプリントS"] },
-  "2026-06-14": { venues: ["東京", "阪神", "函館"], gradeRaces: ["宝塚記念"] },
-  "2026-06-20": { venues: ["東京", "阪神", "函館"] },
-  "2026-06-21": { venues: ["東京", "阪神", "函館"], gradeRaces: ["府中牝馬S", "しらさぎS"] },
-  "2026-06-27": { venues: ["福島", "小倉", "函館"] },
-  "2026-06-28": { venues: ["福島", "小倉", "函館"], gradeRaces: ["ラジオNIKKEI賞", "函館記念"] },
-};
 
 function readUrlState(): UrlState {
   if (typeof window === "undefined") {
@@ -715,6 +708,10 @@ function optionalText(value: unknown) {
     .replace(/\s+/g, " ")
     .trim();
   return text.length > 0 ? text : undefined;
+}
+
+function pageIsHidden() {
+  return typeof document !== "undefined" && document.hidden;
 }
 
 function validPopularity(value: unknown) {
@@ -1081,22 +1078,57 @@ function normalizeApiHistory(payload: any): HistoricalPrediction[] {
 }
 
 async function fetchRaceRangeFromApi(startDate: string, endDate: string) {
-  const response = await fetch(`${apiBaseUrl()}/races?start_date=${startDate}&end_date=${endDate}`, {
-    cache: "no-store",
-  });
+  const response = await fetch(`${apiBaseUrl()}/races?start_date=${startDate}&end_date=${endDate}`);
   if (!response.ok) {
     throw new Error(`races ${response.status}`);
   }
   const payload = await response.json();
-  return Array.isArray(payload)
-    ? compactRaceList(payload.map(normalizeApiRace).filter((item) => item.runners.length > 0))
-    : [];
+  return Array.isArray(payload) ? compactRaceList(payload.map(normalizeApiRace)) : [];
+}
+
+function normalizeApiSchedule(payload: unknown): RaceSchedule[] {
+  if (!Array.isArray(payload)) {
+    return [];
+  }
+  return payload.flatMap((item) => {
+    if (!item || typeof item !== "object") {
+      return [];
+    }
+    const entry = item as Record<string, unknown>;
+    const date = optionalText(entry.date ?? entry.race_date);
+    const market = entry.market === "NAR" ? "NAR" as Market : "JRA" as Market;
+    const venues = Array.isArray(entry.venues)
+      ? Array.from(new Set(entry.venues.map((value) => String(value || "").trim()).filter(Boolean)))
+      : [];
+    const rawGradeRaces = entry.gradeRaces ?? entry.grade_races;
+    const gradeRaces = Array.isArray(rawGradeRaces)
+      ? Array.from(new Set(rawGradeRaces.map((value) => String(value || "").trim()).filter(Boolean)))
+      : [];
+    if (!date || venues.length === 0) {
+      return [];
+    }
+    return [{
+      date,
+      market,
+      venues,
+      gradeRaces,
+      raceCount: Math.max(0, Math.round(safeNumber(entry.raceCount ?? entry.race_count, 0))),
+      source: optionalText(entry.source) || "schedule",
+      sourceCheckedAt: optionalText(entry.sourceCheckedAt ?? entry.source_checked_at),
+    }];
+  });
+}
+
+async function fetchScheduleRangeFromApi(startDate: string, endDate: string) {
+  const response = await fetch(`${apiBaseUrl()}/schedule?start_date=${startDate}&end_date=${endDate}`);
+  if (!response.ok) {
+    return [];
+  }
+  return normalizeApiSchedule(await response.json());
 }
 
 async function fetchHistoryRangeFromApi(startDate: string, endDate: string) {
-  const response = await fetch(`${apiBaseUrl()}/history?start_date=${startDate}&end_date=${endDate}`, {
-    cache: "no-store",
-  });
+  const response = await fetch(`${apiBaseUrl()}/history?start_date=${startDate}&end_date=${endDate}`);
   if (!response.ok) {
     return [];
   }
@@ -2111,6 +2143,7 @@ function buildMonthCells(
   races: Race[],
   history: HistoricalPrediction[],
   today: string,
+  schedule: RaceSchedule[],
 ): MonthCell[] {
   const start = monthStart(monthAnchor);
   const [year, month] = start.split("-").map(Number);
@@ -2119,6 +2152,7 @@ function buildMonthCells(
   const gridStart = addDays(start, -firstWeekday);
   const raceIdsByDate = new Map<string, Set<string>>();
   const marketCountsByDate = new Map<string, { JRA: Set<string>; NAR: Set<string> }>();
+  const plannedCountsByDate = new Map<string, { JRA: number; NAR: number }>();
   const historyCountByDate = new Map<string, number>();
   const historyIdsByDate = new Map<string, Set<string>>();
   const hitCountByDate = new Map<string, number>();
@@ -2141,6 +2175,11 @@ function buildMonthCells(
       hitCountByDate.set(item.date, (hitCountByDate.get(item.date) ?? 0) + 1);
     }
   });
+  schedule.forEach((item) => {
+    const counts = plannedCountsByDate.get(item.date) ?? { JRA: 0, NAR: 0 };
+    counts[item.market] += item.venues.length;
+    plannedCountsByDate.set(item.date, counts);
+  });
 
   return Array.from({ length: 42 }, (_, index) => {
     const date = addDays(gridStart, index);
@@ -2149,6 +2188,7 @@ function buildMonthCells(
       ...(historyIdsByDate.get(date) ?? []),
     ]);
     const marketCounts = marketCountsByDate.get(date);
+    const plannedCounts = plannedCountsByDate.get(date);
     return {
       date,
       label: calendarLabel(date),
@@ -2157,7 +2197,9 @@ function buildMonthCells(
       raceCount: uniqueRaceIds.size,
       jraCount: marketCounts?.JRA.size ?? 0,
       narCount: marketCounts?.NAR.size ?? 0,
-      plannedCount: JRA_FUTURE_SCHEDULE[date]?.venues.length ?? 0,
+      plannedCount: (plannedCounts?.JRA ?? 0) + (plannedCounts?.NAR ?? 0),
+      plannedJraCount: plannedCounts?.JRA ?? 0,
+      plannedNarCount: plannedCounts?.NAR ?? 0,
       historyCount: historyCountByDate.get(date) ?? 0,
       hitCount: hitCountByDate.get(date) ?? 0,
       isToday: date === today,
@@ -2175,6 +2217,28 @@ function mergeHistoryLists(current: HistoricalPrediction[], incoming: Historical
   const merged = new Map(current.map((item) => [item.id, item]));
   incoming.forEach((item) => merged.set(item.id, item));
   return Array.from(merged.values());
+}
+
+function mergeScheduleLists(current: RaceSchedule[], incoming: RaceSchedule[]) {
+  const merged = new Map<string, RaceSchedule>();
+  [...current, ...incoming].forEach((item) => {
+    const key = `${item.date}:${item.market}`;
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, item);
+      return;
+    }
+    merged.set(key, {
+      ...existing,
+      ...item,
+      venues: Array.from(new Set([...existing.venues, ...item.venues])),
+      gradeRaces: Array.from(new Set([...existing.gradeRaces, ...item.gradeRaces])),
+      raceCount: Math.max(existing.raceCount, item.raceCount),
+      source: item.source === "race_cards" ? item.source : existing.source || item.source,
+      sourceCheckedAt: item.sourceCheckedAt || existing.sourceCheckedAt,
+    });
+  });
+  return Array.from(merged.values()).sort((a, b) => a.date.localeCompare(b.date) || a.market.localeCompare(b.market));
 }
 
 function loadingText(phase: DataPhase, apiState: ApiState) {
@@ -2682,12 +2746,13 @@ function evaluateBettingHeat({
 export default function Home() {
   const [activeTab, setActiveTab] = useState<ViewTab>("predict");
   const [selectedRaceId, setSelectedRaceId] = useState("");
-  const [selectedDate, setSelectedDate] = useState(INITIAL_CALENDAR_DATE);
+  const [selectedDate, setSelectedDate] = useState(() => todayAtJst());
   const [selectedVenue, setSelectedVenue] = useState("");
-  const [monthAnchor, setMonthAnchor] = useState(monthStart(INITIAL_CALENDAR_DATE));
+  const [monthAnchor, setMonthAnchor] = useState(() => monthStart(todayAtJst()));
   const [urlStateReady, setUrlStateReady] = useState(false);
-  const [todayDate, setTodayDate] = useState(INITIAL_CALENDAR_DATE);
+  const [todayDate, setTodayDate] = useState(() => todayAtJst());
   const [apiRaces, setApiRaces] = useState<Race[]>([]);
+  const [apiSchedule, setApiSchedule] = useState<RaceSchedule[]>([]);
   const [apiHistory, setApiHistory] = useState<HistoricalPrediction[]>([]);
   const [apiState, setApiState] = useState<ApiState>("loading");
   const [dataPhase, setDataPhase] = useState<DataPhase>("initial");
@@ -2767,8 +2832,8 @@ export default function Home() {
     return filteredTodayRaces.filter((item) => item.venue === venue).sort(sortRaceCards);
   }, [filteredTodayRaces, filteredTodayVenueOptions, predictionRace?.venue, selectedVenue, todayVenueOptions]);
   const monthCells = useMemo(
-    () => buildMonthCells(monthAnchor, availableRaces, availableHistory, todayDate),
-    [availableHistory, availableRaces, monthAnchor, todayDate],
+    () => buildMonthCells(monthAnchor, availableRaces, availableHistory, todayDate, apiSchedule),
+    [apiSchedule, availableHistory, availableRaces, monthAnchor, todayDate],
   );
   const historySummary = useMemo(
     () => summarizeHistory(availableHistory.filter((item) => !item.generatedAfterResult)),
@@ -2814,11 +2879,15 @@ export default function Home() {
       const rangeStartDate = addDays(focusDate < centerDate ? focusDate : centerDate, -1);
       const rangeEndDate = focusDate > nearFutureEndDate ? focusDate : nearFutureEndDate;
       try {
-        const todayRacesPayload = await fetchRaceRangeFromApi(focusDate, focusDate);
+        const [todayRacesPayload, todaySchedulePayload] = await Promise.all([
+          fetchRaceRangeFromApi(focusDate, focusDate),
+          fetchScheduleRangeFromApi(focusDate, focusDate),
+        ]);
         if (cancelled) {
           return;
         }
         setApiRaces(todayRacesPayload);
+        setApiSchedule(todaySchedulePayload);
         const requestedRace = urlState.race ? todayRacesPayload.find((item) => item.id === urlState.race) : undefined;
         const todayRace = requestedRace ?? pickDefaultRace(todayRacesPayload, focusDate);
         if (todayRace) {
@@ -2832,11 +2901,15 @@ export default function Home() {
         }
 
         setDataPhase("range");
-        const rangeRaces = await fetchRaceRangeFromApi(rangeStartDate, rangeEndDate);
+        const [rangeRaces, rangeSchedule] = await Promise.all([
+          fetchRaceRangeFromApi(rangeStartDate, rangeEndDate),
+          fetchScheduleRangeFromApi(rangeStartDate, rangeEndDate),
+        ]);
         if (cancelled) {
           return;
         }
         setApiRaces((current) => mergeRaceLists(current, rangeRaces));
+        setApiSchedule((current) => mergeScheduleLists(current, rangeSchedule));
         const nextTodayRace = urlState.race
           ? rangeRaces.find((item) => item.id === urlState.race)
           : pickDefaultRace(
@@ -2909,16 +2982,21 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     async function refreshToday() {
+      if (pageIsHidden()) {
+        return;
+      }
       try {
-        const [todayRacesPayload, todayHistoryPayload] = await Promise.all([
+        const [todayRacesPayload, todayHistoryPayload, todaySchedulePayload] = await Promise.all([
           fetchRaceRangeFromApi(todayDate, todayDate),
           fetchHistoryRangeFromApi(todayDate, todayDate),
+          fetchScheduleRangeFromApi(todayDate, todayDate),
         ]);
         if (cancelled) {
           return;
         }
         setApiRaces((current) => mergeRaceLists(current, todayRacesPayload));
         setApiHistory((current) => mergeHistoryLists(current, todayHistoryPayload));
+        setApiSchedule((current) => mergeScheduleLists(current, todaySchedulePayload));
         if (todayRacesPayload.length > 0) {
           setApiState("ready");
         }
@@ -2933,12 +3011,79 @@ export default function Home() {
     }
 
     refreshToday();
-    const timer = window.setInterval(refreshToday, 30_000);
+    const timer = window.setInterval(refreshToday, 60_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
   }, [todayDate]);
+
+  useEffect(() => {
+    if (!urlStateReady) {
+      return;
+    }
+    let cancelled = false;
+    async function loadMonthWindow() {
+      const start = monthStart(monthAnchor);
+      const end = addDays(addMonths(start, 1), -1);
+      try {
+        const [historyPayload, schedulePayload] = await Promise.all([
+          fetchHistoryRangeFromApi(start, end),
+          fetchScheduleRangeFromApi(start, end),
+        ]);
+        if (cancelled) {
+          return;
+        }
+        setApiHistory((current) => mergeHistoryLists(current, historyPayload));
+        setApiSchedule((current) => mergeScheduleLists(current, schedulePayload));
+        setLastUpdatedAt(new Date());
+        setRefreshError("");
+      } catch {
+        if (!cancelled) {
+          setRefreshError("月間日程の取得に失敗。表示中の情報は保持しています。");
+        }
+      }
+    }
+    loadMonthWindow();
+    return () => {
+      cancelled = true;
+    };
+  }, [monthAnchor, urlStateReady]);
+
+  useEffect(() => {
+    if (!urlStateReady) {
+      return;
+    }
+    let cancelled = false;
+    async function loadSelectedDateWindow() {
+      try {
+        const [racePayload, historyPayload, schedulePayload] = await Promise.all([
+          fetchRaceRangeFromApi(selectedDate, selectedDate),
+          fetchHistoryRangeFromApi(selectedDate, selectedDate),
+          fetchScheduleRangeFromApi(selectedDate, selectedDate),
+        ]);
+        if (cancelled) {
+          return;
+        }
+        setApiRaces((current) => mergeRaceLists(current, racePayload));
+        setApiHistory((current) => mergeHistoryLists(current, historyPayload));
+        setApiSchedule((current) => mergeScheduleLists(current, schedulePayload));
+        if (racePayload.length > 0) {
+          setApiState("ready");
+        }
+        setLastUpdatedAt(new Date());
+        setRefreshError("");
+      } catch {
+        if (!cancelled) {
+          setRefreshError("選択日のレース取得に失敗。表示中の情報は保持しています。");
+        }
+      }
+    }
+    loadSelectedDateWindow();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDate, urlStateReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3131,14 +3276,14 @@ export default function Home() {
   }
 
   async function reloadRaceWindow(centerDate: string) {
-    const start = addDays(centerDate, -1);
-    const end = addDays(centerDate, 1);
-    const [racePayload, historyPayload] = await Promise.all([
-      fetchRaceRangeFromApi(start, end),
-      fetchHistoryRangeFromApi(start, end),
+    const [racePayload, historyPayload, schedulePayload] = await Promise.all([
+      fetchRaceRangeFromApi(centerDate, centerDate),
+      fetchHistoryRangeFromApi(centerDate, centerDate),
+      fetchScheduleRangeFromApi(centerDate, centerDate),
     ]);
     setApiRaces((current) => mergeRaceLists(current, racePayload));
     setApiHistory((current) => mergeHistoryLists(current, historyPayload));
+    setApiSchedule((current) => mergeScheduleLists(current, schedulePayload));
     if (racePayload.length > 0) {
       setApiState("ready");
     }
@@ -3178,6 +3323,9 @@ export default function Home() {
     let busy = false;
 
     async function refreshVisibleRace() {
+      if (pageIsHidden()) {
+        return;
+      }
       if (busy || !visibleRace) {
         return;
       }
@@ -3195,7 +3343,7 @@ export default function Home() {
     }
 
     refreshVisibleRace();
-    const timer = window.setInterval(refreshVisibleRace, 90_000);
+    const timer = window.setInterval(refreshVisibleRace, 60_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -3329,6 +3477,7 @@ export default function Home() {
             selectedDate={selectedDate}
             selectedDateRaces={filteredSelectedDateRaces}
             selectedRaceId={selectedRaceId}
+            scheduleEntries={apiSchedule}
             selectedVenue={selectedVenue}
             statusFilter={statusFilter}
             tickets={tickets}
@@ -4581,6 +4730,7 @@ function CalendarPanel({
   onRaceSelect,
   onStatusFilter,
   onVenueSelect,
+  scheduleEntries,
   selectedDate,
   selectedDateRaces,
   selectedRaceId,
@@ -4601,6 +4751,7 @@ function CalendarPanel({
   onRaceSelect: (raceId: string) => void;
   onStatusFilter: (value: RaceStatusFilter) => void;
   onVenueSelect: (venue: string) => void;
+  scheduleEntries: RaceSchedule[];
   selectedDate: string;
   selectedDateRaces: Race[];
   selectedRaceId: string;
@@ -4611,7 +4762,15 @@ function CalendarPanel({
   venueRaces: Race[];
 }) {
   const selectedCalendarRace =
-    selectedDateRaces.find((item) => item.id === selectedRaceId) ?? venueRaces[0] ?? selectedDateRaces[0] ?? null;
+    venueRaces.find((item) => item.id === selectedRaceId)
+    ?? selectedDateRaces.find((item) => item.id === selectedRaceId)
+    ?? venueRaces[0]
+    ?? selectedDateRaces[0]
+    ?? null;
+  const selectedDateSchedule = scheduleEntries.filter((item) => {
+    const marketOk = marketFilter === "all" || item.market === marketFilter;
+    return item.date === selectedDate && marketOk;
+  });
   const selectedCalendarHistory = selectedCalendarRace ? historyByRaceId.get(selectedCalendarRace.id) ?? null : null;
   const selectedApiPrediction =
     selectedCalendarRace && apiPrediction?.race_id === selectedCalendarRace.id ? apiPrediction : null;
@@ -4659,11 +4818,11 @@ function CalendarPanel({
               <span>{day.raceCount > 0 ? `${day.raceCount}R` : "予定"}</span>
             )}
             {day.raceCount === 0 && day.plannedCount === 0 && day.inMonth && <span className="empty-count">未取得</span>}
-            {(day.jraCount > 0 || day.narCount > 0) && (
+            {(day.jraCount > 0 || day.narCount > 0 || day.plannedJraCount > 0 || day.plannedNarCount > 0) && (
               <small>
-                {day.jraCount > 0 ? `中央${day.jraCount}` : ""}
-                {day.jraCount > 0 && day.narCount > 0 ? " / " : ""}
-                {day.narCount > 0 ? `地方${day.narCount}` : ""}
+                {day.jraCount > 0 ? `中央${day.jraCount}` : day.plannedJraCount > 0 ? `中央予定${day.plannedJraCount}` : ""}
+                {(day.jraCount > 0 || day.plannedJraCount > 0) && (day.narCount > 0 || day.plannedNarCount > 0) ? " / " : ""}
+                {day.narCount > 0 ? `地方${day.narCount}` : day.plannedNarCount > 0 ? `地方予定${day.plannedNarCount}` : ""}
               </small>
             )}
             {day.hitCount > 0 && <em aria-label="的中">🎯</em>}
@@ -4697,11 +4856,17 @@ function CalendarPanel({
 
       {!selectedCalendarRace && (
         <div className="calendar-compact-note">
-          {JRA_FUTURE_SCHEDULE[selectedDate] ? (
+          {selectedDateSchedule.length > 0 ? (
             <>
-              <strong>中央開催予定</strong>
-              <span>{JRA_FUTURE_SCHEDULE[selectedDate].venues.join("・")}</span>
-              <em>{JRA_FUTURE_SCHEDULE[selectedDate].gradeRaces?.join(" / ") || "出馬表取得後に自動反映"}</em>
+              <strong>開催予定</strong>
+              {selectedDateSchedule.map((item) => (
+                <span key={`${item.date}-${item.market}`}>
+                  {marketFilterLabel(item.market)} {item.venues.join("・")}
+                </span>
+              ))}
+              <em>
+                {selectedDateSchedule.flatMap((item) => item.gradeRaces).join(" / ") || "出馬表取得後に自動反映"}
+              </em>
             </>
           ) : (
             <span>対象レースなし</span>

@@ -51,6 +51,28 @@ create trigger race_cards_set_updated_at
   before update on public.race_cards
   for each row execute function public.set_umalab_updated_at();
 
+create table if not exists public.race_schedule (
+  race_date date not null,
+  market text not null,
+  venue text not null,
+  race_count integer not null default 0,
+  grade_races jsonb not null default '[]'::jsonb,
+  source text not null default 'unknown',
+  source_checked_at timestamptz,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (race_date, market, venue)
+);
+
+create index if not exists race_schedule_race_date_idx
+  on public.race_schedule (race_date desc, market, venue);
+
+drop trigger if exists race_schedule_set_updated_at on public.race_schedule;
+create trigger race_schedule_set_updated_at
+  before update on public.race_schedule
+  for each row execute function public.set_umalab_updated_at();
+
 create table if not exists public.race_ingest_runs (
   id uuid primary key default gen_random_uuid(),
   started_at timestamptz,
@@ -71,6 +93,7 @@ create index if not exists race_ingest_runs_finished_at_idx
 
 alter table public.prediction_history enable row level security;
 alter table public.race_cards enable row level security;
+alter table public.race_schedule enable row level security;
 alter table public.race_ingest_runs enable row level security;
 
 drop policy if exists prediction_history_service_role_all on public.prediction_history;
@@ -84,6 +107,14 @@ create policy prediction_history_service_role_all
 drop policy if exists race_cards_service_role_all on public.race_cards;
 create policy race_cards_service_role_all
   on public.race_cards
+  for all
+  to service_role
+  using (true)
+  with check (true);
+
+drop policy if exists race_schedule_service_role_all on public.race_schedule;
+create policy race_schedule_service_role_all
+  on public.race_schedule
   for all
   to service_role
   using (true)

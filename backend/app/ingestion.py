@@ -13,6 +13,7 @@ from typing import Any
 from .data_sources import _collapse_duplicate_races, build_race_dicts_from_rows
 from .history import get_all_history, record_prediction
 from .model import predict_race
+from .race_schedule import upsert_schedule_from_race_dicts
 from .race_storage import fetch_race_cards, race_storage_available, record_ingest_run, upsert_race_cards
 from .runner_state import canonical_runner_status, runner_is_inactive_dict
 from .schemas import RaceRequest, RunnerInput
@@ -576,6 +577,7 @@ def ingest_netkeiba_window(
 
     _attach_live_feature_deltas(race_dicts, start_date, end_date)
     races_stored = upsert_race_cards(race_dicts)
+    schedules_stored = upsert_schedule_from_race_dicts(race_dicts)
     open_predictions = _auto_predict_open_races(race_dicts) if races_stored > 0 else 0
     backfilled_predictions = (
         _auto_predict_missing_finished_races(race_dicts, start_date, end_date)
@@ -610,6 +612,7 @@ def ingest_netkeiba_window(
         "rows_found": int(import_summary.get("rows") or len(rows)),
         "races_found": len(race_dicts),
         "races_stored": races_stored,
+        "schedules_stored": schedules_stored,
         "auto_predictions": auto_predictions,
         "backfilled_predictions": backfilled_predictions,
         "raw_dir": str(raw_dir),
@@ -618,6 +621,7 @@ def ingest_netkeiba_window(
         or (
             f"{len(race_dicts)} races imported, "
             f"{open_predictions} open-race predictions saved, "
+            f"{schedules_stored} schedule rows updated, "
             f"{backfilled_predictions} finished-race simulations backfilled"
         ),
     }
@@ -638,10 +642,11 @@ def import_netkeiba_race_cards(
     end_date = dates[-1] if dates else ""
 
     races_stored = upsert_race_cards(races)
+    schedules_stored = upsert_schedule_from_race_dicts(races)
     auto_predictions = _auto_predict_open_races(races) if auto_predict and races_stored > 0 else 0
 
     status = "ok"
-    message = f"{len(races)} races imported, {auto_predictions} open-race predictions saved"
+    message = f"{len(races)} races imported, {auto_predictions} open-race predictions saved, {schedules_stored} schedule rows updated"
     if not races:
         status = "skipped"
         message = "no race cards supplied"
@@ -662,6 +667,7 @@ def import_netkeiba_race_cards(
         "rows_found": sum(len(race.get("runners") or []) for race in races),
         "races_found": len(races),
         "races_stored": races_stored,
+        "schedules_stored": schedules_stored,
         "auto_predictions": auto_predictions,
         "backfilled_predictions": 0,
         "raw_dir": "",
