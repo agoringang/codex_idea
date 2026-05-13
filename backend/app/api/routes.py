@@ -1,6 +1,7 @@
 import os
 import time
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Response
 
@@ -28,6 +29,25 @@ from app.status import get_backend_status
 router = APIRouter()
 JST = timezone(timedelta(hours=9))
 _MANUAL_REFRESH_LAST_AT = 0.0
+
+
+def _compact_history_for_list(payload: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+    """Trim heavy per-runner predictions for history list views."""
+    compact: dict[str, list[dict[str, Any]]] = {}
+    for day, entries in payload.items():
+        compact_entries: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            item = dict(entry)
+            prediction = item.get("prediction")
+            if isinstance(prediction, dict):
+                compact_prediction = dict(prediction)
+                compact_prediction.pop("runners", None)
+                item["prediction"] = compact_prediction
+            compact_entries.append(item)
+        compact[day] = compact_entries
+    return compact
 
 
 @router.get("/health")
@@ -93,6 +113,7 @@ def prediction_history(
     response: Response,
     start_date: str | None = None,
     end_date: str | None = None,
+    compact: bool = False,
 ) -> dict:
     response.headers["Cache-Control"] = "s-maxage=45, stale-while-revalidate=60"
     today = date.today()
@@ -100,7 +121,8 @@ def prediction_history(
     end = end_date or today.isoformat()
     history = get_all_history(start, end)
     races = get_races(start_date=start, end_date=end)
-    return settle_history(history, races)
+    settled = settle_history(history, races)
+    return _compact_history_for_list(settled) if compact else settled
 
 
 @router.get("/history/{date}")

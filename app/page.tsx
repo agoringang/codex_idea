@@ -1128,7 +1128,7 @@ async function fetchScheduleRangeFromApi(startDate: string, endDate: string) {
 }
 
 async function fetchHistoryRangeFromApi(startDate: string, endDate: string) {
-  const response = await fetch(`${apiBaseUrl()}/history?start_date=${startDate}&end_date=${endDate}`);
+  const response = await fetch(`${apiBaseUrl()}/history?start_date=${startDate}&end_date=${endDate}&compact=true`);
   if (!response.ok) {
     return [];
   }
@@ -2901,15 +2901,17 @@ export default function Home() {
         }
 
         setDataPhase("range");
-        const [rangeRaces, rangeSchedule] = await Promise.all([
+        const [rangeRaces, rangeSchedule, rangeHistory] = await Promise.all([
           fetchRaceRangeFromApi(rangeStartDate, rangeEndDate),
           fetchScheduleRangeFromApi(rangeStartDate, rangeEndDate),
+          fetchHistoryRangeFromApi(historyStartDate, centerDate),
         ]);
         if (cancelled) {
           return;
         }
         setApiRaces((current) => mergeRaceLists(current, rangeRaces));
         setApiSchedule((current) => mergeScheduleLists(current, rangeSchedule));
+        setApiHistory(rangeHistory);
         const nextTodayRace = urlState.race
           ? rangeRaces.find((item) => item.id === urlState.race)
           : pickDefaultRace(
@@ -2924,11 +2926,6 @@ export default function Home() {
         setDataPhase("ready");
         setLastUpdatedAt(new Date());
         setRefreshError("");
-        fetchHistoryRangeFromApi(historyStartDate, centerDate).then((rangeHistory) => {
-          if (!cancelled) {
-            setApiHistory(rangeHistory);
-          }
-        }).catch(() => undefined);
       } catch {
         if (!cancelled) {
           setApiState("fallback");
