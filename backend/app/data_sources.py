@@ -1200,8 +1200,25 @@ def _resolve_requested_window(
     return fallback_latest - timedelta(days=15), fallback_latest + timedelta(days=16)
 
 
-def get_races(start_date: str | None = None, end_date: str | None = None) -> list[Race]:
+def get_races(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    race_id: str | None = None,
+) -> list[Race]:
     """Return verified race cards built from normalized local history CSVs."""
+
+    if race_id:
+        try:
+            from .race_storage import fetch_race_card_by_id
+
+            stored_race = fetch_race_card_by_id(race_id)
+        except Exception:
+            stored_race = None
+        if isinstance(stored_race, dict):
+            payload = deepcopy(stored_race)
+            if payload.get("verificationStatus") not in {"verified", "stale", "unverified"}:
+                payload["verificationStatus"] = "verified"
+            return [Race(**_apply_runner_integrity_status(payload))]
 
     paths = _existing_history_paths()
     window = _resolve_requested_window(start_date, end_date, paths)
@@ -1228,6 +1245,8 @@ def get_races(start_date: str | None = None, end_date: str | None = None) -> lis
         if payload.get("verificationStatus") not in {"verified", "stale", "unverified"}:
             payload["verificationStatus"] = "verified"
         normalized_races.append(Race(**payload))
+    if race_id:
+        return [race for race in normalized_races if race.id == race_id]
     return normalized_races
 
 

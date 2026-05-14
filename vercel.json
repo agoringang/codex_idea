@@ -14,6 +14,10 @@
   },
   "crons": [
     {
+      "path": "/api/jobs/ingest/netkeiba/live-lite",
+      "schedule": "*/5 0-13 * * *"
+    },
+    {
       "path": "/api/jobs/ingest/netkeiba/preday",
       "schedule": "30 11 * * *"
     },

@@ -74,10 +74,12 @@ def _cache_set(
     cache: dict[tuple[str, str, str], tuple[float, list[dict[str, Any]]]],
     key: tuple[str, str, str],
     rows: list[dict[str, Any]],
+    ttl: int | None = None,
 ) -> None:
-    if READ_CACHE_SECONDS <= 0:
+    cache_seconds = READ_CACHE_SECONDS if ttl is None else ttl
+    if cache_seconds <= 0:
         return
-    cache[key] = (time.monotonic() + READ_CACHE_SECONDS, deepcopy(rows))
+    cache[key] = (time.monotonic() + cache_seconds, deepcopy(rows))
 
 
 def fetch_race_cards(start_date: str, end_date: str) -> list[dict[str, Any]]:
@@ -100,6 +102,25 @@ def fetch_race_cards(start_date: str, end_date: str) -> list[dict[str, Any]]:
     result = [race for race in races if isinstance(race, dict)]
     _cache_set(_RACE_CARD_CACHE, cache_key, result)
     return result
+
+
+def fetch_race_card_by_id(race_id: str) -> dict[str, Any] | None:
+    if _supabase_config() is None:
+        return None
+    race_id = race_id.strip()
+    if not race_id:
+        return None
+    cache_key = (RACE_CARD_TABLE, "race_id", race_id)
+    cached = _cache_get(_RACE_CARD_CACHE, cache_key)
+    if cached is not None:
+        return cached[0] if cached else None
+
+    query = f"select=payload&race_id=eq.{race_id}&limit=1"
+    rows = _supabase_request(f"{RACE_CARD_TABLE}?{query}") or []
+    races = [row.get("payload") for row in rows if isinstance(row, dict)]
+    result = [race for race in races if isinstance(race, dict)]
+    _cache_set(_RACE_CARD_CACHE, cache_key, result, ttl=min(READ_CACHE_SECONDS, 25))
+    return result[0] if result else None
 
 
 def fetch_race_card_schedule_rows(start_date: str, end_date: str) -> list[dict[str, Any]]:

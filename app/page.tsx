@@ -394,6 +394,8 @@ const races: Race[] = [
 ];
 
 const predictionHistory: HistoricalPrediction[] = [];
+const TODAY_REFRESH_MS = 5 * 60_000;
+const FOCUSED_RACE_REFRESH_MS = 60_000;
 
 function runnerNumbers(top: RunnerProjection[], start = 0, end = top.length) {
   return top.slice(start, end).map((runner) => runner.number).join("-");
@@ -1077,8 +1079,12 @@ function normalizeApiHistory(payload: any): HistoricalPrediction[] {
   });
 }
 
-async function fetchRaceRangeFromApi(startDate: string, endDate: string) {
-  const response = await fetch(`${apiBaseUrl()}/races?start_date=${startDate}&end_date=${endDate}`);
+async function fetchRaceRangeFromApi(startDate: string, endDate: string, raceId?: string) {
+  const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+  if (raceId) {
+    params.set("race_id", raceId);
+  }
+  const response = await fetch(`${apiBaseUrl()}/races?${params.toString()}`);
   if (!response.ok) {
     throw new Error(`races ${response.status}`);
   }
@@ -1129,6 +1135,15 @@ async function fetchScheduleRangeFromApi(startDate: string, endDate: string) {
 
 async function fetchHistoryRangeFromApi(startDate: string, endDate: string) {
   const response = await fetch(`${apiBaseUrl()}/history?start_date=${startDate}&end_date=${endDate}&compact=true`);
+  if (!response.ok) {
+    return [];
+  }
+  return normalizeApiHistory(await response.json());
+}
+
+async function fetchRaceHistoryFromApi(raceId: string, date: string) {
+  const params = new URLSearchParams({ date, compact: "true" });
+  const response = await fetch(`${apiBaseUrl()}/history/race/${encodeURIComponent(raceId)}?${params.toString()}`);
   if (!response.ok) {
     return [];
   }
@@ -2901,28 +2916,26 @@ export default function Home() {
         }
 
         setDataPhase("range");
-        const [rangeRaces, rangeSchedule, rangeHistory] = await Promise.all([
-          fetchRaceRangeFromApi(rangeStartDate, rangeEndDate),
+        const [rangeSchedule, rangeHistory] = await Promise.all([
           fetchScheduleRangeFromApi(rangeStartDate, rangeEndDate),
           fetchHistoryRangeFromApi(historyStartDate, centerDate),
         ]);
         if (cancelled) {
           return;
         }
-        setApiRaces((current) => mergeRaceLists(current, rangeRaces));
         setApiSchedule((current) => mergeScheduleLists(current, rangeSchedule));
         setApiHistory(rangeHistory);
         const nextTodayRace = urlState.race
-          ? rangeRaces.find((item) => item.id === urlState.race)
+          ? todayRacesPayload.find((item) => item.id === urlState.race)
           : pickDefaultRace(
-              rangeRaces.filter((item) => item.date === focusDate),
+              todayRacesPayload.filter((item) => item.date === focusDate),
               focusDate,
             );
         if (nextTodayRace) {
           setSelectedRaceId((current) => current || nextTodayRace.id);
           setSelectedVenue((current) => current || nextTodayRace.venue);
         }
-        setApiState(rangeRaces.length > 0 || todayRacesPayload.length > 0 ? "ready" : "empty");
+        setApiState(todayRacesPayload.length > 0 ? "ready" : "empty");
         setDataPhase("ready");
         setLastUpdatedAt(new Date());
         setRefreshError("");
@@ -3008,7 +3021,7 @@ export default function Home() {
     }
 
     refreshToday();
-    const timer = window.setInterval(refreshToday, 60_000);
+    const timer = window.setInterval(refreshToday, TODAY_REFRESH_MS);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -3299,15 +3312,17 @@ export default function Home() {
     }
   }
 
-  async function reloadRaceWindow(centerDate: string) {
+  async function reloadRaceWindow(centerDate: string, raceId?: string, includeSchedule = true) {
     const [racePayload, historyPayload, schedulePayload] = await Promise.all([
-      fetchRaceRangeFromApi(centerDate, centerDate),
-      fetchHistoryRangeFromApi(centerDate, centerDate),
-      fetchScheduleRangeFromApi(centerDate, centerDate),
+      fetchRaceRangeFromApi(centerDate, centerDate, raceId),
+      raceId ? fetchRaceHistoryFromApi(raceId, centerDate) : fetchHistoryRangeFromApi(centerDate, centerDate),
+      includeSchedule ? fetchScheduleRangeFromApi(centerDate, centerDate) : Promise.resolve([]),
     ]);
     setApiRaces((current) => mergeRaceLists(current, racePayload));
     setApiHistory((current) => mergeHistoryLists(current, historyPayload));
-    setApiSchedule((current) => mergeScheduleLists(current, schedulePayload));
+    if (includeSchedule) {
+      setApiSchedule((current) => mergeScheduleLists(current, schedulePayload));
+    }
     if (racePayload.length > 0) {
       setApiState("ready");
     }
@@ -3355,9 +3370,8 @@ export default function Home() {
       }
       busy = true;
       try {
-        await triggerManualNetkeibaRefresh(visibleRace.date, visibleRace.market, visibleRace.id);
         if (!cancelled) {
-          await reloadRaceWindow(visibleRace.date);
+          await reloadRaceWindow(visibleRace.date, visibleRace.id, false);
         }
       } catch {
         // Keep the screen usable; the next live tick or scheduled cron will retry.
@@ -3367,7 +3381,7 @@ export default function Home() {
     }
 
     refreshVisibleRace();
-    const timer = window.setInterval(refreshVisibleRace, 60_000);
+    const timer = window.setInterval(refreshVisibleRace, FOCUSED_RACE_REFRESH_MS);
     return () => {
       cancelled = true;
       window.clearInterval(timer);

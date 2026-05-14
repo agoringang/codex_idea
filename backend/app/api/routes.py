@@ -70,9 +70,10 @@ def races(
     response: Response,
     start_date: str | None = None,
     end_date: str | None = None,
+    race_id: str | None = None,
 ) -> list[strategy_schemas.Race]:
     response.headers["Cache-Control"] = "s-maxage=45, stale-while-revalidate=60"
-    return get_races(start_date=start_date, end_date=end_date)
+    return get_races(start_date=start_date, end_date=end_date, race_id=race_id)
 
 
 @router.get("/schedule")
@@ -116,12 +117,30 @@ def prediction_history(
     compact: bool = False,
 ) -> dict:
     response.headers["Cache-Control"] = "s-maxage=45, stale-while-revalidate=60"
-    today = date.today()
+    today = datetime.now(JST).date()
     start = start_date or (today - timedelta(days=30)).isoformat()
     end = end_date or today.isoformat()
     history = get_all_history(start, end)
     races = get_races(start_date=start, end_date=end)
     settled = settle_history(history, races)
+    return _compact_history_for_list(settled) if compact else settled
+
+
+@router.get("/history/race/{race_id}")
+def prediction_history_for_race(
+    response: Response,
+    race_id: str,
+    date: str | None = None,
+    compact: bool = False,
+) -> dict:
+    response.headers["Cache-Control"] = "s-maxage=30, stale-while-revalidate=45"
+    race_date = date or datetime.now(JST).date().isoformat()
+    history = get_all_history(race_date, race_date)
+    filtered = {
+        day: [entry for entry in entries if str(entry.get("race_id") or "") == race_id]
+        for day, entries in history.items()
+    }
+    settled = settle_history(filtered, get_races(start_date=race_date, end_date=race_date, race_id=race_id))
     return _compact_history_for_list(settled) if compact else settled
 
 
@@ -341,6 +360,28 @@ def netkeiba_manual_refresh_job(
         prefer_results=prefer_results,
         backfill_finished_predictions=False,
         market=market_scope,
+    )
+    return _netkeiba_response(summary)
+
+
+@router.get("/jobs/ingest/netkeiba/live-lite", response_model=strategy_schemas.NetkeibaIngestResponse)
+def netkeiba_live_lite_ingest_job(
+    authorization: str | None = Header(default=None),
+    x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
+    max_requests: int | None = None,
+    delay: float | None = None,
+    market: str = "all",
+) -> strategy_schemas.NetkeibaIngestResponse:
+    _authorize_ingest_job(authorization, x_cron_secret)
+    summary = ingest_netkeiba_window(
+        days=1,
+        days_ahead=1,
+        max_requests=max_requests if max_requests is not None else 90,
+        delay=delay if delay is not None else 0.10,
+        refresh=True,
+        prefer_results=True,
+        backfill_finished_predictions=False,
+        market=market if market in {"JRA", "NAR"} else "all",
     )
     return _netkeiba_response(summary)
 
