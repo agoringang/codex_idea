@@ -303,8 +303,8 @@ type ApiBetRecommendation = {
   strategy: string;
   tickets: number;
   unit_stake: number;
-  covered_selections: string[];
-  legs: TicketLeg[];
+  covered_selections?: string[];
+  legs?: TicketLeg[];
   probability: number;
   odds: number;
   odds_min?: number;
@@ -315,8 +315,8 @@ type ApiBetRecommendation = {
 
 type ApiRacePrediction = {
   race_id: string;
-  runners: ApiRunnerPrediction[];
-  recommendations: ApiBetRecommendation[];
+  runners?: ApiRunnerPrediction[];
+  recommendations?: ApiBetRecommendation[];
   total_stake: number;
   expected_return: number;
   expected_roi: number;
@@ -1723,6 +1723,14 @@ function apiRecommendationToTicket(recommendation: ApiBetRecommendation): Ticket
     trio: 74,
     trifecta: 90,
   };
+  const legs = Array.isArray(recommendation.legs)
+    ? recommendation.legs.map((leg) => ({
+        label: String(leg.label ?? ""),
+        numbers: Array.isArray(leg.numbers)
+          ? leg.numbers.map((number) => safeNumber(number, 0)).filter((number) => number > 0)
+          : [],
+      })).filter((leg) => leg.numbers.length > 0)
+    : [];
   return {
     type: betTypeLabels[recommendation.bet_type] ?? recommendation.bet_type,
     method: publicStrategyLabel(recommendation.strategy || recommendation.note),
@@ -1730,8 +1738,8 @@ function apiRecommendationToTicket(recommendation: ApiBetRecommendation): Ticket
     odds,
     risk: riskByType[recommendation.bet_type] ?? 48,
     model: modelLabelForBetType(recommendation.bet_type),
-    selection: recommendation.selection,
-    legs: recommendation.legs ?? [],
+    selection: String(recommendation.selection ?? ""),
+    legs,
     tickets,
     unitStake: safeNumber(recommendation.unit_stake, stake / tickets),
     edge: safeNumber(recommendation.edge, probability * odds - 1),
@@ -1744,6 +1752,9 @@ function apiRecommendationToTicket(recommendation: ApiBetRecommendation): Ticket
 
 function mergeApiProjections(prediction: ApiRacePrediction | null, race: Race) {
   if (!prediction || prediction.race_id !== race.id) {
+    return null;
+  }
+  if (!Array.isArray(prediction.runners)) {
     return null;
   }
   const sourceByNumber = new Map(race.runners.map((runner) => [runner.number, runner]));
@@ -3193,7 +3204,9 @@ export default function Home() {
     if (!modelingRace || !apiPrediction || apiPrediction.race_id !== modelingRace.id) {
       return [];
     }
-    return apiPrediction.recommendations.map(apiRecommendationToTicket);
+    return Array.isArray(apiPrediction.recommendations)
+      ? apiPrediction.recommendations.map(apiRecommendationToTicket)
+      : [];
   }, [apiPrediction, modelingRace]);
   const tickets = apiTickets.length > 0 ? apiTickets : fallbackTickets;
 
