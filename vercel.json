@@ -18,6 +18,14 @@
       "schedule": "*/5 0-13 * * *"
     },
     {
+      "path": "/api/jobs/ingest/netkeiba/jra-odds",
+      "schedule": "*/5 0-8 * * *"
+    },
+    {
+      "path": "/api/jobs/ingest/netkeiba/preday-jra",
+      "schedule": "5 11 * * *"
+    },
+    {
       "path": "/api/jobs/ingest/netkeiba/preday",
       "schedule": "30 11 * * *"
     },

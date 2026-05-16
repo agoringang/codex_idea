@@ -296,12 +296,34 @@ def netkeiba_preday_ingest_job(
     return _netkeiba_response(summary)
 
 
+@router.get("/jobs/ingest/netkeiba/preday-jra", response_model=strategy_schemas.NetkeibaIngestResponse)
+def netkeiba_preday_jra_ingest_job(
+    authorization: str | None = Header(default=None),
+    x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
+    max_requests: int | None = None,
+    delay: float | None = None,
+) -> strategy_schemas.NetkeibaIngestResponse:
+    _authorize_ingest_job(authorization, x_cron_secret)
+    tomorrow = (datetime.now(JST).date() + timedelta(days=1)).isoformat()
+    summary = ingest_netkeiba_window(
+        start_date=tomorrow,
+        end_date=tomorrow,
+        max_requests=max_requests if max_requests is not None else 180,
+        delay=delay if delay is not None else 0.18,
+        refresh=True,
+        prefer_results=False,
+        backfill_finished_predictions=False,
+        market="JRA",
+    )
+    return _netkeiba_response(summary)
+
+
 @router.get("/jobs/ingest/netkeiba/jra-odds", response_model=strategy_schemas.NetkeibaIngestResponse)
 def netkeiba_jra_odds_ingest_job(
     authorization: str | None = Header(default=None),
     x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
     days: int = 1,
-    days_ahead: int = 1,
+    days_ahead: int = 0,
     max_requests: int | None = None,
     delay: float | None = None,
 ) -> strategy_schemas.NetkeibaIngestResponse:
@@ -309,12 +331,13 @@ def netkeiba_jra_odds_ingest_job(
     summary = ingest_netkeiba_window(
         days=days,
         days_ahead=days_ahead,
-        max_requests=max_requests if max_requests is not None else 260,
-        delay=delay if delay is not None else 0.12,
+        max_requests=max_requests if max_requests is not None else 140,
+        delay=delay if delay is not None else 0.08,
         refresh=True,
         prefer_results=False,
         backfill_finished_predictions=False,
         market="JRA",
+        odds_only=True,
     )
     return _netkeiba_response(summary)
 

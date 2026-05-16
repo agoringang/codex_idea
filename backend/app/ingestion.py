@@ -427,6 +427,7 @@ def ingest_netkeiba_window(
     prefer_results: bool = False,
     backfill_finished_predictions: bool = False,
     market: str = "all",
+    odds_only: bool = False,
 ) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc).isoformat()
     if not start_date or not end_date:
@@ -451,6 +452,7 @@ def ingest_netkeiba_window(
     scraper = _load_scraper_module()
     race_meta: dict[str, dict[str, str]] = {}
     race_page_urls: dict[str, str] = {}
+    odds_only_seed_races: list[dict[str, Any]] = []
     if explicit_race_ids:
         scraper_source = scraper.infer_source_from_race_id(explicit_race_ids[0])
         race_date_text = start_date
@@ -468,6 +470,34 @@ def ingest_netkeiba_window(
             race_date=race_date,
             prefer_results=prefer_results,
         )
+    elif odds_only:
+        try:
+            odds_only_seed_races = fetch_race_cards(start_date, end_date)
+        except Exception:
+            odds_only_seed_races = []
+        if market_scope in {"JRA", "NAR"}:
+            odds_only_seed_races = [
+                race
+                for race in odds_only_seed_races
+                if str(race.get("market") or "").upper() == market_scope
+            ]
+        odds_only_seed_races = [
+            race
+            for race in odds_only_seed_races
+            if isinstance(race, dict)
+            and str(race.get("id") or "")
+            and str(race.get("date") or "")
+            and str(race.get("status") or "") != "finished"
+        ]
+        for race in odds_only_seed_races:
+            stored_race_id = str(race.get("id") or "")
+            source = str(race.get("market") or market_scope or "").lower()
+            if source not in {"jra", "nar"}:
+                source = scraper.infer_source_from_race_id(stored_race_id)
+            race_meta[stored_race_id] = {
+                "date": str(race.get("date") or start_date),
+                "source": source,
+            }
 
     args = argparse.Namespace(
         start_date=start_date,
@@ -514,13 +544,17 @@ def ingest_netkeiba_window(
     race_results: list[dict[str, Any]] = []
     stop_reason = ""
     try:
-        calendar_ids, _calendar_results = (
-            ([], [])
-            if explicit_race_ids
-            else scraper.scrape_calendar_pages(args, fetcher)
-        )
+        if odds_only_seed_races:
+            calendar_ids = sorted({str(race.get("id") or "") for race in odds_only_seed_races})
+            _calendar_results = []
+        else:
+            calendar_ids, _calendar_results = (
+                ([], [])
+                if explicit_race_ids
+                else scraper.scrape_calendar_pages(args, fetcher)
+            )
         race_ids = sorted(set([*explicit_race_ids, *calendar_ids]))
-        race_results = scraper.scrape_race_pages(race_ids, args, fetcher)
+        race_results = [] if odds_only_seed_races else scraper.scrape_race_pages(race_ids, args, fetcher)
         odds_results = scraper.scrape_odds_pages(race_ids, args, fetcher)
     except scraper.MaxRequestsReached as exc:
         race_ids = sorted(set(calendar_ids))
@@ -546,11 +580,12 @@ def ingest_netkeiba_window(
     )
 
     odds_updates = _apply_live_odds_to_races(race_dicts, live_odds_rows)
-    existing_races: list[dict[str, Any]] = []
-    try:
-        existing_races = fetch_race_cards(start_date, end_date)
-    except Exception:
-        existing_races = []
+    existing_races: list[dict[str, Any]] = odds_only_seed_races
+    if not existing_races:
+        try:
+            existing_races = fetch_race_cards(start_date, end_date)
+        except Exception:
+            existing_races = []
     if market_scope in {"JRA", "NAR"}:
         existing_races = [
             race
@@ -599,6 +634,7 @@ def ingest_netkeiba_window(
         "status": status,
         "source": "netkeiba",
         "market": args.market,
+        "odds_only": bool(odds_only_seed_races),
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "start_date": start_date,
