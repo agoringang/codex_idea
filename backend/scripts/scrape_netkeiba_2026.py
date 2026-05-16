@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import pandas as pd
@@ -31,12 +32,26 @@ NAR_RESULT_URL = "https://nar.netkeiba.com/race/result.html?race_id={race_id}"
 JRA_RESULT_URL = "https://race.netkeiba.com/race/result.html?race_id={race_id}"
 NAR_ODDS_TANFUKU_URL = "https://nar.netkeiba.com/odds/index.html?type=b1&race_id={race_id}"
 JRA_ODDS_TANFUKU_URL = "https://race.netkeiba.com/odds/index.html?race_id={race_id}&type=b1"
+NAR_OFFICIAL_ODDS_TAN_URL = (
+    "https://sp.keiba.go.jp/KeibaWebSP_IPAT/TodayRaceInfo/S_OddsTan_ipat"
+    "?k_raceDate={race_date}&k_raceNo={race_no}&k_babaCode={venue_code}"
+)
+NAR_OFFICIAL_ODDS_FUKU_URL = (
+    "https://sp.keiba.go.jp/KeibaWebSP_IPAT/TodayRaceInfo/S_OddsFuku_ipat"
+    "?k_raceDate={race_date}&k_raceNo={race_no}&k_babaCode={venue_code}"
+)
 JRA_ODDS_API_URL = (
     "https://race.netkeiba.com/api/api_get_jra_odds.html"
     "?pid=api_get_jra_odds&input=UTF-8&output=jsonp"
     "&race_id={race_id}&type=1&action=update&sort=odds&compress=0"
 )
+JRA_OFFICIAL_ODDS_URL = "https://www.jra.go.jp/JRADB/accessO.html"
+JRA_OFFICIAL_ENTRY_CNAME = "pw15oli00/6D"
 RACE_ID_RE = re.compile(r"/race/(20\d{10})/?|race_id=(20\d{10})")
+JRA_OFFICIAL_TANFUKU_CNAME_RE = re.compile(
+    r"pw151ouS3(?P<course>\d{2})(?P<year>\d{4})(?P<meeting>\d{2})(?P<day>\d{2})"
+    r"(?P<race>\d{2})(?P<date>\d{8})Z/[A-F0-9]{2}"
+)
 JRA_COURSE_CODES = {"01", "02", "03", "04", "05", "06", "07", "08", "09", "10"}
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -135,21 +150,31 @@ class RateLimitedFetcher:
         if elapsed < self.delay:
             time.sleep(self.delay - elapsed)
 
-    def _request(self, url: str) -> bytes:
+    def _request(
+        self,
+        url: str,
+        *,
+        data: bytes | None = None,
+        referer: str = "https://www.netkeiba.com/",
+    ) -> bytes:
         if self.max_requests and self.request_count >= self.max_requests:
             raise MaxRequestsReached(f"max requests reached: {self.max_requests}")
 
         self._wait()
+        headers = {
+            "User-Agent": self.user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Referer": referer,
+        }
+        if data is not None:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
         request = Request(
             url,
-            headers={
-                "User-Agent": self.user_agent,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-                "Referer": "https://www.netkeiba.com/",
-            },
+            data=data,
+            headers=headers,
         )
         self.request_count += 1
         self.last_request_at = time.monotonic()
@@ -214,6 +239,79 @@ class RateLimitedFetcher:
 
         return FetchResult(
             url=url,
+            path=str(output_path),
+            status="error",
+            error=last_error,
+        )
+
+    def fetch_post(
+        self,
+        url: str,
+        output_path: Path,
+        *,
+        data: dict[str, str],
+        referer: str,
+        cache_key: str | None = None,
+    ) -> FetchResult:
+        if output_path.exists() and not self.refresh:
+            return FetchResult(
+                url=url,
+                path=str(output_path),
+                status="cached",
+                bytes=output_path.stat().st_size,
+            )
+
+        body = urlencode(data).encode("ascii")
+        request_url = f"{url}#{cache_key}" if cache_key else url
+        last_error = ""
+        for attempt in range(self.retries + 1):
+            try:
+                response_body = self._request(url, data=body, referer=referer)
+                html = decode_html(response_body)
+                if has_access_limit(html):
+                    return FetchResult(
+                        url=request_url,
+                        path=str(output_path),
+                        status="access_limited",
+                        http_status=200,
+                        bytes=len(response_body),
+                    )
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(response_body)
+                return FetchResult(
+                    url=request_url,
+                    path=str(output_path),
+                    status="fetched",
+                    http_status=200,
+                    bytes=len(response_body),
+                )
+            except HTTPError as exc:
+                if exc.code == 404:
+                    return FetchResult(
+                        url=request_url,
+                        path=str(output_path),
+                        status="not_found",
+                        http_status=404,
+                    )
+                if exc.code in {401, 403, 429}:
+                    return FetchResult(
+                        url=request_url,
+                        path=str(output_path),
+                        status="blocked",
+                        http_status=exc.code,
+                        error=str(exc),
+                    )
+                last_error = str(exc)
+            except URLError as exc:
+                last_error = str(exc.reason)
+            except TimeoutError as exc:
+                last_error = str(exc)
+
+            if attempt < self.retries:
+                time.sleep(self.delay * (attempt + 1))
+
+        return FetchResult(
+            url=request_url,
             path=str(output_path),
             status="error",
             error=last_error,
@@ -336,8 +434,183 @@ def odds_url_for_dynamic_id(race_id: str, *, source: str) -> str:
     return template.format(race_id=race_id)
 
 
+def nar_official_odds_params(race_id: str) -> dict[str, str] | None:
+    if infer_source_from_race_id(race_id) != "nar" or len(race_id) < 12:
+        return None
+    race_date = infer_local_date_from_race_id(race_id)
+    if race_date is None:
+        return None
+    venue_code = race_id[4:6]
+    race_no = str(int(race_id[-2:])) if race_id[-2:].isdigit() else ""
+    if not venue_code or not race_no:
+        return None
+    return {
+        "venue_code": venue_code,
+        "race_no": race_no,
+        "race_date": race_date.strftime("%Y%%2f%m%%2f%d"),
+    }
+
+
+def nar_official_odds_url_for_dynamic_id(race_id: str, *, kind: str) -> str | None:
+    params = nar_official_odds_params(race_id)
+    if not params:
+        return None
+    template = NAR_OFFICIAL_ODDS_FUKU_URL if kind == "fuku" else NAR_OFFICIAL_ODDS_TAN_URL
+    return template.format(**params)
+
+
 def jra_odds_api_url_for_dynamic_id(race_id: str) -> str:
     return JRA_ODDS_API_URL.format(race_id=race_id)
+
+
+def jra_official_race_id_from_cname(cname: str) -> str | None:
+    match = JRA_OFFICIAL_TANFUKU_CNAME_RE.search(cname)
+    if not match:
+        return None
+    return (
+        f"{match.group('year')}{match.group('course')}"
+        f"{match.group('meeting')}{match.group('day')}{match.group('race')}"
+    )
+
+
+def extract_jra_official_cnames(html: str) -> list[str]:
+    cnames = re.findall(
+        r"doAction\(\s*['\"]/JRADB/accessO\.html['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)",
+        html,
+    )
+    return sorted(set(html_lib.unescape(cname) for cname in cnames))
+
+
+def official_jra_odds_enabled(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "include_official_jra_odds", True))
+
+
+def scrape_jra_official_odds_pages(
+    race_ids: list[str],
+    args: argparse.Namespace,
+    fetcher: RateLimitedFetcher,
+) -> list[dict[str, Any]]:
+    if not race_ids or not official_jra_odds_enabled(args):
+        return []
+
+    output_dir = args.raw_dir / "_odds"
+    target_race_ids = {
+        race_id
+        for race_id in race_ids
+        if should_fetch_odds_page(race_id, args) and infer_source_from_race_id(race_id) == "jra"
+    }
+    if not target_race_ids:
+        return []
+
+    results: list[dict[str, Any]] = []
+    entry_path = output_dir / "jra_official_entry.html"
+    entry_result = fetcher.fetch_post(
+        JRA_OFFICIAL_ODDS_URL,
+        entry_path,
+        data={"cname": JRA_OFFICIAL_ENTRY_CNAME},
+        referer="https://www.jra.go.jp/",
+        cache_key=JRA_OFFICIAL_ENTRY_CNAME,
+    )
+    entry_row = entry_result.__dict__.copy()
+    entry_row["source"] = "jra"
+    entry_row["odds_api"] = "jra_official_entry"
+    results.append(entry_row)
+    if entry_result.status in {"blocked", "access_limited"}:
+        raise SystemExit(f"JRA official odds access stopped: {entry_result.status} {entry_result.url}")
+    if entry_result.status not in {"fetched", "cached"} or not entry_path.exists():
+        return results
+
+    entry_html = read_html(entry_path)
+    meeting_cnames = extract_jra_official_cnames(entry_html)
+    target_dates = {race_id[:4] + race_id[6:8] + race_id[8:10] for race_id in target_race_ids}
+    if target_dates:
+        meeting_cnames = [
+            cname for cname in meeting_cnames if any(target_date in cname for target_date in target_dates)
+        ]
+
+    race_cnames: dict[str, str] = {}
+    for index, meeting_cname in enumerate(meeting_cnames, start=1):
+        date_match = re.search(r"(20\d{6})", meeting_cname)
+        date_label = date_match.group(1) if date_match else f"meeting{index:02d}"
+        meeting_path = output_dir / f"jra_official_{date_label}_{index:02d}.html"
+        meeting_result = fetcher.fetch_post(
+            JRA_OFFICIAL_ODDS_URL,
+            meeting_path,
+            data={"cname": meeting_cname},
+            referer=JRA_OFFICIAL_ODDS_URL,
+            cache_key=meeting_cname,
+        )
+        meeting_row = meeting_result.__dict__.copy()
+        meeting_row["source"] = "jra"
+        meeting_row["odds_api"] = "jra_official_meeting"
+        results.append(meeting_row)
+        if meeting_result.status in {"blocked", "access_limited"}:
+            raise SystemExit(
+                f"JRA official odds meeting access stopped: {meeting_result.status} {meeting_result.url}"
+            )
+        if meeting_result.status not in {"fetched", "cached"} or not meeting_path.exists():
+            continue
+
+        for cname in extract_jra_official_cnames(read_html(meeting_path)):
+            race_id = jra_official_race_id_from_cname(cname)
+            if race_id and race_id in target_race_ids:
+                race_cnames[race_id] = cname
+
+    for race_id, race_cname in sorted(race_cnames.items()):
+        race_result = fetcher.fetch_post(
+            JRA_OFFICIAL_ODDS_URL,
+            output_dir / f"{race_id}_jra_official_b1.html",
+            data={"cname": race_cname},
+            referer=JRA_OFFICIAL_ODDS_URL,
+            cache_key=race_cname,
+        )
+        race_row = race_result.__dict__.copy()
+        race_row["race_id"] = race_id
+        race_row["source"] = "jra"
+        race_row["odds_api"] = "jra_official_tanfuku"
+        results.append(race_row)
+        if race_result.status in {"blocked", "access_limited"}:
+            raise SystemExit(f"JRA official odds race access stopped: {race_result.status} {race_result.url}")
+
+    return results
+
+
+def scrape_nar_official_odds_pages(
+    race_ids: list[str],
+    args: argparse.Namespace,
+    fetcher: RateLimitedFetcher,
+) -> list[dict[str, Any]]:
+    if not race_ids or not bool(getattr(args, "include_official_nar_odds", True)):
+        return []
+
+    output_dir = args.raw_dir / "_odds"
+    results: list[dict[str, Any]] = []
+    target_race_ids = [
+        race_id
+        for race_id in race_ids
+        if should_fetch_odds_page(race_id, args) and infer_source_from_race_id(race_id) == "nar"
+    ]
+    for race_id in target_race_ids:
+        for kind, api_name, suffix in (
+            ("tan", "nar_official_tansho", "tan"),
+            ("fuku", "nar_official_fukusho", "fuku"),
+        ):
+            odds_url = nar_official_odds_url_for_dynamic_id(race_id, kind=kind)
+            if not odds_url:
+                continue
+            result = fetcher.fetch(
+                odds_url,
+                output_dir / f"{race_id}_nar_official_{suffix}.html",
+            )
+            row = result.__dict__.copy()
+            row["race_id"] = race_id
+            row["source"] = "nar"
+            row["odds_api"] = api_name
+            results.append(row)
+            if result.status in {"blocked", "access_limited"}:
+                raise SystemExit(f"NAR official odds access stopped: {result.status} {result.url}")
+
+    return results
 
 
 def scrape_calendar_pages(
@@ -460,11 +733,17 @@ def scrape_odds_pages(
     results: list[dict[str, Any]] = []
     race_meta: dict[str, dict[str, str]] = getattr(args, "race_meta", {}) or {}
     output_dir = args.raw_dir / "_odds"
+    official_jra_targets: list[str] = []
+    official_nar_targets: list[str] = []
 
     for race_id in race_ids:
         if not should_fetch_odds_page(race_id, args):
             continue
         source = race_meta.get(race_id, {}).get("source") or infer_source_from_race_id(race_id)
+        if source == "jra":
+            official_jra_targets.append(race_id)
+        elif source == "nar":
+            official_nar_targets.append(race_id)
         odds_url = odds_url_for_dynamic_id(race_id, source=source)
         result = fetcher.fetch(odds_url, output_dir / f"{race_id}_b1.html")
         row = result.__dict__.copy()
@@ -486,6 +765,8 @@ def scrape_odds_pages(
             if api_result.status in {"blocked", "access_limited"}:
                 raise SystemExit(f"netkeiba odds api access stopped: {api_result.status} {api_result.url}")
 
+    results.extend(scrape_jra_official_odds_pages(official_jra_targets, args, fetcher))
+    results.extend(scrape_nar_official_odds_pages(official_nar_targets, args, fetcher))
     return results
 
 
@@ -604,6 +885,192 @@ def parse_live_odds_file(path: Path) -> list[dict[str, Any]]:
             "race_id": race_id,
             "runner_number": runner_number,
             "odds_snapshot_at": snapshot_at,
+            "odds_source": "netkeiba_html",
+        }
+        row.update(place_odds.get(runner_number, {}))
+        row.update(win_odds.get(runner_number, {}))
+        if row.get("runner_status"):
+            row["scratched"] = 1
+        rows.append(row)
+
+    valid_win_odds = sorted(
+        (
+            (float(row["market_odds"]), int(row["runner_number"]))
+            for row in rows
+            if row.get("market_odds") is not None and float(row["market_odds"]) > 1.0
+        )
+    )
+    rank_by_runner = {runner_number: index + 1 for index, (_odds, runner_number) in enumerate(valid_win_odds)}
+    for row in rows:
+        rank = rank_by_runner.get(int(row["runner_number"]))
+        if rank is not None:
+            row["odds_rank"] = rank
+    return rows
+
+
+def cell_has_class(attrs: str, class_name: str) -> bool:
+    match = re.search(r"class=[\"']([^\"']*)[\"']", attrs, flags=re.IGNORECASE)
+    if not match:
+        return False
+    classes = {item.strip() for item in match.group(1).split()}
+    return class_name in classes
+
+
+def extract_table_rows(text: str) -> list[list[tuple[str, str]]]:
+    rows: list[list[tuple[str, str]]] = []
+    for row_match in re.finditer(r"<tr\b[^>]*>(.*?)</tr>", text, flags=re.IGNORECASE | re.DOTALL):
+        cells = re.findall(r"<td\b([^>]*)>(.*?)</td>", row_match.group(1), flags=re.IGNORECASE | re.DOTALL)
+        if cells:
+            rows.append(cells)
+    return rows
+
+
+def parse_place_odds_range(cell_html: str) -> tuple[float | None, float | None]:
+    min_match = re.search(
+        r"class=[\"'][^\"']*\bmin\b[^\"']*[\"'][^>]*>(.*?)</span>",
+        cell_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    max_match = re.search(
+        r"class=[\"'][^\"']*\bmax\b[^\"']*[\"'][^>]*>(.*?)</span>",
+        cell_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    place_min = parse_odds_number(min_match.group(1)) if min_match else None
+    place_max = parse_odds_number(max_match.group(1)) if max_match else None
+    if place_min is not None or place_max is not None:
+        return place_min, place_max
+    values = [float(item) for item in re.findall(r"\d+(?:\.\d+)?", strip_html_fragment(cell_html))]
+    if not values:
+        return None, None
+    return values[0], values[1] if len(values) >= 2 else None
+
+
+def parse_jra_official_odds_file(path: Path) -> list[dict[str, Any]]:
+    race_id_match = re.search(r"(20\d{10})", path.stem)
+    if not race_id_match:
+        return []
+    race_id = race_id_match.group(1)
+    text = read_html(path)
+    if "単勝・複勝オッズ" not in text and "単勝" not in text:
+        return []
+
+    snapshot_at = datetime.now(timezone.utc).isoformat()
+    rows: list[dict[str, Any]] = []
+    for cells in extract_table_rows(text):
+        number_cell = next((cell for cell in cells if cell_has_class(cell[0], "num")), None)
+        horse_cell = next((cell for cell in cells if cell_has_class(cell[0], "horse")), None)
+        win_cell = next((cell for cell in cells if cell_has_class(cell[0], "odds_tan")), None)
+        place_cell = next((cell for cell in cells if cell_has_class(cell[0], "odds_fuku")), None)
+        if not number_cell or not horse_cell:
+            continue
+        number_match = re.fullmatch(r"\d{1,2}", strip_html_fragment(number_cell[1]))
+        if not number_match:
+            continue
+        runner_number = int(number_match.group(0))
+        horse_name = strip_html_fragment(horse_cell[1])
+        win_html = win_cell[1] if win_cell else ""
+        place_html = place_cell[1] if place_cell else ""
+        market_odds = parse_odds_number(win_html)
+        place_odds, place_odds_max = parse_place_odds_range(place_html)
+        runner_status = parse_odds_runner_status(" ".join([win_html, place_html, horse_name]))
+        if market_odds is None and place_odds is None and not runner_status:
+            continue
+
+        row: dict[str, Any] = {
+            "race_id": race_id,
+            "runner_number": runner_number,
+            "horse_name": horse_name,
+            "odds_snapshot_at": snapshot_at,
+            "odds_source": "jra_official",
+        }
+        if market_odds is not None:
+            row["market_odds"] = market_odds
+        if place_odds is not None:
+            row["place_odds"] = place_odds
+        if place_odds_max is not None:
+            row["place_odds_max"] = place_odds_max
+        if runner_status:
+            row["runner_status"] = runner_status
+            row["scratched"] = 1
+        rows.append(row)
+
+    valid_win_odds = sorted(
+        (
+            (float(row["market_odds"]), int(row["runner_number"]))
+            for row in rows
+            if row.get("market_odds") is not None and float(row["market_odds"]) > 1.0
+        )
+    )
+    rank_by_runner = {runner_number: index + 1 for index, (_odds, runner_number) in enumerate(valid_win_odds)}
+    for row in rows:
+        rank = rank_by_runner.get(int(row["runner_number"]))
+        if rank is not None:
+            row["odds_rank"] = rank
+    return rows
+
+
+def parse_nar_official_table(path: Path, value_key: str) -> dict[int, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    text = read_html(path)
+    if "この賭け式の発売はありません" in text or "エラー" in text:
+        return {}
+
+    parsed: dict[int, dict[str, Any]] = {}
+    for cells in extract_table_rows(text):
+        if len(cells) < 3:
+            continue
+        number_text = strip_html_fragment(cells[0][1])
+        horse_name = strip_html_fragment(cells[1][1])
+        odds_text = strip_html_fragment(cells[2][1])
+        if not re.fullmatch(r"\d{1,2}", number_text) or not horse_name:
+            continue
+        if "馬番" in horse_name or "オッズ" in odds_text:
+            continue
+        runner_number = int(number_text)
+        row: dict[str, Any] = {
+            "runner_number": runner_number,
+            "horse_name": horse_name,
+        }
+        if value_key == "place_odds":
+            place_low, place_high = parse_place_odds_range(cells[2][1])
+            if place_low is not None:
+                row["place_odds"] = place_low
+            if place_high is not None:
+                row["place_odds_max"] = place_high
+        else:
+            odds_value = parse_odds_number(odds_text)
+            if odds_value is not None:
+                row[value_key] = odds_value
+        runner_status = parse_odds_runner_status(" ".join([horse_name, odds_text]))
+        if runner_status:
+            row["runner_status"] = runner_status
+            row["scratched"] = 1
+        if any(key in row for key in (value_key, "runner_status")):
+            parsed[runner_number] = row
+    return parsed
+
+
+def parse_nar_official_odds_files(win_path: Path, place_path: Path | None = None) -> list[dict[str, Any]]:
+    race_id_match = re.search(r"(20\d{10})", win_path.stem)
+    if not race_id_match:
+        return []
+    race_id = race_id_match.group(1)
+    win_odds = parse_nar_official_table(win_path, "market_odds")
+    place_odds = parse_nar_official_table(place_path, "place_odds") if place_path is not None else {}
+    runner_numbers = sorted(set(win_odds) | set(place_odds))
+    if not runner_numbers:
+        return []
+
+    snapshot_at = datetime.now(timezone.utc).isoformat()
+    rows: list[dict[str, Any]] = []
+    for runner_number in runner_numbers:
+        row: dict[str, Any] = {
+            "race_id": race_id,
+            "runner_number": runner_number,
+            "odds_snapshot_at": snapshot_at,
+            "odds_source": "nar_official",
         }
         row.update(place_odds.get(runner_number, {}))
         row.update(win_odds.get(runner_number, {}))
@@ -722,6 +1189,7 @@ def parse_jra_odds_api_file_with_mapping(path: Path, html_path: Path | None = No
             "race_id": race_id,
             "runner_number": runner_number,
             "odds_snapshot_at": official_datetime or snapshot_at,
+            "odds_source": "netkeiba_jra_api",
         }
         if horse_name:
             row["horse_name"] = horse_name
@@ -753,6 +1221,11 @@ def load_live_odds_rows(raw_dir: Path) -> list[dict[str, Any]]:
         rows.extend(parse_live_odds_file(path))
     for path in sorted(odds_dir.glob("*_jra_b1_api.jsonp")):
         rows.extend(parse_jra_odds_api_file(path))
+    for path in sorted(odds_dir.glob("*_jra_official_b1.html")):
+        rows.extend(parse_jra_official_odds_file(path))
+    for path in sorted(odds_dir.glob("*_nar_official_tan.html")):
+        place_path = path.with_name(path.name.replace("_tan.html", "_fuku.html"))
+        rows.extend(parse_nar_official_odds_files(path, place_path))
     return rows
 
 
@@ -932,6 +1405,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-import", action="store_true")
     parser.add_argument("--skip-enrich", action="store_true")
     parser.add_argument("--include-odds", action="store_true")
+    parser.add_argument(
+        "--no-official-jra-odds",
+        dest="include_official_jra_odds",
+        action="store_false",
+        help="Disable JRA official odds fallback/verification.",
+    )
+    parser.add_argument(
+        "--no-official-nar-odds",
+        dest="include_official_nar_odds",
+        action="store_false",
+        help="Disable NAR official odds fallback/verification.",
+    )
+    parser.set_defaults(include_official_jra_odds=True, include_official_nar_odds=True)
     parser.add_argument(
         "--market",
         choices=["all", "JRA", "NAR"],

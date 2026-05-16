@@ -100,6 +100,9 @@ class Runner(BaseModel):
     rating: int
     odds: float
     placeOdds: float | None = None
+    oddsSource: str | None = None
+    oddsSources: list[str] | None = None
+    oddsVerificationStatus: str | None = None
     scratched: bool = False
     runnerStatus: str | None = None
     tags: list[str]

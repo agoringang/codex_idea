@@ -6,6 +6,7 @@ import importlib.util
 import os
 import re
 import sys
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -336,11 +337,102 @@ def _auto_predict_missing_finished_races(races: list[dict[str, Any]], start_date
     return count
 
 
+def _compact_name(value: Any) -> str:
+    return re.sub(r"[\s\u3000・･\-\(\)（）]+", "", str(value or "")).lower()
+
+
+def _odds_source_name(row: dict[str, Any]) -> str:
+    source = str(row.get("odds_source") or "").strip()
+    if source == "jra_official":
+        return "jra_official"
+    if source == "nar_official":
+        return "nar_official"
+    if source == "netkeiba_jra_api":
+        return "netkeiba_jra_api"
+    if source == "netkeiba_html":
+        return "netkeiba_html"
+    return source or "unknown"
+
+
+def _odds_public_source_label(sources: list[str]) -> str:
+    source_set = set(sources)
+    has_official = "jra_official" in source_set
+    has_nar_official = "nar_official" in source_set
+    has_netkeiba = any(source.startswith("netkeiba") for source in source_set)
+    if has_nar_official and has_netkeiba:
+        return "NAR公式+netkeiba"
+    if has_nar_official:
+        return "NAR公式"
+    if has_official and has_netkeiba:
+        return "JRA公式+netkeiba"
+    if has_official:
+        return "JRA公式"
+    if has_netkeiba:
+        return "netkeiba"
+    return "取得元不明"
+
+
+def _matching_odds_rows(rows: list[dict[str, Any]], runner: dict[str, Any]) -> list[dict[str, Any]]:
+    runner_name = _compact_name(runner.get("name"))
+    matched: list[dict[str, Any]] = []
+    for row in rows:
+        row_name = _compact_name(row.get("horse_name"))
+        if runner_name and row_name and runner_name != row_name:
+            continue
+        matched.append(row)
+    return matched
+
+
+def _choose_odds_row(rows: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str, list[str]]:
+    if not rows:
+        return None, "missing", []
+    sources = sorted({_odds_source_name(row) for row in rows})
+    official_rows = [row for row in rows if _odds_source_name(row) in {"jra_official", "nar_official"}]
+    netkeiba_rows = [row for row in rows if _odds_source_name(row).startswith("netkeiba")]
+    official = official_rows[-1] if official_rows else None
+    latest = official or rows[-1]
+
+    values = [
+        _safe_float(row.get("market_odds"), 0.0)
+        for row in rows
+        if _safe_float(row.get("market_odds"), 0.0) > 1.0
+    ]
+    if official and netkeiba_rows and len(values) >= 2:
+        min_value = min(values)
+        max_value = max(values)
+        tolerance = max(0.1, min_value * 0.02)
+        if max_value - min_value <= tolerance:
+            return official, "confirmed", sources
+        return official, "source_mismatch_official_used", sources
+    if official:
+        return official, "official_single_source", sources
+    return latest, "single_source", sources
+
+
+def _with_odds_verification_tag(tags: list[Any], status: str, sources: list[str]) -> list[str]:
+    cleaned = [
+        str(tag)
+        for tag in tags
+        if not re.fullmatch(r"(オッズ二重確認|JRA公式オッズ|NAR公式オッズ|netkeibaオッズ|オッズ差異確認)", str(tag))
+    ]
+    if status == "confirmed":
+        return [*cleaned, "オッズ二重確認"]
+    if status == "source_mismatch_official_used":
+        return [*cleaned, "オッズ差異確認"]
+    if "jra_official" in sources:
+        return [*cleaned, "JRA公式オッズ"]
+    if "nar_official" in sources:
+        return [*cleaned, "NAR公式オッズ"]
+    if any(source.startswith("netkeiba") for source in sources):
+        return [*cleaned, "netkeibaオッズ"]
+    return cleaned
+
+
 def _apply_live_odds_to_races(races: list[dict[str, Any]], odds_rows: list[dict[str, Any]]) -> int:
     if not races or not odds_rows:
         return 0
 
-    odds_by_runner: dict[tuple[str, int], dict[str, Any]] = {}
+    odds_by_runner: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
     for row in odds_rows:
         if not isinstance(row, dict):
             continue
@@ -348,7 +440,7 @@ def _apply_live_odds_to_races(races: list[dict[str, Any]], odds_rows: list[dict[
         runner_number = _safe_int(row.get("runner_number"), 0)
         if not race_id or runner_number <= 0:
             continue
-        odds_by_runner[(race_id, runner_number)] = row
+        odds_by_runner[(race_id, runner_number)].append(row)
 
     updated = 0
     for race in races:
@@ -359,7 +451,8 @@ def _apply_live_odds_to_races(races: list[dict[str, Any]], odds_rows: list[dict[
             if not isinstance(runner, dict):
                 continue
             number = _safe_int(runner.get("number"), 0)
-            odds_row = odds_by_runner.get((race_id, number))
+            candidates = _matching_odds_rows(odds_by_runner.get((race_id, number), []), runner)
+            odds_row, verification_status, odds_sources = _choose_odds_row(candidates)
             if not odds_row:
                 continue
 
@@ -375,9 +468,20 @@ def _apply_live_odds_to_races(races: list[dict[str, Any]], odds_rows: list[dict[
             if odds_rank > 0:
                 tags = runner.get("tags") if isinstance(runner.get("tags"), list) else []
                 tags = [tag for tag in tags if not re.fullmatch(r"\d+人気", str(tag))]
-                runner["tags"] = [*tags, f"{odds_rank}人気"]
+                runner["tags"] = _with_odds_verification_tag(
+                    [*tags, f"{odds_rank}人気"],
+                    verification_status,
+                    odds_sources,
+                )
+            else:
+                tags = runner.get("tags") if isinstance(runner.get("tags"), list) else []
+                runner["tags"] = _with_odds_verification_tag(tags, verification_status, odds_sources)
             if odds_row.get("odds_snapshot_at"):
                 runner["oddsSnapshotAt"] = str(odds_row.get("odds_snapshot_at"))
+            if odds_sources:
+                runner["oddsSources"] = odds_sources
+                runner["oddsSource"] = _odds_public_source_label(odds_sources)
+                runner["oddsVerificationStatus"] = verification_status
 
         if race_updated:
             race["sourceCheckedAt"] = datetime.now(timezone.utc).isoformat()
@@ -458,7 +562,11 @@ def ingest_netkeiba_window(
         race_date_text = start_date
         if not race_date_text:
             inferred_date = scraper.infer_local_date_from_race_id(explicit_race_ids[0])
-            race_date_text = inferred_date.isoformat() if inferred_date is not None else datetime.now(JST).date().isoformat()
+            race_date_text = (
+                inferred_date.isoformat()
+                if inferred_date is not None
+                else datetime.now(JST).date().isoformat()
+            )
         try:
             race_date = datetime.strptime(race_date_text, "%Y-%m-%d").date()
         except ValueError:
@@ -520,6 +628,8 @@ def ingest_netkeiba_window(
         skip_import=False,
         skip_enrich=True,
         include_odds=True,
+        include_official_jra_odds=True,
+        include_official_nar_odds=True,
         market=market_scope,
         enriched_output=None,
         enriched_combined_output=None,

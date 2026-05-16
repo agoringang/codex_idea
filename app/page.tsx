@@ -110,6 +110,9 @@ type Runner = {
   sire?: string;
   damSireId?: string;
   damSire?: string;
+  oddsSource?: string;
+  oddsSources?: string[];
+  oddsVerificationStatus?: string;
   tags?: string[];
 };
 
@@ -941,6 +944,13 @@ function normalizeApiRace(item: any): Race {
       sire: optionalText(runner.sire),
       damSireId: optionalText(runner.damSireId ?? runner.dam_sire_id),
       damSire: optionalText(runner.damSire ?? runner.dam_sire),
+      oddsSource: optionalText(runner.oddsSource ?? runner.odds_source),
+      oddsSources: Array.isArray(runner.oddsSources ?? runner.odds_sources)
+        ? (runner.oddsSources ?? runner.odds_sources).map(String)
+        : undefined,
+      oddsVerificationStatus: optionalText(
+        runner.oddsVerificationStatus ?? runner.odds_verification_status,
+      ),
       tags: Array.isArray(runner.tags) ? runner.tags.map(String) : undefined,
     };
   });
@@ -1853,6 +1863,19 @@ function runnerOddsMeta(runner: Runner, race: Race) {
   const placeLabel = runner.placeOdds ? ` / 複${runner.placeOdds.toFixed(1)}倍` : "";
   const winLabel = hasRunnerWinOdds(runner) ? `単${runner.odds.toFixed(1)}倍` : "単勝未取得";
   return `${winLabel}${placeLabel} / ${popularityText}`;
+}
+
+function runnerOddsSourceLabel(runner: Runner) {
+  if (runner.oddsVerificationStatus === "confirmed") {
+    return "二重確認済み";
+  }
+  if (runner.oddsVerificationStatus === "source_mismatch_official_used") {
+    return "公式優先";
+  }
+  if (runner.oddsSource) {
+    return `${runner.oddsSource}確認`;
+  }
+  return "取得元確認中";
 }
 
 function marketWinProbability(race: Race, runnerNumber: number) {
@@ -5476,6 +5499,15 @@ function RunnerTable({ projections, race }: { projections: RunnerProjection[]; r
                       <strong>{hasRunnerWinOdds(runner) ? `単 ${runner.odds.toFixed(1)}倍` : "単勝 未取得"}</strong>
                       <span>{runner.placeOdds ? `複 ${runner.placeOdds.toFixed(1)}倍` : "複 未取得"}</span>
                       <span>{popularity ? `${popularity}番人気` : "人気不明"}</span>
+                      <span
+                        className={
+                          runner.oddsVerificationStatus === "confirmed"
+                            ? "odds-source verified"
+                            : "odds-source"
+                        }
+                      >
+                        {runnerOddsSourceLabel(runner)}
+                      </span>
                     </>
                   )}
                 </td>

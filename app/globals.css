@@ -2179,6 +2179,16 @@ h1 {
   line-height: 1.25;
 }
 
+.runner-table .odds-source {
+  color: #0b6f61;
+  font-size: 0.62rem;
+  font-weight: 900;
+}
+
+.runner-table .odds-source.verified {
+  color: var(--green);
+}
+
 .runner-condition-inline {
   display: none;
 }
